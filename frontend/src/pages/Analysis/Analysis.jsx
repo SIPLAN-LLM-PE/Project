@@ -1,21 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { 
-  Bell, 
-  ChevronDown, 
-  Upload, 
-  Trash2, 
-  Search, 
-  ZoomIn, 
-  ZoomOut, 
-  Printer, 
-  Menu, 
-  ChevronUp,
-  User,
-  Bot,
-  FileText,
-  FileQuestion
+  Bell, ChevronDown, Upload, Trash2, Search, ZoomIn, ZoomOut, 
+  Printer, Menu, ChevronUp, User, Bot, FileText, FileQuestion 
 } from 'lucide-react';
 
+// Importación de componentes locales
 import { AnalysisMenu } from './components/AnalysisMenu';
 import { ResumenCard } from './components/ResumenCard';
 import { PosturaCard } from './components/PosturaCard';
@@ -28,49 +17,65 @@ import { SujetosProcesalesCard } from './components/SujetosProcesalesCard';
 import { FinancieraCard } from './components/FinancieraCard';
 import { JurisprudenciaDrawer } from './components/JurisprudenciaDrawer';
 import { HistorialDrawer } from './components/HistorialDrawer';
+import { CapacidadDetalleDrawer } from './components/CapacidadDetalleDrawer';
+import { RatingModal } from './components/RatingModal';
 
+// Importación de servicios
 import { apiService } from '../../services/api';
 
-const Analysis = () => {
-  // Estados de interfaz y menús
+// ==========================================
+// CACHÉ DE MEMORIA GLOBAL
+// ==========================================
+let draftAnalysisData = null;
+let draftPdfUrl = null;
+let draftPdfName = "";
+let draftHasDocument = false;
+
+export const Analysis = () => {
+  // 1. ESTADOS DE INTERFAZ
   const [isMenuOpen, setIsMenuOpen] = useState(false);
-  const [isTechnicalTone, setIsTechnicalTone] = useState(false);
+  const [isSimpleTone, setIsSimpleTone] = useState(false);
   const [isChatExpanded, setIsChatExpanded] = useState(false);
   const [isJurisprudenciaOpen, setIsJurisprudenciaOpen] = useState(false);
   const [isHistorialOpen, setIsHistorialOpen] = useState(false);
+  const [isDetalleOpen, setIsDetalleOpen] = useState(false);
+  const [isRatingOpen, setIsRatingOpen] = useState(false);
 
-  const [analysisData, setAnalysisData] = useState(null);
+  // 2. ESTADOS DE DATOS
+  const [analysisData, setAnalysisData] = useState(draftAnalysisData);
   const [textoExpediente, setTextoExpediente] = useState("");
-  // NUEVOS ESTADOS PARA EL BACKEND Y EMPTY STATES
-  const [hasDocument, setHasDocument] = useState(false);
+  const [historialEntries, setHistorialEntries] = useState([]);
+  const [hasDocument, setHasDocument] = useState(draftHasDocument);
   const [isLoading, setIsLoading] = useState(false);
+  const [pdfUrl, setPdfUrl] = useState(draftPdfUrl);
+  const [pdfName, setPdfName] = useState(draftPdfName || "Expediente.pdf"); 
+  
   const fileInputRef = useRef(null);
-  const [pdfUrl, setPdfUrl] = useState(null);
-  const [pdfName, setPdfName] = useState(""); 
-
-  const [chatInput, setChatInput] = useState("");
-  const [chatMessages, setChatMessages] = useState([
-    { rol: 'assistant', contenido: 'Hola, soy el asistente IA. He analizado el expediente del Callao. ¿En qué te puedo ayudar?' }
-  ]);
-  const [isChatLoading, setIsChatLoading] = useState(false);
   const chatScrollRef = useRef(null);
+  
+  const [loadingProgress, setLoadingProgress] = useState(0);
+  const [loadingText, setLoadingText] = useState("Iniciando...");
 
-  // Estado inicial de las tarjetas (todas apagadas por defecto)
+  // 3. ESTADOS DEL CHAT
+  const [chatInput, setChatInput] = useState("");
+  const [isChatLoading, setIsChatLoading] = useState(false);
+  const [chatMessages, setChatMessages] = useState([
+    { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIPLAN. ¿En qué te puedo ayudar?' }
+  ]);
+
+  // 4. CONFIGURACIÓN DE TARJETAS
   const [cardVisibility, setCardVisibility] = useState({
-    resumen: false,
-    postura: false,
-    plazos: false,
-    admisibilidad: false,
-    necesidades: false,
-    capacidad: false,
-    controversias: false,
-    sujetos: false,
-    financiera: false
+    resumen: false, postura: false, plazos: false, admisibilidad: false,
+    necesidades: false, capacidad: false, controversias: false, sujetos: false, financiera: false
   });
 
   const toggleCard = (key) => {
     setCardVisibility(prev => ({ ...prev, [key]: !prev[key] }));
   };
+
+  // ==========================================
+  // BLOQUE DE HOOKS (USE EFFECT)
+  // ==========================================
 
   useEffect(() => {
     if (chatScrollRef.current) {
@@ -78,79 +83,143 @@ const Analysis = () => {
     }
   }, [chatMessages, isChatExpanded]);
 
-  // FUNCIÓN PARA SIMULAR LA SUBIDA AL BACKEND (FastAPI / Mistral)
-    const handleFileUpload = async (event) => {
-        const file = event.target.files[0];
-        if (!file) return;
+  useEffect(() => {
+    draftAnalysisData = analysisData;
+    draftPdfUrl = pdfUrl;
+    draftPdfName = pdfName;
+    draftHasDocument = hasDocument;
+  }, [analysisData, pdfUrl, pdfName, hasDocument]);
 
-        setIsLoading(true);
-        setPdfName(file.name);
-        
-        // Generamos la URL para mostrar el PDF real localmente
-        const url = URL.createObjectURL(file);
-        setPdfUrl(url);
-
-        try {
-        const response = await apiService.uploadExpediente(file);
-        
-        if (response.status === "success" || response.resultados) {
-            setAnalysisData(response.resultados);
-            setTextoExpediente(response.texto_completo || "");
-            setHasDocument(true);
-            setCardVisibility({
-            resumen: true,
-            postura: true,
-            plazos: true,
-            sujetos: true,
-            financiera: true
-            });
-            setChatMessages([{ rol: 'assistant', contenido: 'Expediente cargado con éxito. ¿Tienes alguna pregunta sobre los montos o los plazos?' }]);
-        }
-        } catch (error) {
-        console.error("Error analizando con Mistral:", error);
-        } finally {
-        setIsLoading(false);
-        }
+  useEffect(() => {
+    const handleBeforeUnload = (e) => {
+      if (hasDocument) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
     };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [hasDocument]);
 
-  // Función para eliminar/limpiar el documento
-  const handleClearDocument = () => {
-    if (pdfUrl) {
-      URL.revokeObjectURL(pdfUrl); // Liberar memoria
+  useEffect(() => {
+    if (!isLoading) {
+      setLoadingProgress(0);
+      return;
     }
+    const timer = setInterval(() => {
+      setLoadingProgress((prev) => {
+        const next = prev + (Math.random() * 2.5);
+        if (next >= 95) return 95;
+        return next;
+      });
+    }, 500);
+    return () => clearInterval(timer);
+  }, [isLoading]);
+
+  useEffect(() => {
+    if (loadingProgress < 15) setLoadingText("Escaneando documento PDF...");
+    else if (loadingProgress < 30) setLoadingText("Extrayendo texto (Módulo OCR)...");
+    else if (loadingProgress < 50) setLoadingText("Identificando sujetos procesales...");
+    else if (loadingProgress < 85) setLoadingText("Analizando contexto legal con Mistral IA...");
+    else if (loadingProgress < 95) setLoadingText("Generando auditoría financiera y cargas...");
+    else setLoadingText("Ensamblando informe final, casi listo...");
+  }, [loadingProgress]);
+
+
+  // ==========================================
+  // 5. FUNCIONES DE LÓGICA
+  // ==========================================
+
+  const registrarCambioManual = (descripcion) => {
+    setHistorialEntries(prev => {
+      const nuevaVersion = `v${prev.length + 1}`;
+      const nuevoHito = {
+        id: Date.now(),
+        fecha: new Date().toLocaleString(),
+        version: nuevaVersion,
+        titulo: 'Edición Manual',
+        usuario: 'm.gomez (Sec)',
+        comentario: descripcion,
+        isActual: true
+      };
+      return prev.map(h => ({ ...h, isActual: false })).concat(nuevoHito);
+    });
+  };
+
+  const handleFileUpload = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    setIsLoading(true);
+    setLoadingProgress(0);
+    setPdfName(file.name);
+    
+    const url = URL.createObjectURL(file);
+    setPdfUrl(url);
+
+    try {
+      const response = await apiService.uploadExpediente(file);
+      
+      if (response && (response.status === "success" || response.resultados)) {
+        setLoadingProgress(100);
+        setLoadingText("¡Análisis Completado!");
+
+        setTimeout(() => {
+          const data = response.resultados || response;
+          setAnalysisData(data);
+          setTextoExpediente(response.texto_ocr || response.texto_completo || "");
+          setHasDocument(true);
+
+          const hitoInicial = {
+            id: Date.now(),
+            fecha: new Date().toLocaleString(),
+            version: 'v1',
+            titulo: 'Generación Inicial RAG',
+            usuario: 'Sistema SIPLAN (IA)',
+            comentario: 'Análisis automático completado con éxito.',
+            isActual: true
+          };
+          setHistorialEntries([hitoInicial]);
+
+          setCardVisibility({
+            resumen: true, postura: true, plazos: true, sujetos: true,
+            financiera: true, capacidad: true, controversias: true
+          });
+          
+          setIsLoading(false);
+        }, 600);
+      }
+    } catch (error) {
+      console.error("Error:", error);
+      setLoadingText("Error en el análisis. Revisa la consola.");
+      setTimeout(() => setIsLoading(false), 2000);
+    }
+  };
+
+  const handleClearDocument = () => {
+    if (pdfUrl) URL.revokeObjectURL(pdfUrl);
     setHasDocument(false);
     setPdfUrl(null);
     setPdfName("");
     setAnalysisData(null);
     setTextoExpediente("");
-    setIsChatExpanded(false);
-    setIsMenuOpen(false);
-    // Apagamos todas las tarjetas
+    setHistorialEntries([]); 
     setCardVisibility(Object.keys(cardVisibility).reduce((acc, key) => ({ ...acc, [key]: false }), {}));
-    if (fileInputRef.current) fileInputRef.current.value = "";
+
+    draftAnalysisData = null;
+    draftPdfUrl = null;
+    draftPdfName = "";
+    draftHasDocument = false;
   };
 
   const handleSendChat = async (e) => {
     if (e) e.preventDefault();
-    if (!chatInput.trim()) return;
-
-    // Seguro anti-errores silenciosos
-    if (!textoExpediente) {
-      console.error("Falta el texto del expediente. Revisa el backend.");
-      setChatMessages(prev => [...prev, { 
-        rol: 'assistant', 
-        contenido: '⚠️ Error: No tengo el texto del documento en mi memoria. Vuelve a subir el PDF.' 
-      }]);
-      return;
-    }
+    if (!chatInput.trim() || !textoExpediente) return;
 
     const userMsg = { rol: 'user', contenido: chatInput };
-    const newHistory = [...chatMessages, userMsg];
-    
-    setChatMessages(newHistory);
+    setChatMessages(prev => [...prev, userMsg]);
     setChatInput("");
     setIsChatLoading(true);
-    if (!isChatExpanded) setIsChatExpanded(true); 
 
     try {
       const res = await fetch('http://localhost:8000/api/v1/chat', {
@@ -163,15 +232,65 @@ const Analysis = () => {
           datos_extraidos: analysisData ? analysisData.sujetos_procesales : {}
         })
       });
-      
       const data = await res.json();
       setChatMessages(prev => [...prev, { rol: 'assistant', contenido: data.respuesta }]);
     } catch (error) {
-      setChatMessages(prev => [...prev, { rol: 'assistant', contenido: 'Error de conexión con el motor IA local.' }]);
+      setChatMessages(prev => [...prev, { rol: 'assistant', contenido: 'Error de conexión.' }]);
     } finally {
       setIsChatLoading(false);
     }
   };
+
+const handleExportWord = async () => {
+  if (!analysisData) return;
+  setIsLoading(true);
+
+  const pVal = parseFloat(analysisData.revision_financiera?.petitorio || 0);
+  const gVal = parseFloat(analysisData.revision_financiera?.suma_gastos_sustentados || 0);
+  const diferencia = pVal - gVal;
+
+  try {
+    const exportData = {
+      
+      expediente: pdfName,
+      resumen: isSimpleTone ? analysisData.sintesis_rag?.estandar : analysisData.sintesis_rag?.tecnico,
+      postura: isSimpleTone ? analysisData.postura_defensa?.estandar : analysisData.postura_defensa?.tecnico,
+      
+      // MAPEO CORRECTO SEGÚN TU FUNCIÓN 5.3
+      financiera: {
+        monto_petitorio: pVal.toFixed(2),
+        suma_gastos: gVal.toFixed(2),
+        brecha: diferencia.toFixed(2),
+        estado: (diferencia > 10) ? "BRECHA DETECTADA" : "RAZONABLE"
+      },
+
+      sujetos: analysisData.sujetos_procesales || {},
+      capacidad: analysisData.capacidad_cargas || {},
+      puntos_controvertidos: analysisData.puntos_sugeridos || []
+    };
+
+    const response = await fetch('http://localhost:8000/api/v1/export-word', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(exportData),
+    });
+
+    const blob = await response.blob();
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `Informe_SIPLAN_${pdfName}.docx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } catch (error) {
+    console.error("Error al exportar:", error);
+  } finally {
+    setIsLoading(false);
+  }
+};
+
+  // --- FIN DE LA PARTE 1 (Ahora sigue el return...) ---
 
   return (
     <div className="flex-1 bg-[#f8fafc] flex flex-col h-full overflow-hidden">
@@ -206,8 +325,9 @@ const Analysis = () => {
         
         {/* COLUMNA IZQUIERDA: VISOR DE EXPEDIENTE */}
         <section className="flex-[6] flex flex-col border-r border-slate-300 bg-slate-200 relative min-h-0">
+          
+          {/* BARRA SUPERIOR (Azul) */}
           <div className="bg-[#2546b0] px-4 py-2 flex gap-3 shrink-0">
-            
             <input 
               type="file" 
               ref={fileInputRef}
@@ -215,7 +335,6 @@ const Analysis = () => {
               className="hidden" 
               accept=".pdf"
             />
-
             <button 
               onClick={() => fileInputRef.current.click()}
               disabled={isLoading || hasDocument}
@@ -227,7 +346,6 @@ const Analysis = () => {
                 <><Upload size={14} className="mr-2" /> Subir Expediente</>
               )}
             </button>
-            
             <button 
               onClick={handleClearDocument}
               disabled={!hasDocument}
@@ -237,7 +355,7 @@ const Analysis = () => {
             </button>
           </div>
 
-          {/* Barra de herramientas del PDF (Solo visible si hay documento) */}
+          {/* BARRA DE HERRAMIENTAS DEL PDF (Gris) */}
           <div className={`bg-slate-100 px-4 py-2.5 flex items-center border-b border-slate-300 shrink-0 transition-opacity ${hasDocument ? 'opacity-100' : 'opacity-30 pointer-events-none'}`}>
             <div className="flex items-center text-xs text-slate-700 font-bold">
               <FileText size={14} className="mr-2 text-slate-500" />
@@ -245,10 +363,42 @@ const Analysis = () => {
             </div>
           </div>
 
-        <div className="flex-1 overflow-y-auto p-4 flex justify-center items-center custom-scrollbar bg-slate-300/50">
-            {hasDocument && pdfUrl ? (
-              /* VISOR DE PDF REAL */
-              <div className="w-full h-full bg-white shadow-2xl rounded-lg overflow-hidden border border-slate-300">
+          {/* ZONA PRINCIPAL DE CONTENIDO (Aquí va el PDF, el Empty State o la Carga) */}
+          <div className="flex-1 overflow-y-auto p-4 flex justify-center items-center custom-scrollbar bg-slate-300/50 relative">
+            
+            {/* 1. PANTALLA DE CARGA (Posicionada solo dentro de esta zona) */}
+            {isLoading && (
+              <div className="absolute inset-0 bg-slate-50/95 backdrop-blur-sm z-20 flex flex-col items-center justify-center p-8 transition-opacity">
+                <div className="w-full max-w-sm text-center">
+                  <div className="mb-8 relative flex justify-center">
+                    <Bot size={56} className="text-[#2546b0] animate-pulse" />
+                    <div className="absolute top-0 right-[40%] w-3.5 h-3.5 bg-emerald-400 rounded-full border-2 border-white animate-ping"></div>
+                  </div>
+                  <h3 className="text-lg font-bold text-[#1a3059] mb-2">Analizando Expediente</h3>
+                  <p className="text-[11px] font-medium text-slate-500 mb-8 h-4 transition-all duration-300 uppercase tracking-wide">
+                    {loadingText}
+                  </p>
+                  {/* BARRA DE PROGRESO */}
+                  <div className="w-full bg-slate-200/60 rounded-full h-2.5 mb-3 overflow-hidden shadow-inner">
+                    <div 
+                      className="bg-gradient-to-r from-blue-500 to-[#2546b0] h-full rounded-full transition-all duration-300 ease-out relative"
+                      style={{ width: `${loadingProgress}%` }}
+                    >
+                      <div className="absolute inset-0 bg-white/20 animate-[shimmer_2s_infinite]"></div>
+                    </div>
+                  </div>
+                  <div className="flex justify-between items-center text-[10px] font-bold text-slate-400">
+                    <span>0%</span>
+                    <span className="text-[#2546b0] text-xs">{Math.round(loadingProgress)}%</span>
+                    <span>100%</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* 2. VISOR DEL PDF */}
+            {!isLoading && hasDocument && pdfUrl && (
+              <div className="w-full h-full bg-white shadow-2xl rounded-lg overflow-hidden border border-slate-300 relative z-10">
                 <embed 
                   src={pdfUrl} 
                   type="application/pdf" 
@@ -257,8 +407,10 @@ const Analysis = () => {
                   className="min-h-full"
                 />
               </div>
-            ) : (
-              /* EMPTY STATE DEL VISOR */
+            )}
+
+            {/* 3. EMPTY STATE */}
+            {!isLoading && !hasDocument && (
               <div className="flex flex-col items-center justify-center text-slate-400 -mt-20">
                 <div className="bg-slate-200/50 p-6 rounded-full mb-4">
                   <FileText size={64} className="text-slate-400" />
@@ -269,6 +421,7 @@ const Analysis = () => {
                 </p>
               </div>
             )}
+
           </div>
         </section>
 
@@ -291,29 +444,31 @@ const Analysis = () => {
 
           <AnalysisMenu 
             isMenuOpen={isMenuOpen}
-            isTechnicalTone={isTechnicalTone}
-            setIsTechnicalTone={setIsTechnicalTone}
+            isSimpleTone={isSimpleTone}
+            setIsSimpleTone={setIsSimpleTone}
             cardVisibility={cardVisibility}
             toggleCard={toggleCard}
             onOpenJurisprudencia={() => { setIsJurisprudenciaOpen(true); setIsMenuOpen(false); }}
             onOpenHistorial={() => { setIsHistorialOpen(true); setIsMenuOpen(false); }}
+            onExportWord={handleExportWord}
+            onOpenRating={() => setIsRatingOpen(true)}
           />
 
         <div className="flex-1 overflow-y-auto p-6 pb-[180px] custom-scrollbar bg-[#f8fafc] z-10 flex flex-col">
             {hasDocument && analysisData ? (
               <>
                 {/* 👇 AQUI PASAMOS analysisData.sintesis_rag 👇 */}
-                {cardVisibility.resumen && <ResumenCard data={analysisData.sintesis_rag} />}
+                {cardVisibility.resumen && <ResumenCard data={analysisData.sintesis_rag} isSimpleTone={isSimpleTone}/>}
                 
-                {cardVisibility.postura && <PosturaCard data={analysisData.postura_defensa} />}
+                {cardVisibility.postura && <PosturaCard data={analysisData.postura_defensa} isSimpleTone={isSimpleTone} />}
                 {cardVisibility.plazos && <PlazosCard data={analysisData.plazos} />}
                 {cardVisibility.admisibilidad && (<AdmisibilidadCard data={analysisData.admisibilidad} />
 )}
-                {cardVisibility.necesidades && <NecesidadesCard />}
-                {cardVisibility.capacidad && <CapacidadCargasCard />}
+                {cardVisibility.necesidades && <NecesidadesCard data={analysisData.revision_financiera} />}
+                {cardVisibility.capacidad && <CapacidadCargasCard data={analysisData.capacidad_cargas} onOpenDetalle={() => setIsDetalleOpen(true)} />}
                 
                 {/* 👇 AQUI PASAMOS los puntos controvertidos 👇 */}
-                {cardVisibility.controversias && <ControversiasCard puntos={analysisData.puntos_sugeridos} />}
+                {cardVisibility.controversias && <ControversiasCard puntos={analysisData.puntos_sugeridos} onNotifyChange={registrarCambioManual} />}
                 
                 {cardVisibility.sujetos && <SujetosProcesalesCard data={analysisData.sujetos_procesales} />}
                 {cardVisibility.financiera && <FinancieraCard data={analysisData.revision_financiera} />}
@@ -412,8 +567,21 @@ const Analysis = () => {
       </main>
 
       <JurisprudenciaDrawer isOpen={isJurisprudenciaOpen} onClose={() => setIsJurisprudenciaOpen(false)} />
-      <HistorialDrawer isOpen={isHistorialOpen} onClose={() => setIsHistorialOpen(false)} />
-
+      <HistorialDrawer 
+        isOpen={isHistorialOpen} 
+        onClose={() => setIsHistorialOpen(false)} 
+        historial={historialEntries} 
+      />
+      <CapacidadDetalleDrawer 
+          isOpen={isDetalleOpen} 
+          onClose={() => setIsDetalleOpen(false)} 
+          data={analysisData?.capacidad_cargas}
+      />
+      <RatingModal 
+         isOpen={isRatingOpen} 
+         onClose={() => setIsRatingOpen(false)} 
+         expediente={pdfName} 
+       />
     </div>
   );
 };

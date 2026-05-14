@@ -1,4 +1,5 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Body, APIRouter
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import time
@@ -14,6 +15,21 @@ from datetime import datetime, timedelta
 import numpy as np # La magia para los días hábiles
 from pydantic import BaseModel
 from typing import List
+from docx import Document
+from docx.shared import Pt, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.shared import Pt, Inches, RGBColor
+
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+router = APIRouter()
 
 class MensajeChat(BaseModel):
     rol: str  # "user" o "assistant"
@@ -56,6 +72,9 @@ def modulo_ocr_tesseract(contenido_pdf: bytes) -> str:
     MVP: Intenta extraer texto nativo primero. Si está vacío (es un escaneo),
     se requerirá OCR profundo con Tesseract.
     """
+    import io
+    import PyPDF2
+    
     texto_extraido = ""
     try:
         # Usamos io.BytesIO para leer el archivo en memoria sin guardarlo en disco
@@ -67,8 +86,16 @@ def modulo_ocr_tesseract(contenido_pdf: bytes) -> str:
             if texto_pagina:
                 texto_extraido += texto_pagina + "\n"
         
-        # Limpieza básica del texto para los Juzgados del Callao
+        # --- ZONA DE FILTRADO Y LIMPIEZA ---
+        
+        # 1. Limpieza estructural básica
         texto_extraido = texto_extraido.replace("..", "").replace("\n\n", "\n").strip()
+        
+        # 2. Filtro Anti-Basura Digital del OCR
+        # Elimina el rombo de error (), su código unicode (\ufffd) y caracteres nulos del escáner
+        texto_extraido = texto_extraido.replace("", "").replace("\ufffd", "").replace("\x00", "")
+        
+        # -----------------------------------
         
         if not texto_extraido:
             # Si el texto está vacío, significa que el PDF son puras imágenes escaneadas
@@ -307,46 +334,46 @@ def modulo_verificacion_admisibilidad(texto_plano: str) -> list:
 
 def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
     """
-    Versión 5.1: Mapeo Atómico Dinámico.
-    Garantiza precisión de centavos y se adapta a cualquier monto de petitorio.
+    Versión 5.3: Auditoría Financiera Blindada.
+    Incluye Filtro Anti-Alucinación: Valida que los montos extraídos por la IA 
+    existan realmente en el documento original.
     """
-    import json, re
+    import json, re, requests
 
-    # 1. ESCANEO INICIAL: Python encuentra los montos reales
+    # 1. ESCANEO INICIAL: Python encuentra todos los números reales del texto
     patron_monto = r'(?:S/|S/\.)\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)'
     matches = list(re.finditer(patron_monto, texto_plano))
     
-    mapeo_montos = {}
+    montos_reales_en_texto = [] # Lista de validación (La "Verdad Absoluta")
     
     for i, match in enumerate(matches):
         valor_raw = match.group(1).replace(',', '')
         try:
-            valor_float = float(valor_raw)
-            token = f"[[MONTO_ID_{i}]]"
-            mapeo_montos[token] = valor_float
+            val = float(valor_raw)
+            montos_reales_en_texto.append(val)
         except: continue
 
-    # 2. PROMPT DE CLASIFICACIÓN
+    # 2. PROMPT DE CLASIFICACIÓN (Plantilla en blanco)
     fragmentos = re.findall(r'([^.]{0,70}(?:S/|S/\.)\s*\d+(?:[.,]\d{1,2})?[^.]{0,70})', texto_plano)
     contexto_ia = "\n".join(fragmentos)
 
+    # El prompt ahora usa 0.0 y textos genéricos para no sesgar a la IA
     prompt_ia = f"""
-    Eres un perito contable judicial. Tu tarea es categorizar los montos encontrados.
+    Eres un perito contable judicial. Analiza los montos del expediente.
     
     TEXTO A ANALIZAR:
     {contexto_ia}
 
     INSTRUCCIONES:
-    - Identifica el PETITORIO (Pensión total que se pide en la demanda).
-    - Identifica gastos de ALIMENTACIÓN (comida, mercado).
-    - Identifica gastos de SALUD (farmacia, medicinas).
-    - Devuelve solo el monto que veas en el texto.
+    1. Identifica el PETITORIO (Pensión total demandada).
+    2. Identifica los gastos acreditados (Alimentación, Salud, Educación, Vivienda).
+    3. IMPORTANTE: Si NO hay gastos detallados en el texto, deja la lista "gastos" VACÍA: []
 
-    Responde ESTRICTAMENTE con este JSON:
+    Responde ESTRICTAMENTE con esta estructura JSON:
     {{
       "petitorio_detectado": 0.0,
       "gastos": [
-        {{ "concepto": "Salud/Alimentación", "monto_exacto": 0.0 }}
+        {{ "concepto": "Categoría del gasto", "monto_exacto": 0.0, "observacion": "Evidencia o documento" }}
       ]
     }}
     """
@@ -354,14 +381,9 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
     try:
         url = "http://localhost:11434/api/generate"
         payload = {"model": "mistral", "prompt": prompt_ia, "format": "json", "stream": False, "options": {"temperature": 0}}
-        
         response = requests.post(url, json=payload, timeout=45)
         raw_res = json.loads(response.json().get("response", "{}"))
 
-        # --- LÓGICA DE NEGOCIO DINÁMICA ---
-        
-        # Le damos prioridad a spaCy (que es más exacto con la estructura del documento) 
-        # Si spaCy falló (0.0), confiamos en lo que detectó Mistral.
         pa_ia = float(raw_res.get("petitorio_detectado", 0))
         pa = monto_p_spacy if monto_p_spacy > 0 else pa_ia
 
@@ -371,71 +393,181 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
 
         for g in detalles_ia:
             monto_ia = float(g.get("monto_exacto", 0))
-            monto_real = monto_ia
+            if monto_ia <= 0: continue # Ignoramos los ceros de la plantilla
             
-            # Recuperamos los decimales exactos mapeando con el escaneo de Python
-            for token_val in mapeo_montos.values():
+            # --- FILTRO ESTRICTO ANTI-ALUCINACIÓN ---
+            monto_validado = None
+            for token_val in montos_reales_en_texto:
+                # Si el monto de la IA tiene una diferencia menor a 1 sol con un monto real, es válido
                 if abs(token_val - monto_ia) < 1.0: 
-                    monto_real = token_val
+                    monto_validado = token_val
                     break
             
-            # Condición dinámica: el gasto no puede ser igual al petitorio detectado
-            if monto_real > 0 and abs(monto_real - pa) > 10:
+            # Si Python NO encontró este monto en el PDF original, lo descartamos
+            if not monto_validado:
+                print(f"Alerta de IA interceptada: Se intentó agregar S/ {monto_ia} inexistente.")
+                continue
+            
+            # Condición de negocio: El gasto no puede ser igual al petitorio total
+            if monto_validado > 0 and abs(monto_validado - pa) > 10:
                 detalles_finales.append({
-                    "concepto": g.get("concepto"),
-                    "monto": monto_real,
-                    "evidencia": "Detección por contexto legal"
+                    "concepto": g.get("concepto", "Gasto general"),
+                    "monto": monto_validado,
+                    "observacion": g.get("observacion", "Mención en el texto")
                 })
-                suma_gn += monto_real
+                suma_gn += monto_validado
 
-        # Cálculo de la Brecha B = Pa - Σ Gn
+        # Cálculos finales de la HU18
         brecha = pa - suma_gn
-        porcentaje_b = (brecha / pa * 100) if pa > 0 else 0
+        hay_alerta = brecha > 10.0
 
         return {
             "petitorio": pa,
             "suma_gastos_sustentados": round(suma_gn, 2),
             "brecha_valor": round(brecha, 2),
-            "porcentaje_brecha": round(abs(porcentaje_b), 1),
+            "porcentaje_brecha": round((brecha/pa*100), 1) if pa > 0 else 0,
             "detalles_gastos": detalles_finales,
-            "alerta": porcentaje_b > 15.0
+            "alerta": hay_alerta
         }
 
     except Exception as e:
-        # El bloque except también debe ser dinámico, usando monto_p_spacy
         print(f"Error en auditoría financiera: {e}")
         return {"petitorio": monto_p_spacy, "suma_gastos_sustentados": 0, "brecha_valor": monto_p_spacy, "porcentaje_brecha": 100, "detalles_gastos": [], "alerta": True}
 
-def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
+def modulo_capacidad_cargas(texto_plano: str) -> dict:
     """
-    Versión Pro: Genera síntesis legales exhaustivas y detalladas
-    optimizadas para el sistema judicial de familia.
+    Versión 2.0: Módulo de Capacidad Económica y Soporte Judicial (HU14).
+    Extrae ingresos, dependientes y calcula topes de embargo según el Art. 648 CPC.
     """
+    import json, requests
+
     if not texto_plano or texto_plano == "[TEXTO NO DETECTADO - REQUIERE OCR PROFUNDO]":
         return {
-            "resumen": "No se pudo generar síntesis por falta de texto procesable.",
-            "postura": "Desconocida.",
-            "puntos_controvertidos": []
+            "ingresos": [], "dependientes": [], "total_ingresos": 0, "total_cargas": 0, 
+            "tope_legal_60": 0, "margen_libre": 0, "ratio_disponibilidad": 0, 
+            "carga_nivel": "Desconocida", "mensaje": "Sin datos"
         }
 
-    # 1. Prompt de Alta Definición (Evitamos la palabra "breve")
     prompt = f"""
-    Eres un Secretario Judicial Senior de la Corte Superior del Callao. 
-    Tu objetivo es realizar un análisis técnico EXHAUSTIVO del expediente.
+    Eres un Asistente Social de los Juzgados de Familia del Callao.
+    Analiza el texto y extrae la capacidad económica del demandado (quien debe pagar los alimentos).
 
-    INSTRUCCIONES DE DETALLE:
-    - En 'resumen': Describe los hechos, el vínculo familiar, las necesidades específicas del menor mencionadas y la fundamentación legal (artículos del Código Civil).
-    - En 'postura': Si existe contestación, detalla los argumentos de defensa, si el demandado admite o niega el vínculo, y cuál es su situación económica declarada. 
-    - Si no hay contestación, escribe "Pendiente de contestación: El expediente solo contiene la etapa postulatoria de demanda".
+    INSTRUCCIONES:
+    1. INGRESOS: Busca cualquier mención al sueldo, remuneración, o ingresos fijos/variables del demandado. 
+    2. DEPENDIENTES: Identifica a las personas que dependen del demandado (hijos alimentistas, otros hijos, cónyuge, padres). Si se menciona una pensión que ya paga, anota el monto en "monto_carga".
+    3. Si no hay información de ingresos o dependientes en el texto, deja las listas VACÍAS []. NO inventes datos.
 
     TEXTO DEL EXPEDIENTE:
-    {texto_plano[:8000]} 
+    {texto_plano[:8000]}
 
-    Responde ESTRICTAMENTE en este formato JSON:
+    Responde ESTRICTAMENTE con este formato JSON:
     {{
-        "resumen": "Análisis detallado de hechos, derecho y pretensión...",
-        "postura": "Análisis minucioso de la defensa y contrapropuesta...",
-        "puntos_controvertidos": ["punto fáctico 1", "punto jurídico 2", "punto económico 3"]
+        "ingresos": [
+            {{ "tipo": "Remuneración Principal", "monto": 3850.0, "estado": "Validado boleta/RUC" }}
+        ],
+        "dependientes": [
+            {{ "tipo": "Hijo Alimentista", "detalle": "Dependiente Directo", "monto_carga": 0.0 }}
+        ]
+    }}
+    """
+
+    try:
+        url = "http://localhost:11434/api/generate"
+        payload = {"model": "mistral", "prompt": prompt, "format": "json", "stream": False, "options": {"temperature": 0.1}}
+        response = requests.post(url, json=payload, timeout=60)
+        
+        data = json.loads(response.json().get("response", "{}"))
+        
+        ingresos = data.get("ingresos", [])
+        dependientes = data.get("dependientes", [])
+
+        # --- 1. Cálculos Base ---
+        total_ingresos = sum(float(item.get("monto") or 0) for item in ingresos)
+        total_cargas_existentes = sum(float(item.get("monto_carga") or 0) for item in dependientes)
+        
+        # --- 2. CÁLCULO LEGAL CPC 648 (NUEVO) ---
+        # El 60% es lo máximo que el Juez puede embargar por ley
+        tope_legal_60 = total_ingresos * 0.60
+        # El "Margen Libre" es lo que queda de ese 60% tras restar lo que ya paga
+        margen_disponible_sentencia = tope_legal_60 - total_cargas_existentes
+
+        # --- 3. Análisis de Ratio y Alertas ---
+        ratio = 0
+        mensaje_ratio = "No se detectaron ingresos para calcular el ratio."
+        carga_nivel = "Desconocida"
+
+        if total_ingresos > 0:
+            ingreso_disponible = total_ingresos - total_cargas_existentes
+            ratio = (ingreso_disponible / total_ingresos) * 100
+            
+            if ratio < 40:
+                carga_nivel = "Carga Alta"
+                mensaje_ratio = f"Ratio de disponibilidad crítico del {ratio:.1f}%. Posible insolvencia."
+            elif ratio < 70:
+                carga_nivel = "Carga Media"
+                mensaje_ratio = f"Ratio de disponibilidad del {ratio:.1f}% de ingresos reales tras cargas."
+            else:
+                carga_nivel = "Carga Baja"
+                mensaje_ratio = f"Amplia disponibilidad económica ({ratio:.1f}%)."
+
+        # --- 4. Ensamblaje del JSON Final ---
+        return {
+            "ingresos": ingresos,
+            "dependientes": dependientes,
+            "total_ingresos": total_ingresos,
+            "total_cargas": total_cargas_existentes,
+            "tope_legal_60": round(tope_legal_60, 2),
+            "margen_libre": round(max(0, margen_disponible_sentencia), 2),
+            "ratio_disponibilidad": round(ratio, 1),
+            "carga_nivel": carga_nivel,
+            "mensaje": mensaje_ratio
+        }
+
+    except Exception as e:
+        print(f"Error en módulo de cargas: {e}")
+        return {
+            "ingresos": [], "dependientes": [], "total_ingresos": 0, "total_cargas": 0, 
+            "tope_legal_60": 0, "margen_libre": 0, "ratio_disponibilidad": 0, 
+            "carga_nivel": "Error", "mensaje": "Error de análisis"
+        }
+
+def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
+    import json, requests
+
+    dem_nombre = entidades.get("demandante", {}).get("nombre", "No detectado").title()
+    demdo_nombre = entidades.get("demandado", {}).get("nombre", "No detectado").title()
+
+    prompt = f"""
+    Eres un Magistrado Experto de la Corte Superior de Justicia del Callao.
+    Tu tarea es redactar un INFORME LEGAL EXTENSO Y DESCRIPTIVO sobre este expediente.
+
+    REGLA DE ORO (ANÁLISIS DE CONTEXTO):
+    Lee el texto cuidadosamente antes de redactar.
+    - ESCENARIO A (CONCILIACIÓN/ACUERDO): Si el texto indica que las partes llegaron a un acuerdo (ej. Audiencia de Conciliación), descríbelo detalladamente: ¿Cuál fue el monto acordado? ¿Cuándo y cómo se pagará? NO inventes defensas ni negaciones.
+    - ESCENARIO B (CONTESTACIÓN): Si hay una defensa explícita, detalla los argumentos del demandado.
+    - ESCENARIO C (REBELDÍA): Si no hay contestación ni acuerdo, indica que está pendiente.
+
+    REGLAS DE EXTENSIÓN Y FORMATO:
+    - REDACCIÓN AMPLIA: Los campos de resumen y postura deben tener MÚLTIPLES PÁRRAFOS. Escribe al menos 150 palabras por campo.
+    - DETALLE FACTUAL: Extrae y menciona montos exactos (S/.), fechas, nombres de menores y condiciones.
+    - PROSA FLUIDA: Escribe en formato de texto continuo, sin usar viñetas.
+
+    TEXTO DEL EXPEDIENTE A ANALIZAR:
+    {texto_plano[:12000]} 
+
+    Responde ÚNICAMENTE con este JSON (rellena los campos con descripciones exhaustivas):
+    {{
+        "resumen": {{
+            "estandar": "Redacta un resumen MUY DETALLADO en lenguaje ciudadano. Explica el contexto inicial y la resolución o estado actual. Si conciliaron, explica los términos del acuerdo de forma extensa y clara.",
+            "tecnico": "Redacta un análisis jurídico PROFUNDO. Usa términos legales (ej. pretensión, acuerdo conciliatorio, cosa juzgada, obligación alimentaria). Detalla las condiciones exactas del acta o del petitorio."
+        }},
+        "postura": {{
+            "estandar": "Si hubo acuerdo, explica ampliamente la postura de aceptación y compromiso del demandado. Si hubo contestación, explica su defensa a detalle. Si no hay nada, escribe 'Pendiente de contestación.'",
+            "tecnico": "Si hubo acuerdo, analiza el reconocimiento de la obligación (Art. 330 CPC) y los términos pactados. Si hubo contestación, analiza sus excepciones procesales. Si no, escribe 'Pendiente de contestación.'"
+        }},
+        "puntos_controvertidos": [
+            {{ "tema": "Determinación de la Obligación", "sugerencia": "Determinar si el monto fijado o solicitado cubre las necesidades del alimentista." }}
+        ]
     }}
     """
 
@@ -447,28 +579,31 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
             "format": "json",
             "stream": False,
             "options": {
-                "temperature": 0.1,   # <--- CLAVE 1: Cercano a 0 para que no varíe entre pruebas
-                "num_ctx": 8192,      # <--- CLAVE 2: Amplía la memoria para leer expedientes largos
+                "temperature": 0.2, # Bajamos a 0.2 para evitar que alucine, pero mantenga detalle
+                "num_predict": 1500, 
                 "top_p": 0.9,
-                "repeat_penalty": 1.2 # <--- Evita que la IA se repita y la obliga a buscar palabras nuevas
+                "num_ctx": 12000
             }
         }
         
-        response = requests.post(url, json=payload, timeout=90)
+        response = requests.post(url, json=payload, timeout=400)
         response.raise_for_status()
         
         analisis_json = json.loads(response.json().get("response", "{}"))
         
         return {
-            "resumen": analisis_json.get("resumen", "Error en síntesis detallada."),
-            "postura": analisis_json.get("postura", "Error en análisis de defensa."),
+            "resumen": analisis_json.get("resumen", {"estandar": "Error de generación.", "tecnico": "Error de generación."}),
+            "postura": analisis_json.get("postura", {"estandar": "Error.", "tecnico": "Error."}),
             "puntos_controvertidos": analisis_json.get("puntos_controvertidos", [])
         }
 
     except Exception as e:
         print(f"Error crítico en RAG: {e}")
-        return {"resumen": "Error de conexión.", "postura": "Error.", "puntos_controvertidos": []}
-
+        return {
+            "resumen": {"estandar": "Error de conexión.", "tecnico": "Fallo en motor local."}, 
+            "postura": {"estandar": "Error.", "tecnico": "Fallo de conexión."}, 
+            "puntos_controvertidos": []
+        }
 # --- ENDPOINTS (API) ---
 
 @app.post("/api/v1/analyze-document")
@@ -491,6 +626,7 @@ async def analizar_expediente(file: UploadFile = File(...)):
         analisis_plazos = modulo_extraccion_plazos(texto_extraido)
         analisis_admisibilidad = modulo_verificacion_admisibilidad(texto_extraido)
         analisis_financiero = modulo_auditoria_financiera(texto_extraido, monto_p)
+        analisis_cargas = modulo_capacidad_cargas(texto_extraido)
         
         # 3. Ensamblar la respuesta JSON para el frontend
         respuesta = {
@@ -510,7 +646,8 @@ async def analizar_expediente(file: UploadFile = File(...)):
                 "plazos": analisis_plazos,
 
                 "admisibilidad": analisis_admisibilidad,
-                "revision_financiera": analisis_financiero
+                "revision_financiera": analisis_financiero,
+                "capacidad_cargas": analisis_cargas
             }
         }
         return respuesta
@@ -580,6 +717,117 @@ async def chat_expediente(request: ChatRequest):
     except Exception as e:
         print(f"Error en Chat IA: {e}")
         raise HTTPException(status_code=500, detail="Error de comunicación con LLM.")
+
+@app.post("/api/v1/export-word")
+async def export_word(data: dict = Body(...)):
+    doc = Document()
+    
+    # 1. Configuración de márgenes
+    for section in doc.sections:
+        section.top_margin = Inches(0.5)
+        section.bottom_margin = Inches(0.5)
+
+    # 2. Encabezado con Tabla
+    header = doc.sections[0].header
+    for p in header.paragraphs:
+        p.text = ""
+        
+    htable = header.add_table(1, 2, width=Inches(6.5))
+    cell_izq = htable.cell(0, 0)
+    cell_der = htable.cell(0, 1)
+    
+    p_izq = cell_izq.paragraphs[0]
+    run_izq = p_izq.add_run("SIGEJA\n")
+    run_izq.bold = True
+    p_izq.add_run("Sistema Inteligente de Gestión Judicial de Alimentos")
+    
+    p_der = cell_der.paragraphs[0]
+    p_der.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    p_der.add_run(f"EXP. N° {data.get('expediente', '00245-2026-0-1801')}\nCorte Superior del Callao")
+
+    # 3. Título del Informe
+    doc.add_paragraph() 
+    title = doc.add_paragraph()
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run_t = title.add_run("INFORME ESTRUCTURADO DE ANÁLISIS JURÍDICO")
+    run_t.bold = True
+    run_t.font.size = Pt(16)
+
+    # --- SECCIONES DE DATOS ---
+
+    # 1. Resumen Ejecutivo
+    doc.add_heading('1. Resumen Ejecutivo', level=1)
+    resumen_texto = data.get('resumen', 'Sin información.')
+    doc.add_paragraph(str(resumen_texto))
+
+    # 2. Postura de Defensa
+    doc.add_heading('2. Postura de Contestación', level=1)
+    postura_texto = data.get('postura', 'Sin postura detectada.')
+    doc.add_paragraph(str(postura_texto))
+
+    # 3. Sujetos Procesales (Iteramos sobre el diccionario de nombres)
+    doc.add_heading('3. Sujetos Procesales', level=1)
+    sujetos = data.get('sujetos', {})
+    if sujetos:
+        for rol, datos in sujetos.items():
+            nombre = datos.get('nombre', 'No detectado') if isinstance(datos, dict) else str(datos)
+            p = doc.add_paragraph(style='List Bullet')
+            p.add_run(f"{rol.capitalize()}: ").bold = True
+            p.add_run(str(nombre))
+
+    # 4. Capacidad Económica y Cargas
+    doc.add_heading('4. Capacidad Económica y Cargas', level=1)
+    capacidad = data.get('capacidad', {})
+    doc.add_paragraph(f"Total Ingresos Mensuales: S/. {capacidad.get('total_ingresos', '0.00')}")
+    doc.add_paragraph(f"Nivel de Carga: {capacidad.get('carga_nivel', 'Desconocido')}")
+    doc.add_paragraph(f"Ratio de Disponibilidad: {capacidad.get('ratio_disponibilidad', '0')}%")
+
+    # 5. REVISIÓN FINANCIERA (Sincronizado con v5.3)
+    doc.add_heading('5. AUDITORÍA FINANCIERA', level=1)
+    financiera = data.get('financiera', {})
+    
+    p_fin = doc.add_paragraph()
+    p_fin.add_run("Monto Petitorio: ").bold = True
+    p_fin.add_run(f"S/. {financiera.get('monto_petitorio', '0.00')}\n")
+    
+    p_fin.add_run("Gastos Sustentados: ").bold = True
+    p_fin.add_run(f"S/. {financiera.get('suma_gastos', '0.00')}\n")
+    
+    p_fin.add_run("Brecha de Necesidad: ").bold = True
+    p_fin.add_run(f"S/. {financiera.get('brecha', '0.00')}\n")
+    
+    # Mostrar el estado con color (Verde si es razonable, Rojo si hay alerta)
+    estado = financiera.get('estado', 'No evaluado')
+    run_estado = p_fin.add_run(f"Estado: {estado}")
+    run_estado.bold = True
+    if "BRECHA" in estado:
+        run_estado.font.color.rgb = RGBColor(0xFF, 0x00, 0x00) # Rojo
+    else:
+        run_estado.font.color.rgb = RGBColor(0x2E, 0x7D, 0x32) # Verde
+
+    # 6. Puntos Controvertidos Sugeridos
+    doc.add_heading('6. Puntos Controvertidos Sugeridos', level=1)
+    puntos = data.get('puntos_controvertidos', [])
+    if puntos:
+        for p in puntos:
+            p_list = doc.add_paragraph(style='List Bullet')
+            p_list.add_run(f"{p.get('tema', 'Punto')}: ").bold = True
+            p_list.add_run(p.get('sugerencia', ''))
+    else:
+        doc.add_paragraph("No hay puntos controvertidos registrados.")
+
+    # Enviar para descarga
+    file_stream = io.BytesIO()
+    doc.save(file_stream)
+    file_stream.seek(0)
+
+    return StreamingResponse(
+        file_stream,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": "attachment; filename=Informe_SIPLAN.docx"}
+    )
+
+app.include_router(router) 
 
 # Punto de entrada para levantar el servidor localmente
 if __name__ == "__main__":

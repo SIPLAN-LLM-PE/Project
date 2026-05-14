@@ -7,16 +7,17 @@ import {
 
 export const AnalysisMenu = ({ 
   isMenuOpen, 
-  isTechnicalTone, 
-  setIsTechnicalTone, 
+  isSimpleTone,
+  setIsSimpleTone,
   cardVisibility, 
   toggleCard,
   onOpenJurisprudencia,
-  onOpenHistorial
+  onOpenHistorial,
+  onExportWord,
+  onOpenRating 
 }) => {
   if (!isMenuOpen) return null;
 
-  // Lista completa fusionando tus tarjetas base con las de tu nueva captura
   const menuCards = [
     { key: 'resumen', icon: FileText, label: "Resumen Generado" },
     { key: 'postura', icon: Gavel, label: "Postura Contestación" },
@@ -36,21 +37,29 @@ export const AnalysisMenu = ({
       <div className="py-2">
         <h5 className="px-5 py-2 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Acciones Principales</h5>
         
-        <div className="flex items-center justify-between px-5 py-2.5 hover:bg-slate-50 cursor-pointer" onClick={() => setIsTechnicalTone(!isTechnicalTone)}>
+        {/* Tono Técnico */}
+        <div className="flex items-center justify-between px-5 py-2.5 hover:bg-slate-50 cursor-pointer" onClick={() => setIsSimpleTone(!isSimpleTone)}>
           <div className="flex items-center gap-3 text-xs font-bold text-slate-600">
-            <FileText size={16} className="text-blue-500" /> Tono: Técnico Legal
+            <FileText size={16} className="text-emerald-500" /> Lenguaje Ciudadano
           </div>
-          <div className={`w-8 h-4 rounded-full relative flex items-center transition-colors ${isTechnicalTone ? 'bg-blue-500' : 'bg-slate-200'}`}>
-            <div className={`w-3 h-3 bg-white rounded-full absolute shadow-sm transition-transform ${isTechnicalTone ? 'right-1' : 'left-1'}`}></div>
+          <div className={`w-8 h-4 rounded-full relative flex items-center transition-colors ${isSimpleTone ? 'bg-emerald-500' : 'bg-slate-200'}`}>
+            <div className={`w-3 h-3 bg-white rounded-full absolute shadow-sm transition-transform ${isSimpleTone ? 'right-1' : 'left-1'}`}></div>
           </div>
         </div>
 
-        <div className="flex items-center px-5 py-2.5 hover:bg-slate-50 cursor-pointer gap-3 text-xs font-bold text-slate-600">
+        <div 
+          className="flex items-center px-5 py-2.5 hover:bg-slate-50 cursor-pointer gap-3 text-xs font-bold text-slate-600"
+          onClick={onOpenRating} // <--- 2. CONECTAMOS EL EVENTO AQUÍ
+        >
           <CheckCircle size={16} className="text-emerald-500" />
           Calificar Análisis RAG
         </div>
 
-        <div className="flex items-center px-5 py-2.5 hover:bg-slate-50 cursor-pointer gap-3 text-xs font-bold text-slate-600">
+        {/* 2. CONECTAMOS EL BOTÓN DE EXPORTACIÓN AQUÍ */}
+        <div 
+          className="flex items-center px-5 py-2.5 hover:bg-slate-50 cursor-pointer gap-3 text-xs font-bold text-slate-600"
+          onClick={onExportWord} 
+        >
           <Download size={16} className="text-indigo-500" />
           Exportar a Word (.docx)
         </div>
@@ -61,7 +70,6 @@ export const AnalysisMenu = ({
       {/* SECCIÓN 2: MOSTRAR / OCULTAR TARJETAS */}
       <div className="py-2">
         <h5 className="px-5 py-2 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Mostrar / Ocultar Tarjetas</h5>
-        
         {menuCards.map((item) => (
           <div key={item.key} className="flex items-center justify-between px-5 py-2 hover:bg-slate-50 cursor-pointer group" onClick={() => toggleCard(item.key)}>
             <div className={`flex items-center gap-3 text-xs font-medium transition-colors ${cardVisibility[item.key] ? 'text-slate-700' : 'text-slate-500'}`}>
@@ -79,11 +87,9 @@ export const AnalysisMenu = ({
 
       <div className="w-full border-t border-slate-100 my-1"></div>
 
-        {/* SECCIÓN 3: PANELES AUXILIARES */}
+      {/* SECCIÓN 3: PANELES AUXILIARES */}
       <div className="py-2">
         <h5 className="px-5 py-2 text-[10px] font-bold text-slate-400 uppercase tracking-widest">Paneles Auxiliares</h5>
-        
-        {/* AGREGAMOS EL ONCLICK AQUÍ */}
         <div 
           className="flex items-center px-5 py-2 hover:bg-slate-50 cursor-pointer gap-3 text-xs font-bold text-slate-600 group"
           onClick={onOpenJurisprudencia} 
@@ -91,7 +97,6 @@ export const AnalysisMenu = ({
           <Scale size={14} className="text-slate-400 group-hover:text-[#2546b0]" />
           Jurisprudencia (HU19)
         </div>
-        
         <div 
           className="flex items-center px-5 py-2 hover:bg-slate-50 cursor-pointer gap-3 text-xs font-bold text-slate-600 group"
           onClick={onOpenHistorial}
@@ -100,7 +105,6 @@ export const AnalysisMenu = ({
           Historial RAG (HU26)
         </div>
       </div>
-
     </div>
   );
 };

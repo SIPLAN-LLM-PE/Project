@@ -1,7 +1,16 @@
 import React from 'react';
 import { Baby } from 'lucide-react';
 
-export const NecesidadesCard = () => {
+export const NecesidadesCard = ({ data }) => {
+  // Seguro de renderizado: si la IA aún no envía los datos, no rompe la interfaz
+  if (!data || !data.detalles_gastos) {
+    return (
+      <div className="mb-8 bg-white rounded-xl border border-slate-200 p-6 flex items-center justify-center text-slate-400 text-[11px]">
+        Analizando necesidades del alimentista...
+      </div>
+    );
+  }
+
   return (
     <div className="mb-8">
       {/* Header de la Tarjeta */}
@@ -29,25 +38,40 @@ export const NecesidadesCard = () => {
               </tr>
             </thead>
             
-            {/* Cuerpo de la Tabla */}
+            {/* Cuerpo de la Tabla Dinámico */}
             <tbody className="divide-y divide-slate-100 text-xs">
-              <tr className="hover:bg-slate-50/50 transition-colors">
-                <td className="px-6 py-3.5 font-bold text-slate-700">Alimentación</td>
-                <td className="px-6 py-3.5 text-slate-600 font-mono text-[11px] tracking-tight">S/. 450.00</td>
-                <td className="px-6 py-3.5 text-slate-500 text-[11px]">Boletas de mercado</td>
-              </tr>
-              <tr className="hover:bg-slate-50/50 transition-colors">
-                <td className="px-6 py-3.5 font-bold text-slate-700">Salud</td>
-                <td className="px-6 py-3.5 text-slate-600 font-mono text-[11px] tracking-tight">S/. 170.50</td>
-                <td className="px-6 py-3.5 text-slate-500 text-[11px]">Recibos farmacia</td>
-              </tr>
+              {data.detalles_gastos.length > 0 ? (
+                data.detalles_gastos.map((gasto, index) => (
+                  <tr key={index} className="hover:bg-slate-50/50 transition-colors">
+                    <td className="px-6 py-3.5 font-bold text-slate-700">
+                      {gasto.concepto}
+                    </td>
+                    <td className="px-6 py-3.5 text-slate-600 font-mono text-[11px] tracking-tight">
+                      S/. {gasto.monto.toFixed(2)}
+                    </td>
+                    <td className="px-6 py-3.5 text-slate-500 text-[11px]">
+                      {gasto.observacion}
+                    </td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan="3" className="px-6 py-8 text-center text-slate-400 italic text-[11px]">
+                    No se detectaron gastos específicos sustentados en el documento.
+                  </td>
+                </tr>
+              )}
             </tbody>
 
-            {/* Pie de la Tabla (Total) */}
+            {/* Pie de la Tabla (Totalizador Dinámico) */}
             <tfoot className="bg-slate-50/30 border-t border-slate-100">
               <tr>
-                <td className="px-6 py-3.5 font-bold text-slate-800 text-right text-xs">Total Acreditado:</td>
-                <td className="px-6 py-3.5 font-bold text-slate-800 font-mono text-[11px] tracking-tight">S/. 620.50</td>
+                <td className="px-6 py-3.5 font-bold text-slate-800 text-right text-xs">
+                  Total Acreditado:
+                </td>
+                <td className="px-6 py-3.5 font-bold text-slate-800 font-mono text-[11px] tracking-tight">
+                  S/. {data.suma_gastos_sustentados.toFixed(2)}
+                </td>
                 <td className="px-6 py-3.5"></td> {/* Celda vacía para mantener la estructura */}
               </tr>
             </tfoot>
