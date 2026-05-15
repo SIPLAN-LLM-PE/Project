@@ -30,6 +30,10 @@ let draftAnalysisData = null;
 let draftPdfUrl = null;
 let draftPdfName = "";
 let draftHasDocument = false;
+let draftTextoExpediente = "";
+let draftChatMessages = [
+  { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIPLAN. ¿En qué te puedo ayudar?' }
+];
 
 export const Analysis = () => {
   // 1. ESTADOS DE INTERFAZ
@@ -43,7 +47,7 @@ export const Analysis = () => {
 
   // 2. ESTADOS DE DATOS
   const [analysisData, setAnalysisData] = useState(draftAnalysisData);
-  const [textoExpediente, setTextoExpediente] = useState("");
+  const [textoExpediente, setTextoExpediente] = useState(draftTextoExpediente);
   const [historialEntries, setHistorialEntries] = useState([]);
   const [hasDocument, setHasDocument] = useState(draftHasDocument);
   const [isLoading, setIsLoading] = useState(false);
@@ -59,9 +63,7 @@ export const Analysis = () => {
   // 3. ESTADOS DEL CHAT
   const [chatInput, setChatInput] = useState("");
   const [isChatLoading, setIsChatLoading] = useState(false);
-  const [chatMessages, setChatMessages] = useState([
-    { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIPLAN. ¿En qué te puedo ayudar?' }
-  ]);
+  const [chatMessages, setChatMessages] = useState(draftChatMessages);
 
   // 4. CONFIGURACIÓN DE TARJETAS
   const [cardVisibility, setCardVisibility] = useState({
@@ -88,7 +90,8 @@ export const Analysis = () => {
     draftPdfUrl = pdfUrl;
     draftPdfName = pdfName;
     draftHasDocument = hasDocument;
-  }, [analysisData, pdfUrl, pdfName, hasDocument]);
+    draftTextoExpediente = textoExpediente; // <-- ¡Esto era lo que faltaba!
+  }, [analysisData, pdfUrl, pdfName, hasDocument, textoExpediente]);
 
   useEffect(() => {
     const handleBeforeUnload = (e) => {
@@ -197,49 +200,69 @@ export const Analysis = () => {
   };
 
   const handleClearDocument = () => {
-    if (pdfUrl) URL.revokeObjectURL(pdfUrl);
-    setHasDocument(false);
-    setPdfUrl(null);
-    setPdfName("");
-    setAnalysisData(null);
-    setTextoExpediente("");
-    setHistorialEntries([]); 
-    setCardVisibility(Object.keys(cardVisibility).reduce((acc, key) => ({ ...acc, [key]: false }), {}));
+      if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+      setHasDocument(false);
+      setPdfUrl(null);
+      setPdfName("");
+      setAnalysisData(null);
+      setTextoExpediente("");
+      setHistorialEntries([]);
+      setChatMessages([
+        { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIPLAN. ¿En qué te puedo ayudar?' }
+      ]);
+      setCardVisibility(Object.keys(cardVisibility).reduce((acc, key) => ({ ...acc, [key]: false }), {}));
 
-    draftAnalysisData = null;
-    draftPdfUrl = null;
-    draftPdfName = "";
-    draftHasDocument = false;
-  };
+      // Limpiar el caché
+      draftAnalysisData = null;
+      draftPdfUrl = null;
+      draftPdfName = "";
+      draftHasDocument = false;
+      draftTextoExpediente = "";
+      draftChatMessages = [
+        { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIPLAN. ¿En qué te puedo ayudar?' }
+      ];
+    };
 
   const handleSendChat = async (e) => {
-    if (e) e.preventDefault();
-    if (!chatInput.trim() || !textoExpediente) return;
+      if (e) e.preventDefault();
+      if (!chatInput.trim() || !textoExpediente) return;
 
-    const userMsg = { rol: 'user', contenido: chatInput };
-    setChatMessages(prev => [...prev, userMsg]);
-    setChatInput("");
-    setIsChatLoading(true);
+      const userMsg = { rol: 'user', contenido: chatInput };
+      
+      // 1. Actualizamos el estado local Y LA CACHÉ GLOBAL al mismo tiempo
+      const nuevosMensajes = [...chatMessages, userMsg];
+      setChatMessages(nuevosMensajes);
+      draftChatMessages = nuevosMensajes; // <-- ¡ESTA ES LA LÍNEA CLAVE!
 
-    try {
-      const res = await fetch('http://localhost:8000/api/v1/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          query: userMsg.contenido,
-          texto_expediente: textoExpediente,
-          historial: chatMessages.map(m => ({ rol: m.rol, contenido: m.contenido })),
-          datos_extraidos: analysisData ? analysisData.sujetos_procesales : {}
-        })
-      });
-      const data = await res.json();
-      setChatMessages(prev => [...prev, { rol: 'assistant', contenido: data.respuesta }]);
-    } catch (error) {
-      setChatMessages(prev => [...prev, { rol: 'assistant', contenido: 'Error de conexión.' }]);
-    } finally {
-      setIsChatLoading(false);
-    }
-  };
+      setChatInput("");
+      setIsChatLoading(true);
+
+      try {
+        const res = await fetch('http://localhost:8000/api/v1/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: userMsg.contenido,
+            texto_expediente: textoExpediente,
+            historial: chatMessages.map(m => ({ rol: m.rol, contenido: m.contenido })),
+            datos_extraidos: analysisData ? analysisData.sujetos_procesales : {}
+          })
+        });
+        const data = await res.json();
+        
+        // 2. Guardamos la respuesta de la IA localmente Y EN LA CACHÉ
+        const msjsConRespuesta = [...nuevosMensajes, { rol: 'assistant', contenido: data.respuesta }];
+        setChatMessages(msjsConRespuesta);
+        draftChatMessages = msjsConRespuesta; // <-- ¡Y ESTA TAMBIÉN!
+
+      } catch (error) {
+        const msjsConError = [...nuevosMensajes, { rol: 'assistant', contenido: 'Error de conexión.' }];
+        setChatMessages(msjsConError);
+        draftChatMessages = msjsConError; // <-- Guardar también si hay error
+      } finally {
+        setIsChatLoading(false);
+      }
+    };
 
 const handleExportWord = async () => {
   if (!analysisData) return;
