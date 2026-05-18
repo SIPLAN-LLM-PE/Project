@@ -7,6 +7,7 @@ import Analysis from './pages/Analysis/Analysis';
 import Reports from './pages/Reports/Reports';
 import Audit from './pages/Audit/Audit'; // <--- 1. Importamos la pantalla de Auditoría
 import { Sidebar } from './components/layout/Sidebar';
+import { useNavigate } from 'react-router-dom';
 
 // Componente Wrapper para páginas que llevan Sidebar
 const DashboardLayout = ({ children }) => (

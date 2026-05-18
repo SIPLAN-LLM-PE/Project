@@ -38,12 +38,17 @@ let draftChatMessages = [
 export const Analysis = () => {
   // 1. ESTADOS DE INTERFAZ
   const [isMenuOpen, setIsMenuOpen] = useState(false);
+  const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
   const [isSimpleTone, setIsSimpleTone] = useState(false);
   const [isChatExpanded, setIsChatExpanded] = useState(false);
   const [isJurisprudenciaOpen, setIsJurisprudenciaOpen] = useState(false);
   const [isHistorialOpen, setIsHistorialOpen] = useState(false);
   const [isDetalleOpen, setIsDetalleOpen] = useState(false);
   const [isRatingOpen, setIsRatingOpen] = useState(false);
+
+  // ---> NUEVOS ESTADOS PARA OCR Y REGENERACIÓN <---
+  const [forzarOCR, setForzarOCR] = useState(false);
+  const [isRegenerating, setIsRegenerating] = useState(false);
 
   // 2. ESTADOS DE DATOS
   const [analysisData, setAnalysisData] = useState(draftAnalysisData);
@@ -149,7 +154,7 @@ export const Analysis = () => {
     });
   };
 
-  const handleFileUpload = async (event) => {
+const handleFileUpload = async (event) => {
     const file = event.target.files[0];
     if (!file) return;
 
@@ -161,12 +166,24 @@ export const Analysis = () => {
     setPdfUrl(url);
 
     try {
-      const response = await apiService.uploadExpediente(file);
+      // 1. Preparamos los datos incluyendo el archivo y el checkbox de OCR
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("forzar_ocr", forzarOCR ? "true" : "false");
+
+      // 2. Hacemos la petición directa al backend con FormData
+      const res = await fetch("http://localhost:8000/api/v1/analyze-document", {
+        method: "POST",
+        body: formData
+      });
       
+      const response = await res.json();
+
+      // 3. Procesamos la respuesta exitosa
       if (response && (response.status === "success" || response.resultados)) {
         setLoadingProgress(100);
         setLoadingText("¡Análisis Completado!");
-
+        
         setTimeout(() => {
           const data = response.resultados || response;
           setAnalysisData(data);
@@ -222,6 +239,41 @@ export const Analysis = () => {
         { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIPLAN. ¿En qué te puedo ayudar?' }
       ];
     };
+
+  // ---> NUEVA FUNCIÓN PARA REGENERAR CON FEEDBACK DEL USUARIO <---
+  const handleRegenerarResumen = async (correcciones) => {
+    setIsRegenerating(true);
+    try {
+      const res = await fetch('http://localhost:8000/api/v1/regenerate-summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          texto_expediente: textoExpediente,
+          entidades_previas: analysisData.sujetos_procesales || {},
+          correcciones_usuario: correcciones
+        })
+      });
+      
+      const data = await res.json();
+      
+      if(data.status === "success") {
+        // ---> ACTUALIZADO: Ahora también guardamos los sujetos procesales corregidos <---
+        setAnalysisData(prev => ({
+          ...prev,
+          sujetos_procesales: data.resultados_corregidos.sujetos_procesales || prev.sujetos_procesales,
+          sintesis_rag: data.resultados_corregidos.resumen,
+          postura_defensa: data.resultados_corregidos.postura,
+          puntos_sugeridos: data.resultados_corregidos.puntos_controvertidos
+        }));
+        
+        registrarCambioManual(`Regeneración IA por corrección de datos: "${correcciones}"`);
+      }
+    } catch (error) {
+      console.error("Error al regenerar resumen:", error);
+    } finally {
+      setIsRegenerating(false);
+    }
+  };
 
   const handleSendChat = async (e) => {
       if (e) e.preventDefault();
@@ -350,7 +402,7 @@ const handleExportWord = async () => {
         <section className="flex-[6] flex flex-col border-r border-slate-300 bg-slate-200 relative min-h-0">
           
           {/* BARRA SUPERIOR (Azul) */}
-          <div className="bg-[#2546b0] px-4 py-2 flex gap-3 shrink-0">
+          <div className="bg-[#2546b0] px-4 py-2 flex gap-3 shrink-0 items-center">
             <input 
               type="file" 
               ref={fileInputRef}
@@ -369,6 +421,19 @@ const handleExportWord = async () => {
                 <><Upload size={14} className="mr-2" /> Subir Expediente</>
               )}
             </button>
+
+            {/* ---> NUEVO CHECKBOX OCR PROFUNDO <--- */}
+            {!hasDocument && (
+              <label className="flex items-center text-white text-[11px] font-medium cursor-pointer hover:bg-white/10 px-2 py-1 rounded transition-colors ml-2">
+                <input 
+                  type="checkbox" 
+                  checked={forzarOCR}
+                  onChange={(e) => setForzarOCR(e.target.checked)}
+                  className="mr-2 cursor-pointer"
+                />
+                Forzar OCR Profundo (Tesseract)
+              </label>
+            )}
             <button 
               onClick={handleClearDocument}
               disabled={!hasDocument}
@@ -491,7 +556,14 @@ const handleExportWord = async () => {
                 {cardVisibility.capacidad && <CapacidadCargasCard data={analysisData.capacidad_cargas} onOpenDetalle={() => setIsDetalleOpen(true)} />}
                 
                 {/* 👇 AQUI PASAMOS los puntos controvertidos 👇 */}
-                {cardVisibility.controversias && <ControversiasCard puntos={analysisData.puntos_sugeridos} onNotifyChange={registrarCambioManual} />}
+                {cardVisibility.controversias && (
+                  <ControversiasCard 
+                    puntos={analysisData.puntos_sugeridos} 
+                    onNotifyChange={registrarCambioManual}
+                    onRegenerate={handleRegenerarResumen}  
+                    isRegenerating={isRegenerating}        
+                  />
+                )}
                 
                 {cardVisibility.sujetos && <SujetosProcesalesCard data={analysisData.sujetos_procesales} />}
                 {cardVisibility.financiera && <FinancieraCard data={analysisData.revision_financiera} />}
@@ -589,7 +661,11 @@ const handleExportWord = async () => {
         </section>
       </main>
 
-      <JurisprudenciaDrawer isOpen={isJurisprudenciaOpen} onClose={() => setIsJurisprudenciaOpen(false)} />
+      <JurisprudenciaDrawer 
+        isOpen={isJurisprudenciaOpen} 
+        onClose={() => setIsJurisprudenciaOpen(false)} 
+        textoExpediente={textoExpediente} 
+      />
       <HistorialDrawer 
         isOpen={isHistorialOpen} 
         onClose={() => setIsHistorialOpen(false)} 
