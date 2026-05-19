@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { 
-  Bell, ChevronDown, Upload, Trash2, Search, ZoomIn, ZoomOut, 
-  Printer, Menu, ChevronUp, User, Bot, FileText, FileQuestion 
+  CheckCircle, Save, Loader2, Bell, ChevronDown, Upload, Trash2, Search, ZoomIn, ZoomOut, 
+  Printer, Menu, ChevronUp, User, Bot, FileText, FileQuestion, ShieldAlert, AlertCircle
 } from 'lucide-react';
 
 // Importación de componentes locales
@@ -49,6 +49,13 @@ export const Analysis = () => {
   // ---> NUEVOS ESTADOS PARA OCR Y REGENERACIÓN <---
   const [forzarOCR, setForzarOCR] = useState(false);
   const [isRegenerating, setIsRegenerating] = useState(false);
+  const [isSavingDB, setIsSavingDB] = useState(false);
+  const [isSavedDB, setIsSavedDB] = useState(false);
+  // Nuevos estados para el flujo de trabajo real
+  const [isExpedienteModalOpen, setIsExpedienteModalOpen] = useState(false); 
+  const [listaExpedientes, setListaExpedientes] = useState([]);
+  const [expedienteSeleccionado, setExpedienteSeleccionado] = useState(null);
+  const [isReadOnly, setIsReadOnly] = useState(false);
 
   // 2. ESTADOS DE DATOS
   const [analysisData, setAnalysisData] = useState(draftAnalysisData);
@@ -58,7 +65,10 @@ export const Analysis = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [pdfUrl, setPdfUrl] = useState(draftPdfUrl);
   const [pdfName, setPdfName] = useState(draftPdfName || "Expediente.pdf"); 
-  
+  // ---> NUEVOS ESTADOS PARA MODAL DE ADVERTENCIA DE INTEGRIDAD <---
+  const [isWarningModalOpen, setIsWarningModalOpen] = useState(false);
+  const [pendingFile, setPendingFile] = useState(null); // Almacena el PDF en espera mientras decide
+  const [hasNameInconsistency, setHasNameInconsistency] = useState(false);
   const fileInputRef = useRef(null);
   const chatScrollRef = useRef(null);
   
@@ -98,6 +108,41 @@ export const Analysis = () => {
     draftTextoExpediente = textoExpediente; // <-- ¡Esto era lo que faltaba!
   }, [analysisData, pdfUrl, pdfName, hasDocument, textoExpediente]);
 
+  // 🚀 NUEVO: Al cargar la pantalla, si ya hay un expediente seleccionado en el panel
+  // y este ya tiene un análisis guardado en la BD, lo descarga automáticamente.
+  useEffect(() => {
+    const cargarAnalisisExistente = async () => {
+      if (!expedienteSeleccionado) return;
+      
+      try {
+        const res = await fetch(`http://localhost:8000/api/v1/expedientes/${expedienteSeleccionado.numero_expediente}`);
+        const data = await res.json();
+        
+        if (res.ok && data.data && data.data.tiene_analisis) {
+          // Si el backend dice que ya está calculado, poblamos los estados inmediatamente
+          setAnalysisData(data.data.resultados);
+          setHasDocument(true);
+          setPdfName(`Expediente_${expedienteSeleccionado.numero_expediente}.pdf`);
+          
+          // Re-armamos las tarjetas visibles
+          setCardVisibility({
+            resumen: true, postura: true, plazos: true, sujetos: true,
+            financiera: true, capacidad: true, controversias: true
+          });
+        } else {
+          // Si no tiene análisis previo, limpiamos la mesa de trabajo para el nuevo PDF
+          setAnalysisData(null);
+          setHasDocument(false);
+          setPdfName("");
+        }
+      } catch (err) {
+        console.error("Error al recuperar el análisis de la BD:", err);
+      }
+    };
+
+    cargarAnalisisExistente();
+  }, [expedienteSeleccionado]);
+  
   useEffect(() => {
     const handleBeforeUnload = (e) => {
       if (hasDocument) {
@@ -133,12 +178,133 @@ export const Analysis = () => {
     else setLoadingText("Ensamblando informe final, casi listo...");
   }, [loadingProgress]);
 
+  // Cargar bandeja al abrir la pantalla
+// 🚀 LÓGICA DE APERTURA AUTOMÁTICA DESDE EL DASHBOARD (Cargar bandeja y leer URL)
+  useEffect(() => {
+    const inicializarVistaAnalisis = async () => {
+      const usuarioActivo = JSON.parse(localStorage.getItem('usuario')) || { username: "", rol: "" };
+      
+      try {
+        const res = await fetch(`http://localhost:8000/api/v1/expedientes?username=${usuarioActivo.username}&rol=${usuarioActivo.rol}`);
+        const data = await res.json();
+        
+        if (data.status === 'success') {
+          const listaMapeada = data.data.map(e => ({
+            ...e,
+            tiene_analisis: e.estado === "Completado"
+          }));
+          
+          setListaExpedientes(listaMapeada);
 
+          const params = new URLSearchParams(window.location.search);
+          const expedienteUrl = params.get('exp');
+
+          if (expedienteUrl) {
+            const casoEncontrado = listaMapeada.find(e => e.numero_expediente === expedienteUrl);
+            
+            if (casoEncontrado) {
+              setExpedienteSeleccionado(casoEncontrado);
+              
+              if (casoEncontrado.tiene_analisis) {
+                const resDetalle = await fetch(`http://localhost:8000/api/v1/expedientes/${casoEncontrado.numero_expediente}`);
+                const dataDetalle = await resDetalle.json();
+
+                if (resDetalle.ok && dataDetalle.data && dataDetalle.data.tiene_analisis) {
+                  setAnalysisData(dataDetalle.data.resultados);
+                  setHasDocument(true);
+                  setPdfName(`${casoEncontrado.numero_expediente}.pdf`);
+                  
+                  // 🚀 👇 NUEVA LÍNEA: Cargamos el PDF directamente desde el servidor web 👇
+                  setPdfUrl(`http://localhost:8000/api/v1/expedientes/${casoEncontrado.numero_expediente}/pdf`);
+                  
+                  setCardVisibility({
+                    resumen: true, postura: true, plazos: true, sujetos: true,
+                    financiera: true, capacidad: true, controversias: true
+                  });
+                }
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.error("Error inicializando la pantalla de análisis:", err);
+      }
+    };
+
+    inicializarVistaAnalisis();
+  }, []);
+
+  const seleccionarExpedienteDeBandeja = (expediente, event) => {
+    if (event) event.stopPropagation(); // Evita conflictos con otros elementos de la UI
+    
+    setExpedienteSeleccionado(expediente);
+
+    if (expediente.tiene_analisis) {
+      // 📑 CASO A: EL EXPEDIENTE YA TIENE UN ANÁLISIS EN LA BASE DE DATOS
+      const deseaVerExistente = window.confirm(
+        `El expediente ${expediente.numero_expediente} ya cuenta con un análisis guardado.\n\n` +
+        `• Presiona ACEPTAR si deseas ver el análisis oficial ya registrado (Modo Lectura).\n` +
+        `• Presiona CANCELAR si deseas cargar un nuevo documento PDF y generar un nuevo análisis.`
+      );
+
+      if (deseaVerExistente) {
+        // Sub-caso A1: El usuario quiere ver el existente de la BD
+        setIsExpedienteModalOpen(false);
+        setIsLoading(true);
+        setPdfName(expediente.numero_expediente + ".pdf");
+        
+        fetch(`http://localhost:8000/api/v1/expedientes/${expediente.numero_expediente}`)
+          .then(res => res.json())
+          .then(data => {
+            if (data && data.data && (data.data.resultados_json || data.data.resultados)) {
+              // Sincronizamos las métricas analíticas estructuradas de Mistral IA
+              setAnalysisData(data.data.resultados_json || data.data.resultados);
+              setHasDocument(true);
+              setIsReadOnly(true); // Activamos Modo Solo Lectura
+              
+              // 🚀 PERSISTENCIA BINARIA: Enlazamos el visor al endpoint de descarga del servidor
+              setPdfUrl(`http://localhost:8000/api/v1/expedientes/${expediente.numero_expediente}/pdf`);
+
+              // Forzamos la visualización activa de todos los paneles analíticos
+              setCardVisibility({
+                resumen: true, postura: true, plazos: true, sujetos: true,
+                financiera: true, capacidad: true, controversias: true
+              });
+            }
+          })
+          .catch(error => console.error("Error cargando expediente guardado:", error))
+          .finally(() => setIsLoading(false));
+      } else {
+        // Sub-caso A2: El usuario decidió subir un nuevo PDF y sobreescribir el análisis en memoria
+        if (fileInputRef && fileInputRef.current) {
+          fileInputRef.current.click(); // 💎 Abre el buscador de archivos de Windows/Linux al instante
+        }
+        setIsExpedienteModalOpen(false);
+        setIsReadOnly(false); // Desbloqueamos el modo lectura para que pueda procesar y guardar cambios
+        setHasDocument(false);
+        setPdfUrl(null); // Limpiamos referencias de URLs previas
+      }
+
+    } else {
+      // ⏳ CASO B: EL EXPEDIENTE ESTÁ TOTALMENTE NUEVO / PENDIENTE DE ANÁLISIS
+      if (fileInputRef && fileInputRef.current) {
+        fileInputRef.current.click(); // 💎 Abre el buscador de archivos al instante
+      }
+      setIsExpedienteModalOpen(false);
+      setIsReadOnly(false);
+      setHasDocument(false);
+      setPdfUrl(null);
+    }
+  };
   // ==========================================
   // 5. FUNCIONES DE LÓGICA
   // ==========================================
 
-  const registrarCambioManual = (descripcion) => {
+const registrarCambioManual = (descripcion) => {
+    // Intentamos recuperar el usuario real conectado
+    const usuarioActivo = JSON.parse(localStorage.getItem('usuario'));
+    const firmaUsuario = usuarioActivo ? `${usuarioActivo.username} (${usuarioActivo.rol === 'admin' ? 'Admin' : 'Sec'})` : 'm.gomez (Sec)';
+
     setHistorialEntries(prev => {
       const nuevaVersion = `v${prev.length + 1}`;
       const nuevoHito = {
@@ -146,7 +312,7 @@ export const Analysis = () => {
         fecha: new Date().toLocaleString(),
         version: nuevaVersion,
         titulo: 'Edición Manual',
-        usuario: 'm.gomez (Sec)',
+        usuario: firmaUsuario, // <-- ¡AHORA ES DINÁMICO!
         comentario: descripcion,
         isActual: true
       };
@@ -154,10 +320,34 @@ export const Analysis = () => {
     });
   };
 
-const handleFileUpload = async (event) => {
+const handleFileUpload = (event) => {
     const file = event.target.files[0];
     if (!file) return;
 
+    // Inicializamos banderas de control limpias
+    let esInconsistente = false;
+
+    // 🛡️ CONTROL DE INTEGRIDAD 1: Verificación cruzada del nombre de archivo físico
+    if (expedienteSeleccionado) {
+      const nombreArchivoLimpio = file.name.replace(/\.[^/.]+$/, "").replace(/\s+/g, "").toLowerCase();
+      const numeroExpedienteLimpio = expedienteSeleccionado.numero_expediente.replace(/\s+/g, "").toLowerCase();
+
+      if (nombreArchivoLimpio !== numeroExpedienteLimpio) {
+        esInconsistente = true;
+        setHasNameInconsistency(true);
+        setPendingFile(file); // Guardamos el archivo congelado en el estado
+        setIsWarningModalOpen(true); // 🚀 Detenemos el flujo y ABRIMOS el Pop-up interactivo
+        return; // Frenamos la ejecución inmediata
+      }
+    }
+
+    // Flujo normal si los nombres coinciden perfectamente desde el inicio
+    setHasNameInconsistency(false);
+    procesarEnvioDocumento(file, false);
+  };
+
+  // 🚀 NUEVA SUB-FUNCIÓN: Se encarga de conectarse con el servidor FastAPI
+  const procesarEnvioDocumento = async (file, marcarInconsistencia) => {
     setIsLoading(true);
     setLoadingProgress(0);
     setPdfName(file.name);
@@ -165,13 +355,19 @@ const handleFileUpload = async (event) => {
     const url = URL.createObjectURL(file);
     setPdfUrl(url);
 
+    // Recuperamos la firma del firmante desde el localStorage para mandarla a la bitácora
+    const usuarioActivo = JSON.parse(localStorage.getItem('usuario'));
+    const firmaUsuario = usuarioActivo ? `${usuarioActivo.username}` : 'm.gomez';
+
     try {
-      // 1. Preparamos los datos incluyendo el archivo y el checkbox de OCR
       const formData = new FormData();
       formData.append("file", file);
       formData.append("forzar_ocr", forzarOCR ? "true" : "false");
+      formData.append("numero_expediente", expedienteSeleccionado.numero_expediente);
+      // Enviamos las nuevas variables de control hacia Python
+      formData.append("usuario_auditoria", firmaUsuario);
+      formData.append("inconsistencia_nombre", marcarInconsistencia ? "true" : "false");
 
-      // 2. Hacemos la petición directa al backend con FormData
       const res = await fetch("http://localhost:8000/api/v1/analyze-document", {
         method: "POST",
         body: formData
@@ -179,8 +375,7 @@ const handleFileUpload = async (event) => {
       
       const response = await res.json();
 
-      // 3. Procesamos la respuesta exitosa
-      if (response && (response.status === "success" || response.resultados)) {
+      if (res.ok && response && (response.status === "success" || response.resultados)) {
         setLoadingProgress(100);
         setLoadingText("¡Análisis Completado!");
         
@@ -195,8 +390,8 @@ const handleFileUpload = async (event) => {
             fecha: new Date().toLocaleString(),
             version: 'v1',
             titulo: 'Generación Inicial RAG',
-            usuario: 'Sistema SIPLAN (IA)',
-            comentario: 'Análisis automático completado con éxito.',
+            usuario: marcarInconsistencia ? `${firmaUsuario} (Con Inconsistencia)` : 'Sistema SIPLAN (IA)',
+            comentario: marcarInconsistencia ? 'Subida forzada con discrepancia en carátula.' : 'Análisis automático completado con éxito.',
             isActual: true
           };
           setHistorialEntries([hitoInicial]);
@@ -205,14 +400,55 @@ const handleFileUpload = async (event) => {
             resumen: true, postura: true, plazos: true, sujetos: true,
             financiera: true, capacidad: true, controversias: true
           });
-          
           setIsLoading(false);
         }, 600);
+      } else {
+        setLoadingText(response.detail || "Error de validación en el expediente.");
+        setTimeout(() => {
+          setIsLoading(false);
+          setHasDocument(false);
+          setPdfUrl(null);
+          setPdfName("");
+          if (fileInputRef.current) fileInputRef.current.value = "";
+        }, 4500);
       }
     } catch (error) {
       console.error("Error:", error);
       setLoadingText("Error en el análisis. Revisa la consola.");
       setTimeout(() => setIsLoading(false), 2000);
+    }
+  };
+
+  const handleRegenerarResumen = async (correcciones) => {
+    setIsRegenerating(true);
+    try {
+      const res = await fetch('http://localhost:8000/api/v1/regenerate-summary', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          texto_expediente: textoExpediente,
+          entidades_previas: analysisData.sujetos_procesales || {},
+          correcciones_usuario: correcciones
+        })
+      });
+      
+      const data = await res.json();
+      
+      if(data.status === "success") {
+        setAnalysisData(prev => ({
+          ...prev,
+          sujetos_procesales: data.resultados_corregidos.sujetos_procesales || prev.sujetos_procesales,
+          sintesis_rag: data.resultados_corregidos.resumen,
+          postura_defensa: data.resultados_corregidos.postura,
+          puntos_sugeridos: data.resultados_corregidos.puntos_controvertidos
+        }));
+        
+        registrarCambioManual(`Regeneración IA por corrección de datos: "${correcciones}"`);
+      }
+    } catch (error) {
+      console.error("Error al regenerar resumen:", error);
+    } finally {
+      setIsRegenerating(false);
     }
   };
 
@@ -240,38 +476,33 @@ const handleFileUpload = async (event) => {
       ];
     };
 
-  // ---> NUEVA FUNCIÓN PARA REGENERAR CON FEEDBACK DEL USUARIO <---
-  const handleRegenerarResumen = async (correcciones) => {
-    setIsRegenerating(true);
+  // NUEVA FUNCIÓN: Envía el análisis definitivo a la base de datos
+  const handleGuardarEnBD = async () => {
+    if (!analysisData || !pdfName) return;
+    setIsSavingDB(true);
     try {
-      const res = await fetch('http://localhost:8000/api/v1/regenerate-summary', {
+      const res = await fetch('http://localhost:8000/api/v1/save-analysis', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          texto_expediente: textoExpediente,
-          entidades_previas: analysisData.sujetos_procesales || {},
-          correcciones_usuario: correcciones
+          numero_expediente: pdfName.replace('.pdf', ''),
+          tiempo_procesamiento_seg: 15.5, // Tiempo referencial
+          paginas_ocr: 2,                 // Páginas referenciales
+          resultados_json: analysisData   // Todo el estado actual (con o sin correcciones manuales)
         })
       });
       
       const data = await res.json();
-      
       if(data.status === "success") {
-        // ---> ACTUALIZADO: Ahora también guardamos los sujetos procesales corregidos <---
-        setAnalysisData(prev => ({
-          ...prev,
-          sujetos_procesales: data.resultados_corregidos.sujetos_procesales || prev.sujetos_procesales,
-          sintesis_rag: data.resultados_corregidos.resumen,
-          postura_defensa: data.resultados_corregidos.postura,
-          puntos_sugeridos: data.resultados_corregidos.puntos_controvertidos
-        }));
-        
-        registrarCambioManual(`Regeneración IA por corrección de datos: "${correcciones}"`);
+        setIsSavedDB(true);
+        registrarCambioManual("Análisis oficial aprobado y guardado en la base de datos central.");
+        // Ocultar el estado de éxito después de 3 segundos
+        setTimeout(() => setIsSavedDB(false), 3000);
       }
     } catch (error) {
-      console.error("Error al regenerar resumen:", error);
+      console.error("Error al guardar en BD:", error);
     } finally {
-      setIsRegenerating(false);
+      setIsSavingDB(false);
     }
   };
 
@@ -368,80 +599,163 @@ const handleExportWord = async () => {
   // --- FIN DE LA PARTE 1 (Ahora sigue el return...) ---
 
   return (
-    <div className="flex-1 bg-[#f8fafc] flex flex-col h-full overflow-hidden">
-      
-      {/* 1. Header Superior */}
-      <header className="bg-white border-b border-slate-200 w-full h-[93px] px-8 flex items-center shrink-0 z-10">
-        <div className="flex justify-between items-center w-full">
-          <h2 className="text-xl font-bold text-slate-800 tracking-tight">Análisis IA</h2>
-          <div className="flex items-center gap-4">
-            <div className="flex items-center bg-slate-100 border border-slate-200 rounded-lg px-4 py-1.5 gap-3 cursor-pointer hover:bg-slate-200 transition-all">
-               <Bell className="w-5 h-5 text-slate-600" />
-               <div className="text-[10px] leading-tight text-left hidden md:block">
-                 <span className="font-bold block text-slate-700">Notificaciones</span>
-                 <span className="text-slate-500 font-medium">Tu buzón de mensajes</span>
-               </div>
-               <ChevronDown className="w-4 h-4 ml-1 text-slate-400" />
+  <div className="flex-1 bg-[#f8fafc] flex flex-col h-full overflow-hidden">
+    
+    {/* 1. Header Superior */}
+    <header className="bg-white border-b border-slate-200 w-full h-[93px] px-8 flex items-center shrink-0 z-10">
+      <div className="flex justify-between items-center w-full">
+        <h2 className="text-xl font-bold text-slate-800 tracking-tight">Análisis IA</h2>
+        <div className="flex items-center gap-4">
+          <div className="flex items-center bg-slate-100 border border-slate-200 rounded-lg px-4 py-1.5 gap-3 cursor-pointer hover:bg-slate-200 transition-all">
+             <Bell className="w-5 h-5 text-slate-600" />
+             <div className="text-[10px] leading-tight text-left hidden md:block">
+               <span className="font-bold block text-slate-700">Notificaciones</span>
+               <span className="text-slate-500 font-medium">Tu buzón de mensajes</span>
+             </div>
+             <ChevronDown className="w-4 h-4 ml-1 text-slate-400" />
+          </div>
+          {/* Reemplaza tu bloque de perfil rígido por este dinámico */}
+          <div className="flex items-center bg-[#2546b0] text-white rounded-lg px-4 py-1.5 gap-3 cursor-pointer hover:bg-blue-800 transition-all shadow-sm">
+            <div className="w-8 h-8 bg-blue-400 rounded flex items-center justify-center font-bold text-xs shadow-inner">
+              {JSON.parse(localStorage.getItem('usuario'))?.nombre?.split(' ').map(n => n[0]).join('') || "DV"}
             </div>
-            <div className="flex items-center bg-[#2546b0] text-white rounded-lg px-4 py-1.5 gap-3 cursor-pointer hover:bg-blue-800 transition-all shadow-sm">
-               <div className="w-8 h-8 bg-blue-400 rounded flex items-center justify-center font-bold text-xs shadow-inner">DV</div>
-               <div className="text-[10px] leading-tight text-left font-bold">
-                 Dr. Diego Valdivia<br/>
-                 <span className="opacity-80 font-medium text-[9px]">Juez de Paz Letrado</span>
-               </div>
-               <ChevronDown className="w-4 h-4 ml-1 opacity-60" />
+            <div className="text-[10px] leading-tight text-left font-bold">
+              {JSON.parse(localStorage.getItem('usuario'))?.nombre || "Dr. Diego Valdivia"}<br/>
+              <span className="opacity-80 font-medium text-[9px]">
+                {JSON.parse(localStorage.getItem('usuario'))?.cargo || "Juez de Paz Letrado"}
+              </span>
             </div>
+            <ChevronDown className="w-4 h-4 ml-1 opacity-60" />
           </div>
         </div>
-      </header>
+      </div>
+    </header>
 
-      {/* 2. Área de Trabajo */}
-      <main className="flex-1 flex min-h-0 overflow-hidden">
+    {/* 2. Área de Trabajo */}
+    <main className="flex-1 flex min-h-0 overflow-hidden">
+      
+      {/* COLUMNA IZQUIERDA: VISOR DE EXPEDIENTE */}
+      <section className="flex-[6] flex flex-col border-r border-slate-300 bg-slate-200 relative min-h-0">
         
-        {/* COLUMNA IZQUIERDA: VISOR DE EXPEDIENTE */}
-        <section className="flex-[6] flex flex-col border-r border-slate-300 bg-slate-200 relative min-h-0">
-          
-          {/* BARRA SUPERIOR (Azul) */}
-          <div className="bg-[#2546b0] px-4 py-2 flex gap-3 shrink-0 items-center">
-            <input 
-              type="file" 
-              ref={fileInputRef}
-              onChange={handleFileUpload}
-              className="hidden" 
-              accept=".pdf"
-            />
-            <button 
-              onClick={() => fileInputRef.current.click()}
-              disabled={isLoading || hasDocument}
-              className={`flex items-center text-white px-3 py-1.5 rounded text-xs font-bold transition-colors border border-white/10 ${isLoading || hasDocument ? 'opacity-50 cursor-not-allowed bg-white/5' : 'bg-white/10 hover:bg-white/20'}`}
-            >
-              {isLoading ? (
-                <span className="animate-pulse flex items-center"><Bot size={14} className="mr-2" /> Procesando con IA...</span>
-              ) : (
-                <><Upload size={14} className="mr-2" /> Subir Expediente</>
-              )}
-            </button>
+        {/* POP-UP MODAL: Limitado estrictamente al área de trabajo central */}
+        {isExpedienteModalOpen && (
+          <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-[2px] z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl border border-slate-200 overflow-hidden animate-in zoom-in-95 duration-200">
+              
+              <div className="bg-[#1a3059] p-5 text-white flex justify-between items-center">
+                <div>
+                  <h2 className="text-sm font-bold tracking-wide">Bandeja de Expedientes Asignados</h2>
+                  <p className="text-[10px] text-blue-200 mt-0.5">Selecciona el caso correspondiente antes de proceder con la carga o revisión.</p>
+                </div>
+                <button 
+                  onClick={() => setIsExpedienteModalOpen(false)} 
+                  className="text-slate-300 hover:text-white text-xs bg-white/10 hover:bg-white/20 px-2 py-1 rounded transition-colors"
+                >
+                  Cancelar
+                </button>
+              </div>
 
-            {/* ---> NUEVO CHECKBOX OCR PROFUNDO <--- */}
-            {!hasDocument && (
-              <label className="flex items-center text-white text-[11px] font-medium cursor-pointer hover:bg-white/10 px-2 py-1 rounded transition-colors ml-2">
-                <input 
-                  type="checkbox" 
-                  checked={forzarOCR}
-                  onChange={(e) => setForzarOCR(e.target.checked)}
-                  className="mr-2 cursor-pointer"
-                />
-                Forzar OCR Profundo (Tesseract)
-              </label>
-            )}
-            <button 
-              onClick={handleClearDocument}
-              disabled={!hasDocument}
-              className={`flex items-center text-white px-3 py-1.5 rounded text-xs font-bold transition-colors border border-white/10 ${!hasDocument ? 'opacity-50 cursor-not-allowed bg-white/5' : 'bg-red-500/20 hover:bg-red-500/40 text-red-100 border-red-500/30'}`}
-            >
-              <Trash2 size={14} className="mr-2" /> Eliminar
-            </button>
+              <div className="p-3 max-h-[380px] overflow-y-auto custom-scrollbar bg-slate-50">
+                {listaExpedientes.map((exp) => (
+                  <div 
+                      key={exp.numero_expediente}
+                      onClick={(event) => seleccionarExpedienteDeBandeja(exp, event)} // <-- Pasamos el evento de esta manera
+                      className="p-3.5 mb-2 bg-white border border-slate-200 rounded-xl hover:border-[#2546b0] hover:shadow-sm cursor-pointer transition-all flex justify-between items-center group"
+                    >
+                    <div className="text-left">
+                      <h3 className="font-bold text-slate-800 text-xs tracking-tight group-hover:text-[#2546b0] transition-colors">
+                        {exp.numero_expediente}
+                      </h3>
+                      <p className="text-[10px] text-slate-400 mt-1 font-medium max-w-[340px] truncate uppercase">
+                        {exp.caratula}
+                      </p>
+                    </div>
+                    <div className="shrink-0">
+                      {exp.tiene_analisis ? (
+                        <span className="bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-md text-[9px] font-bold border border-emerald-200/60 block text-center">
+                          Ver Análisis
+                        </span>
+                      ) : (
+                        <span className="bg-amber-50 text-amber-700 px-2.5 py-1 rounded-md text-[9px] font-bold border border-amber-200/60 block text-center">
+                          Cargar PDF
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+            </div>
           </div>
+        )}
+
+        {/* BARRA SUPERIOR (Azul) */}
+        <div className="bg-[#2546b0] px-4 py-2 flex gap-3 shrink-0 items-center">
+          <input 
+            type="file" 
+            ref={fileInputRef}
+            onChange={handleFileUpload}
+            className="hidden" 
+            accept=".pdf"
+          />
+          
+          <button 
+            onClick={() => setIsExpedienteModalOpen(true)} // <-- Abre primero el Pop-up restringido
+            disabled={isLoading || hasDocument}
+            className={`flex items-center text-white px-3 py-1.5 rounded text-xs font-bold transition-colors border border-white/10 ${isLoading || hasDocument ? 'opacity-50 cursor-not-allowed bg-white/5' : 'bg-white/10 hover:bg-white/20'}`}
+          >
+            {isLoading ? (
+              <span className="animate-pulse flex items-center"><Bot size={14} className="mr-2" /> Procesando con IA...</span>
+            ) : (
+              <><Upload size={14} className="mr-2" /> Subir Expediente</>
+            )}
+          </button>
+
+          {/* Checkbox OCR Profundo */}
+          {!hasDocument && (
+            <label className="flex items-center text-white text-[11px] font-medium cursor-pointer hover:bg-white/10 px-2 py-1 rounded transition-colors ml-2">
+              <input 
+                type="checkbox" 
+                checked={forzarOCR}
+                onChange={(e) => setForzarOCR(e.target.checked)}
+                className="mr-2 cursor-pointer"
+              />
+              Forzar OCR Profundo (Tesseract)
+            </label>
+          )}
+
+          <button 
+            onClick={handleClearDocument}
+            disabled={!hasDocument}
+            className={`flex items-center text-white px-3 py-1.5 rounded text-xs font-bold transition-colors border border-white/10 ${!hasDocument ? 'opacity-50 cursor-not-allowed bg-white/5' : 'bg-red-500/20 hover:bg-red-500/40 text-red-100 border-red-500/30'}`}
+          >
+            <Trash2 size={14} className="mr-2" /> Eliminar
+          </button>
+
+          {hasDocument && (
+            <button 
+              onClick={handleGuardarEnBD}
+              disabled={isSavingDB || isSavedDB}
+              className={`flex items-center text-white px-3 py-1.5 rounded text-xs font-bold transition-all shadow-sm ml-auto ${
+                isSavedDB 
+                  ? 'bg-emerald-500 hover:bg-emerald-600' 
+                  : 'bg-emerald-600 hover:bg-emerald-500 border border-emerald-400/30'
+              }`}
+            >
+              {isSavingDB ? (
+                <Loader2 size={14} className="mr-2 animate-spin" /> 
+              ) : isSavedDB ? (
+                <CheckCircle size={14} className="mr-2" /> 
+              ) : (
+                <Save size={14} className="mr-2" />
+              )}
+              {isSavingDB ? "Guardando..." : isSavedDB ? "¡Aprobado y Guardado!" : "Aprobar y Guardar Análisis"}
+            </button>
+          )}
+
+        </div>
+
+
 
           {/* BARRA DE HERRAMIENTAS DEL PDF (Gris) */}
           <div className={`bg-slate-100 px-4 py-2.5 flex items-center border-b border-slate-300 shrink-0 transition-opacity ${hasDocument ? 'opacity-100' : 'opacity-30 pointer-events-none'}`}>
@@ -681,6 +995,71 @@ const handleExportWord = async () => {
          onClose={() => setIsRatingOpen(false)} 
          expediente={pdfName} 
        />
+
+       {/* ========================================================================= */}
+      {/* POP-UP MODAL: ADVERTENCIA DE DISCREPANCIA DE CARÁTULA E INCONSISTENCIA    */}
+      {/* ========================================================================= */}
+      {isWarningModalOpen && pendingFile && (
+        <div className="absolute inset-0 bg-slate-950/60 backdrop-blur-[4px] z-[100] flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md border border-red-200 overflow-hidden animate-in zoom-in-95 duration-150 text-left">
+            
+            {/* Cabecera del Alerta */}
+            <div className="bg-amber-600 px-6 py-4 text-white flex items-center gap-3">
+              <ShieldAlert size={22} className="shrink-0 text-amber-100" />
+              <div>
+                <h3 className="font-extrabold text-sm tracking-wide">Inconsistencia Detectada</h3>
+                <p className="text-[10px] text-amber-100 mt-0.5">Control de Seguridad Perimetral RAG</p>
+              </div>
+            </div>
+
+            {/* Mensaje de Cuerpo */}
+            <div className="p-6 bg-slate-50 flex flex-col gap-3">
+              <p className="text-xs text-slate-700 leading-relaxed font-medium">
+                El nombre del archivo PDF seleccionado <span className="font-bold text-red-600">"{pendingFile.name}"</span> no coincide con el número del Expediente Judicial en el que está trabajando actualmente (<span className="font-bold text-slate-900">{expedienteSeleccionado?.numero_expediente}</span>).
+              </p>
+              
+              {/* Notificación de Auditoría */}
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3.5 flex items-start gap-2.5 mt-1">
+                <AlertCircle size={16} className="text-red-600 shrink-0 mt-0.5" />
+                <p className="text-[10px] text-red-800 font-bold leading-normal uppercase tracking-wide">
+                  POLÍTICA DE AUDITORÍA: Si decide proceder, este evento se grabará de forma irreversible en la bitácora de control fiscal con su usuario y firma digital.
+                </p>
+              </div>
+            </div>
+
+            {/* Acciones */}
+            <div className="bg-white px-6 py-4 border-t border-slate-100 flex justify-end gap-3 shrink-0">
+              <button 
+                type="button" 
+                onClick={() => {
+                  setIsWarningModalOpen(false);
+                  setPendingFile(null);
+                  if (fileInputRef.current) fileInputRef.current.value = ""; // Reseteamos el selector
+                }} 
+                className="border border-slate-200 text-slate-500 font-bold text-xs px-4 py-2.5 rounded-xl hover:bg-slate-50 transition-colors"
+              >
+                Cancelar Subida
+              </button>
+              
+              <button 
+                type="button"
+                onClick={() => {
+                  setIsWarningModalOpen(false);
+                  const fileAEnviar = pendingFile;
+                  setPendingFile(null);
+                  // Disparamos la subida forzada marcando true para que registre el log
+                  procesarEnvioDocumento(fileAEnviar, true);
+                }}
+                className="bg-amber-600 text-white font-bold text-xs px-5 py-2.5 rounded-xl hover:bg-amber-700 shadow-md transition-colors"
+              >
+                Subir Igualmente
+              </button>
+            </div>
+
+          </div>
+        </div>
+      )}
+
     </div>
   );
 };

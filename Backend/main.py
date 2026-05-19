@@ -27,6 +27,7 @@ import warnings
 import pytesseract
 from pdf2image import convert_from_bytes
 from fastapi import Form
+import os
 
 pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
@@ -57,14 +58,27 @@ def extraer_numero_expediente(texto_plano):
     patron = r'(\d{4,5}\s*-\s*\d{4}\s*-\s*\d{1,4}\s*-\s*\d{4}\s*-\s*[A-Z]{2}\s*-\s*[A-Z]{2}\s*-\s*\d{1,2})'
     match = re.search(patron, texto_plano)
     return match.group(1).replace(" ", "") if match else None
-    
+
 def init_db():
     conn = get_db_connection()
-    # 1. Tabla de expedientes con la nueva columna para el historial de análisis IA
+    
+    # 1. Tabla de Usuarios y Roles (Se queda igual)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE,
+            password TEXT,
+            nombre TEXT,
+            cargo TEXT,
+            rol TEXT
+        )
+    ''')
+
+    # 2. Tabla de expedientes con COLUMNAS DE ASIGNACIÓN INCORPORADAS
     conn.execute('''
         CREATE TABLE IF NOT EXISTS registro_expedientes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            numero_expediente TEXT,
+            numero_expediente TEXT UNIQUE,
             fecha_analisis TEXT,
             demandante TEXT,
             demandado TEXT,
@@ -75,12 +89,18 @@ def init_db():
             paginas_ocr INTEGER,
             bert_score REAL,        
             f1_ner REAL,            
-            ocr_precision REAL,      
-            json_resultados TEXT  -- <-- NUEVA COLUMNA: Guarda el informe completo en texto JSON
+            ocr_precision REAL,    
+            json_resultados TEXT,
+            -- COLUMNAS DE CONTROL DE ACCESOS Y FLUJO (Garantizan 1 usuario por rol)
+            asignado_juez TEXT DEFAULT NULL,
+            asignado_secretario TEXT DEFAULT NULL,
+            asignado_asistente TEXT DEFAULT NULL,
+            asignado_mesapartes TEXT DEFAULT NULL,
+            asignado_liquidador TEXT DEFAULT NULL
         )
     ''')
     
-    # 2. Tabla de Logs de Seguridad (Se queda igual)
+    # 3. Tabla de Logs de Seguridad
     conn.execute('''
         CREATE TABLE IF NOT EXISTS log_seguridad (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -94,7 +114,73 @@ def init_db():
     conn.commit()
     conn.close()
 
-init_db() 
+def simular_asignaciones_admin():
+    """
+    Simula que Mesa de Partes asignó expedientes al Juez.
+    Solo puebla la BD si está vacía, protegiendo los expedientes creados manualmente.
+    """
+    conn = get_db_connection()
+    try:
+        # 👇 CAMBIO: Verificamos si ya hay registros antes de insertar para no duplicar ni borrar nada
+        count = conn.execute("SELECT COUNT(*) FROM registro_expedientes").fetchone()[0]
+        if count == 0:
+            expedientes_base = [
+                ("00245-2026-0-1801-JP-CI-01", "GUTIÉRREZ FLORES, ANA", "SÁNCHEZ ROJAS, CARLOS"),
+                ("00198-2026-0-1801-JP-LA-02", "RODRÍGUEZ SILVA, ELENA", "CASTILLO RAMOS, LUIS"),
+                ("00312-2026-0-1801-JP-FC-01", "LOZANO DIAZ, MIGUEL", "FERNÁNDEZ QUISPE, ROSA")
+              ]
+            for exp, dem, demdo in expedientes_base:
+                conn.execute('''
+                    INSERT INTO registro_expedientes 
+                    (numero_expediente, demandante, demandado, estado_auditoria, riesgo_capacidad, paginas_ocr, tiempo_procesamiento_seg, json_resultados)
+                    VALUES (?, ?, ?, 'PENDIENTE', 'N/A', 0, 0, NULL)
+                ''', (exp, dem, demdo))
+            conn.commit()
+            print("✓ Expedientes base inicializados.")
+    except Exception as e:
+        print(f"Error en simulación administrativa: {e}")
+    finally:
+        conn.close()
+
+def crear_usuarios_prueba():
+    """
+    Inserta una terna completa de personal judicial real clasificado por rol institucional
+    para realizar las pruebas de asignaciones y filtros.
+    """
+    conn = get_db_connection()
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0]
+        if count == 0:
+            usuarios = [
+                ("admin01", "admin123", "Carlos Mendoza", "Administrador de Módulo", "admin"),
+                ("m.gomez", "secre123", "Mariana Gómez", "Secretaria Judicial", "secretario"),
+                ("r.luna", "secre123", "Roberto Luna", "Especialista Legal", "secretario"),
+                ("j.valdivia", "juez123", "Dr. Diego Valdivia", "Juez de Paz Letrado", "juez"),
+                ("a.torres", "asist123", "Ana Torres", "Asistente Jurisdiccional", "asistente"),
+                ("l.quispe", "liq123", "Luis Quispe", "Liquidador Judicial", "liquidador"),
+                ("p.mesa", "mesa123", "Pedro Meza", "Personal de Mesa de Partes", "mesapartes")
+            ]
+            for username, password, nombre, cargo, rol in usuarios:
+                conn.execute('''
+                    INSERT INTO usuarios (username, password, nombre, cargo, rol)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (username, password, nombre, cargo, rol))
+            conn.commit()
+            print("✓ Personal judicial de pruebas (7 usuarios) sembrado con éxito en SQLite.")
+    except Exception as e:
+        print(f"Error sembrando usuarios: {e}")
+    finally:
+        conn.close()
+
+# Ejecutamos las funciones en el orden correcto al iniciar el backend
+init_db()
+simular_asignaciones_admin()
+crear_usuarios_prueba()
+
+class EditarExpedienteRequest(BaseModel):
+    demandante: str
+    demandado: str
+    # Nota: El número de expediente no se incluye porque será la llave en la URL y es inmutable.
 
 class JurisprudenciaRequest(BaseModel):
     texto_expediente: str
@@ -113,6 +199,39 @@ class ChatRequest(BaseModel):
     texto_expediente: str
     historial: list[MensajeChat] = []  # Usamos list nativo de Python
     datos_extraidos: dict = {}
+
+class SaveAnalysisRequest(BaseModel):
+    numero_expediente: str
+    tiempo_procesamiento_seg: float
+    paginas_ocr: int
+    resultados_json: dict
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+class RegisterRequest(BaseModel):
+    dni: str
+    cargo: str
+    nombre: str
+    email: str
+    password: str
+
+class AsignacionRequest(BaseModel):
+    numero_expediente: str
+    rol_columna: str      # "asignado_juez", "asignado_secretario", "asignado_asistente", "asignado_mesapartes", "asignado_liquidador"
+    username_usuario: str  # Nombre de usuario asignado, o enviar "" para desasignar (quitar acceso)
+
+class CrearExpedienteRequest(BaseModel):
+    numero_expediente: str
+    demandante: str
+    demandado: str
+    tipo: str = "Proceso de Alimentos"
+    asignado_juez: str = None
+    asignado_secretario: str = None
+    asignado_asistente: str = None
+    asignado_mesapartes: str = None
+    asignado_liquidador: str = None
 
 # Inicialización de la API del Sistema de Análisis Automatizado
 app = FastAPI(
@@ -819,26 +938,50 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
 @app.post("/api/v1/analyze-document")
 async def analizar_expediente(
     file: UploadFile = File(...),
-    forzar_ocr: bool = Form(False)  # <-- Nuevo parámetro para activar Tesseract
+    forzar_ocr: bool = Form(False),
+    numero_expediente: str = Form(...),
+    usuario_auditoria: str = Form("Desconocido"),
+    inconsistencia_nombre: bool = Form(False)
 ):
     """
-    Endpoint principal. Recibe un PDF, extrae entidades y GUARDA las métricas en SQLite.
-    Permite forzar lectura OCR Profunda si el usuario lo requiere.
+    Endpoint principal optimizado. Recibe un PDF, extrae el texto, ejecuta validaciones 
+    perimetrales de seguridad (Fail-Fast) y, tras completar el pipeline cognitivo, 
+    PERSISTE el análisis estructurado directamente en la base de datos SQLite.
     """
     if not file.filename.endswith('.pdf'):
         raise HTTPException(status_code=400, detail="Solo se admiten expedientes en formato digital PDF.")
 
-    inicio_timer = time.time() # ⏱️ Iniciamos el cronómetro
+    conn = get_db_connection()
+    inicio_timer = time.time()
 
     try:
-        # 1. Lectura del archivo (Ingesta)
+        # 🛡️ 1. AUDITORÍA PREVENTIVA: Registro de inconsistencia forzada en el nombre del archivo
+        if inconsistencia_nombre:
+            timestamp_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn.execute('''
+                INSERT INTO log_seguridad (timestamp, usuario, accion_registrada, expediente, ip_origen)
+                VALUES (?, ?, ?, ?, '127.0.0.1')
+            ''', (
+                timestamp_actual, 
+                usuario_auditoria, 
+                f"ALERTA: Forzó subida de PDF con nombre inconsistente ('{file.filename}')", 
+                numero_expediente
+            ))
+            conn.commit()
+            print(f"⚠️ LOG DE SEGURIDAD: {usuario_auditoria} forzó la subida de un archivo inconsistente para {numero_expediente}.")
+
+        # 2. INGESTA Y EXTRACCIÓN DE TEXTO (Selección de motor OCR)
         contenido = await file.read()
+
+        os.makedirs("pdfs_guardados", exist_ok=True)
+        # Sanitizamos el nombre reemplazando caracteres que puedan romper rutas en Windows/Linux
+        nombre_seguro = re.sub(r'[^a-zA-Z0-9-]', '_', numero_expediente)
+        with open(f"pdfs_guardados/{nombre_seguro}.pdf", "wb") as f:
+            f.write(contenido)
         
-        # 2. Pipeline de Análisis: Selección de Motor OCR
         if forzar_ocr:
             print("🚀 MODO ACTIVADO: OCR Profundo (Tesseract) por solicitud del usuario")
             texto_extraido = modulo_ocr_avanzado_imagen(contenido)
-            # Red de seguridad: si Tesseract falla, usa el método normal
             if texto_extraido == "[ERROR_OCR_PROFUNDO]" or not texto_extraido.strip():
                 print("⚠ Falló OCR Profundo, usando método estándar como respaldo...")
                 texto_extraido = modulo_ocr_tesseract(contenido)
@@ -846,29 +989,48 @@ async def analizar_expediente(
             print("⚡ MODO ACTIVADO: Lectura Rápida Estándar (PyPDF2/pdfplumber)")
             texto_extraido = modulo_ocr_tesseract(contenido)
             
-        # Continúa el pipeline normal
+        # 3. 🛡️ FILTRO DE INTEGRIDAD INTERNA (FAIL-FAST COGNITIVO)
+        expediente_interno = extraer_numero_expediente(texto_extraido)
+        
+        if expediente_interno:
+            clean_interno = re.sub(r'[^a-zA-Z0-9]', '', expediente_interno).lower()
+            clean_esperado = re.sub(r'[^a-zA-Z0-9]', '', numero_expediente).lower()
+            
+            # Si el contenido interno de las páginas no coincide con el caso seleccionado, abortamos la carga
+            if clean_interno != clean_esperado:
+                print(f"🛑 BLOQUEO DE INTEGRIDAD: El PDF interno es {expediente_interno}, pero se esperaba {numero_expediente}.")
+                timestamp_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                conn.execute('''
+                    INSERT INTO log_seguridad (timestamp, usuario, accion_registrada, expediente, ip_origen)
+                    VALUES (?, ?, ?, ?, '127.0.0.1')
+                ''', (timestamp_actual, usuario_auditoria, f"RECHAZO CRÍTICO: Contenido interno del PDF correspondía a {expediente_interno}", numero_expediente))
+                conn.commit()
+                
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Fallo de Integridad RAG: El escaneo interno de la IA detectó que este documento pertenece al expediente '{expediente_interno}', pero usted seleccionó el caso '{numero_expediente}' en su bandeja. Operación cancelada por seguridad."
+                )
+        else:
+            print("⚠ ADVERTENCIA: La IA no pudo identificar un formato de expediente explícito en la carátula interna. Se procede por tolerancia.")
+
+        # 4. PIPELINE DE ANÁLISIS AVANZADO DE INTELIGENCIA ARTIFICIAL
+        print("✅ Control perimetral superado. Iniciando análisis cognitivo...")
         entidades_ner = modulo_ner_spacy(texto_extraido)
         monto_p = float(entidades_ner.get("monto_solicitado", 0) or 0)
+        
         analisis_llm = modulo_rag_mistral(texto_extraido, entidades_ner)
         analisis_plazos = modulo_extraccion_plazos(texto_extraido)
         analisis_admisibilidad = modulo_verificacion_admisibilidad(texto_extraido)
         analisis_financiero = modulo_auditoria_financiera(texto_extraido, monto_p)
         analisis_cargas = modulo_capacidad_cargas(texto_extraido)
         
-        # 3. GUARDAR MÉTRICAS EN SQLITE
+        # Métrica de rendimiento computacional
         fin_timer = time.time()
         tiempo_total = round(fin_timer - inicio_timer, 2)
         paginas_estimadas = max(1, len(texto_extraido) // 1500)
 
-        # Métricas de calidad
-        campos_encontrados = sum(1 for v in [entidades_ner["demandante"]["nombre"], entidades_ner["demandado"]["nombre"]] if v != "No detectado")
-        m_f1_ner = round((campos_encontrados / 2) * 0.95, 2)
-        m_ocr_precision = 92.5 if "[TEXTO NO DETECTADO]" not in texto_extraido else 0.0
-        import random
-        m_bert_score = round(random.uniform(0.72, 0.82), 2)
-
-        # Estructuramos los resultados antes para poder empaquetarlos en la BD
-        resultados_analisis = {
+        # Estructuramos el diccionario exclusivo de resultados procesados por los módulos
+        diccionario_resultados = {
             "sujetos_procesales": entidades_ner,
             "sintesis_rag": analisis_llm["resumen"],
             "postura_defensa": analisis_llm["postura"],
@@ -879,80 +1041,48 @@ async def analizar_expediente(
             "capacidad_cargas": analisis_cargas
         }
 
-        try:
-            conn = get_db_connection()
-            # Añadimos json_resultados al INSERT
-            conn.execute('''
-                INSERT INTO registro_expedientes 
-                (numero_expediente, fecha_analisis, demandante, demandado, monto_petitorio, 
-                 estado_auditoria, riesgo_capacidad, tiempo_procesamiento_seg, paginas_ocr,
-                 bert_score, f1_ner, ocr_precision, json_resultados)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                file.filename.replace('.pdf', ''),
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                entidades_ner["demandante"]["nombre"],
-                entidades_ner["demandado"]["nombre"],
-                monto_p,
-                "BRECHA DETECTADA" if analisis_financiero.get("alerta") else "RAZONABLE",
-                analisis_cargas.get("carga_nivel", "Desconocida"),
-                tiempo_total,
-                paginas_estimadas,
-                m_bert_score, 
-                m_f1_ner, 
-                m_ocr_precision,
-                json.dumps(resultados_analisis) # <-- Guardamos todo el objeto estructurado como texto
-            ))
-            conn.commit()
-            conn.close()
-        except Exception as db_error:
-            print(f"Error guardando en BD local: {db_error}")
-            
-        try:
-            conn = get_db_connection()
-            # Generar Log de Seguridad
-            conn.execute('''
-                INSERT INTO log_seguridad 
-                (timestamp, usuario, accion_registrada, expediente, ip_origen)
-                VALUES (?, ?, ?, ?, ?)
-            ''', (
-                datetime.now().strftime("%d/%m/%Y %H:%M"),
-                "Dr. Diego Valdivia", # Usuario actual
-                "Análisis RAG y Extracción NER",
-                file.filename.replace('.pdf', ''),
-                "127.0.0.1" # Simulación de IP local
-            ))
-            conn.commit()
-            conn.close()
-        except Exception as log_error:
-            print(f"Error guardando log de seguridad: {log_error}")
+        # 💾 5. PERSISTENCIA EN BASE DE DATOS SQLITE (Elimina el Hardcodeo)
+        # Convertimos el diccionario a una cadena JSON válida con soporte de caracteres latinos/tildes
+        json_resultados_string = json.dumps(diccionario_resultados, ensure_ascii=False)
+        timestamp_concluido = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 4. Ensamblar la respuesta JSON para el frontend
-        respuesta = {
+        conn.execute('''
+            UPDATE registro_expedientes 
+            SET json_resultados = ?, 
+                estado_auditoria = 'COMPLETADO',
+                fecha_analisis = ?,
+                paginas_ocr = ?,
+                tiempo_procesamiento_seg = ?
+            WHERE numero_expediente = ?
+        ''', (json_resultados_string, timestamp_concluido, paginas_estimadas, tiempo_total, numero_expediente))
+        conn.commit()
+        
+        print(f"💾 BASE DE DATOS: Análisis RAG indexado permanentemente para el caso {numero_expediente}")
+
+        # 6. RETORNO DE RESPUESTA SÍNCRONA AL FRONTEND
+        return {
             "status": "success",
             "texto_completo": texto_extraido,
             "metadata": {
                 "archivo": file.filename,
                 "juzgado": "Familia",
+                "tiempo_segundos": tiempo_total,
+                "paginas": paginas_estimadas
             },
-            "resultados": {
-                "sujetos_procesales": entidades_ner,
-                "sintesis_rag": analisis_llm["resumen"],
-                "postura_defensa": analisis_llm["postura"],
-                "puntos_sugeridos": analisis_llm["puntos_controvertidos"],
-                "plazos": analisis_plazos,
-                "admisibilidad": analisis_admisibilidad,
-                "revision_financiera": analisis_financiero,
-                "capacidad_cargas": analisis_cargas
-            }
+            "resultados": diccionario_resultados
         }
-        return respuesta
         
+    except HTTPException as he:
+        # Re-lanzamos de manera íntegra los errores controlados (400) para que React los pinte en el cliente
+        raise he
     except Exception as e:
+        # En caso de fallas imprevistas del sistema, imprimimos la traza completa en la consola y enviamos un 500
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-
+    finally:
+        conn.close()
+        
 @app.post("/api/v1/chat")
 async def chat_expediente(request: ChatRequest):
     if not request.texto_expediente:
@@ -1100,6 +1230,69 @@ async def regenerar_resumen_con_feedback(req: RegenerarRequest):
     except Exception as e:
         print(f"Error al regenerar: {e}")
         raise HTTPException(status_code=500, detail=f"Error al regenerar: {str(e)}")
+
+@app.post("/api/v1/save-analysis")
+async def guardar_analisis_aprobado(req: SaveAnalysisRequest):
+    """
+    Guarda o actualiza el análisis definitivo en la base de datos
+    después de que el Especialista/Juez lo ha revisado y aprobado.
+    """
+    try:
+        # Extraemos los datos críticos del JSON que nos envía React
+        entidades = req.resultados_json.get("sujetos_procesales", {})
+        demandante = entidades.get("demandante", {}).get("nombre", "No detectado")
+        demandado = entidades.get("demandado", {}).get("nombre", "No detectado")
+        monto_p = float(entidades.get("monto_solicitado", 0))
+        
+        financiero = req.resultados_json.get("revision_financiera", {})
+        estado_auditoria = "BRECHA DETECTADA" if financiero.get("alerta") else "RAZONABLE"
+        
+        cargas = req.resultados_json.get("capacidad_cargas", {})
+        riesgo_capacidad = cargas.get("carga_nivel", "Desconocida")
+
+        json_texto = json.dumps(req.resultados_json)
+
+        # Generar métricas simuladas de calidad para el Dashboard
+        campos_encontrados = sum(1 for v in [demandante, demandado] if v != "No detectado")
+        m_f1_ner = round((campos_encontrados / 2) * 0.95, 2)
+        import random
+        m_bert_score = round(random.uniform(0.72, 0.82), 2)
+        m_ocr_precision = 92.5
+        
+        conn = get_db_connection()
+        
+        # LÓGICA UPSERT (Actualizar si existe, Insertar si es nuevo)
+        existente = conn.execute("SELECT id FROM registro_expedientes WHERE numero_expediente = ?", (req.numero_expediente,)).fetchone()
+        
+        if existente:
+            # Si el expediente ya existe en la BD, lo actualizamos (UPDATE)
+            conn.execute('''
+                UPDATE registro_expedientes 
+                SET fecha_analisis=?, demandante=?, demandado=?, monto_petitorio=?, 
+                    estado_auditoria=?, riesgo_capacidad=?, json_resultados=?, bert_score=?
+                WHERE numero_expediente=?
+            ''', (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), demandante, demandado, monto_p, 
+                  estado_auditoria, riesgo_capacidad, json_texto, m_bert_score, req.numero_expediente))
+        else:
+            # Si es la primera vez que se aprueba, lo creamos (INSERT)
+            conn.execute('''
+                INSERT INTO registro_expedientes 
+                (numero_expediente, fecha_analisis, demandante, demandado, monto_petitorio, 
+                 estado_auditoria, riesgo_capacidad, tiempo_procesamiento_seg, paginas_ocr,
+                 bert_score, f1_ner, ocr_precision, json_resultados)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (req.numero_expediente, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), demandante, demandado, 
+                  monto_p, estado_auditoria, riesgo_capacidad, req.tiempo_procesamiento_seg, 
+                  req.paginas_ocr, m_bert_score, m_f1_ner, m_ocr_precision, json_texto))
+        
+        conn.commit()
+        conn.close()
+        
+        return {"status": "success", "message": "Análisis aprobado y guardado en el sistema."}
+        
+    except Exception as e:
+        print(f"Error guardando expediente definitivo: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/export-word")
 async def export_word(data: dict = Body(...)):
@@ -1437,6 +1630,313 @@ async def buscar_jurisprudencia_semantica(req: JurisprudenciaRequest):
     except Exception as e:
         print(f"Error en búsqueda de jurisprudencia en BD: {e}")
         raise HTTPException(status_code=500, detail="Error al consultar el historial de la base de datos.")
+
+@app.get("/api/v1/expedientes")
+async def obtener_lista_expedientes(username: str = None, rol: str = None):
+    """
+    Obtiene los expedientes de la base de datos aplicando un filtro estricto:
+    - El admin ve la bandeja global completa.
+    - Los usuarios jurisdiccionales ven ÚNICAMENTE los casos asignados a su cuenta y rol.
+    """
+    conn = get_db_connection()
+    try:
+        # 1. DEFINICIÓN DE LA CONSULTA SEGÚN EL ROL DEL USUARIO CONECTADO
+        if rol == "admin" or not rol or not username:
+            # El Administrador de Módulo (o consultas sin credenciales) ve todo
+            query = "SELECT * FROM registro_expedientes ORDER BY id DESC"
+            parametros = ()
+        else:
+            # Mapeamos de forma estricta el rol con su respectiva columna de asignación
+            columnas_roles = {
+                "juez": "asignado_juez",
+                "secretario": "asignado_secretario",
+                "asistente": "asignado_asistente",
+                "mesapartes": "asignado_mesapartes",
+                "liquidador": "asignado_liquidador"
+            }
+            columna_objetivo = columnas_roles.get(rol.lower())
+            
+            if columna_objetivo:
+                # Filtramos para que la celda de asignación coincida con el username del logueado
+                query = f"SELECT * FROM registro_expedientes WHERE {columna_objetivo} = ? ORDER BY id DESC"
+                parametros = (username,)
+            else:
+                # Red de seguridad: si viene un rol corrupto o desconocido, retorna una lista vacía
+                query = "SELECT * FROM registro_expedientes WHERE 1=0"
+                parametros = ()
+
+        # 2. EJECUCIÓN DE LA CONSULTA FILTRADA
+        filas = conn.execute(query, parametros).fetchall()
+        
+        lista_expedientes = []
+        for fila in filas:
+            caratula = f"{fila['demandante']} c/ {fila['demandado']} s/ ALIMENTOS"
+            fecha_corta = fila["fecha_analisis"].split(" ")[0] if fila["fecha_analisis"] else "Sin fecha"
+            tiene_ia = fila["json_resultados"] is not None
+
+            lista_expedientes.append({
+                "id": fila["id"],
+                "numero_expediente": f"{fila['numero_expediente']}",
+                "caratula": caratula.upper(),
+                "tipo": "Proceso de Alimentos",
+                "estado": "Completado" if tiene_ia else "Pendiente",
+                "vencimiento": f"Analizado el {fecha_corta}" if tiene_ia else "Pendiente de análisis"
+            })
+
+        return {"status": "success", "data": lista_expedientes}
+        
+    except Exception as e:
+        print(f"Error al obtener expedientes filtrados: {e}")
+        raise HTTPException(status_code=500, detail="Error al cargar la tabla segmentada.")
+    finally:
+        conn.close()
+
+@app.get("/api/v1/expedientes/{numero}")
+async def obtener_detalle_expediente(numero: str):
+    """
+    Recupera de forma individual toda la información de un expediente, 
+    incluyendo sus asignaciones vigentes y el análisis cognitivo estructurado 
+    si ya fue procesado previamente por la IA.
+    """
+    conn = get_db_connection()
+    try:
+        fila = conn.execute("SELECT * FROM registro_expedientes WHERE numero_expediente = ?", (numero,)).fetchone()
+        if not fila:
+            raise HTTPException(status_code=404, detail="Expediente no encontrado")
+            
+        # Decodificamos el string de la base de datos a un diccionario real de Python
+        resultados_dict = json.loads(fila["json_resultados"]) if fila["json_resultados"] else None
+        
+        return {
+            "status": "success",
+            "data": {
+                "numero_expediente": fila["numero_expediente"],
+                "demandante": fila["demandante"],
+                "demandado": fila["demandado"],
+                "tiene_analisis": fila["json_resultados"] is not None,
+                
+                # 🚀 CLAVE DE COMPATIBILIDAD INTERNA:
+                # Se mapea tanto en 'resultados' como en 'resultados_json' para asegurar que 
+                # tanto el dashboard como el useEffect de analysis.jsx lean la estructura sin mutaciones.
+                "resultados": resultados_dict,
+                "resultados_json": resultados_dict,
+                
+                # Control de Accesos por Rol institucional
+                "asignado_juez": fila["asignado_juez"],
+                "asignado_secretario": fila["asignado_secretario"],
+                "asignado_asistente": fila["asignado_asistente"],
+                "asignado_mesapartes": fila["asignado_mesapartes"],
+                "asignado_liquidador": fila["asignado_liquidador"]
+            }
+        }
+    finally:
+        conn.close()
+
+@app.post("/api/v1/login")
+async def login_sistema(req: LoginRequest):
+    """
+    Verifica las credenciales del usuario y retorna sus datos de perfil y rol.
+    """
+    conn = get_db_connection()
+    try:
+        usuario = conn.execute('''
+            SELECT username, nombre, cargo, rol 
+            FROM usuarios 
+            WHERE username = ? AND password = ?
+        ''', (req.username, req.password)).fetchone()
+        
+        if not usuario:
+            raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos.")
+            
+        return {
+            "status": "success",
+            "data": {
+                "username": usuario["username"],
+                "nombre": usuario["nombre"],
+                "cargo": usuario["cargo"],
+                "rol": usuario["rol"]
+            }
+        }
+    finally:
+        conn.close()
+
+@app.post("/api/v1/register")
+async def registrar_usuario(req: RegisterRequest):
+    """
+    Registra un nuevo usuario institucional en la base de datos SQLite.
+    Usa el prefijo del correo electrónico institucional como 'username'.
+    """
+    # Generamos el username extrayendo el prefijo del correo (ej: m.gomez de m.gomez@pj.gob.pe)
+    username_generado = req.email.split('@')[0].lower()
+    
+    # Mapeamos el rol interno basado en el cargo seleccionado
+    # 'juez' o 'admin' tendrán privilegios de visualización/auditoría; 'secretario' y 'especialista' son secretarios
+    rol_interno = "secretario"
+    if req.cargo == "juez":
+        rol_interno = "juez"
+    elif req.cargo == "admin":
+        rol_interno = "admin"
+
+    # Formateamos estéticamente el texto del cargo para la base de datos
+    cargos_nombres = {
+        "juez": "Juez de Paz Letrado",
+        "secretario": "Secretario Judicial",
+        "especialista": "Especialista Legal"
+    }
+    cargo_formateado = cargos_nombres.get(req.cargo, "Personal Jurisdiccional")
+
+    conn = get_db_connection()
+    try:
+        # Verificamos si el usuario o DNI ya existen para evitar duplicados
+        existe = conn.execute('SELECT id FROM usuarios WHERE username = ?', (username_generado,)).fetchone()
+        if existe:
+            raise HTTPException(status_code=400, detail="El correo institucional ya se encuentra registrado.")
+
+        # Insertamos el nuevo usuario en la base de datos
+        conn.execute('''
+            INSERT INTO usuarios (username, password, nombre, cargo, rol)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (username_generado, req.password, req.nombre, cargo_formateado, rol_interno))
+        conn.commit()
+        
+        return {
+            "status": "success", 
+            "message": f"Usuario {username_generado} registrado con éxito. Solicite aprobación al administrador."
+        }
+    except HTTPException as he:
+        raise he
+    except Exception as e:
+        print(f"Error en el registro: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al procesar el registro.")
+    finally:
+        conn.close()
+
+@app.get("/api/v1/usuarios-personal")
+async def listar_personal_judicial():
+    """Retorna todo el personal activo registrado en el sistema clasificado para los dropdowns de asignación"""
+    conn = get_db_connection()
+    try:
+        filas = conn.execute("SELECT username, nombre, cargo, rol FROM usuarios WHERE rol != 'admin'").fetchall()
+        return {"status": "success", "data": [dict(f) for f in filas]}
+    finally:
+        conn.close()
+
+@app.post("/api/v1/asignar-expediente")
+async def ejecutar_asignacion_judicial(req: AsignacionRequest):
+    """Asigna un usuario a un rol específico de un expediente. Sobrescribe si ya existía uno anterior."""
+    # Lista blanca para prevenir inyecciones SQL en los nombres de las columnas
+    columnas_validas = ["asignado_juez", "asignado_secretario", "asignado_asistente", "asignado_mesapartes", "asignado_liquidador"]
+    if req.rol_columna not in columnas_validas:
+        raise HTTPException(status_code=400, detail="Columna de rol inválida.")
+
+    valor_asignado = req.username_usuario if req.username_usuario.strip() != "" else None
+
+    conn = get_db_connection()
+    try:
+        # Ejecutamos un query dinámico seguro inyectando la columna previamente sanitizada
+        conn.execute(f'''
+            UPDATE registro_expedientes 
+            SET {req.rol_columna} = ? 
+            WHERE numero_expediente = ?
+        ''', (valor_asignado, req.numero_expediente))
+        conn.commit()
+        
+        accion = f"Asignación de personal modificada en rol {req.rol_columna} a favor de {req.username_usuario}"
+        return {"status": "success", "message": "Asignación actualizada oficialmente en el expediente."}
+    except Exception as e:
+        print(f"Error ejecutando asignación: {e}")
+        raise HTTPException(status_code=500, detail="Error al escribir la asignación en la base de datos.")
+    finally:
+        conn.close()
+
+@app.post("/api/v1/crear-expediente")
+async def crear_expediente_manual(req: CrearExpedienteRequest):
+    """
+    Registra un nuevo expediente en la base de datos (Mesa de Partes/Admin).
+    Permite opcionalmente inyectar los encargados desde su creación.
+    """
+    conn = get_db_connection()
+    try:
+        # Validación de duplicados
+        existe = conn.execute("SELECT id FROM registro_expedientes WHERE numero_expediente = ?", (req.numero_expediente.strip(),)).fetchone()
+        if existe:
+            raise HTTPException(status_code=400, detail=f"El expediente {req.numero_expediente} ya existe en el sistema.")
+
+        conn.execute('''
+            INSERT INTO registro_expedientes 
+            (numero_expediente, demandante, demandado, estado_auditoria, riesgo_capacidad, paginas_ocr, tiempo_procesamiento_seg, json_resultados,
+             asignado_juez, asignado_secretario, asignado_asistente, asignado_mesapartes, asignado_liquidador)
+            VALUES (?, ?, ?, 'PENDIENTE', 'N/A', 0, 0, NULL, ?, ?, ?, ?, ?)
+        ''', (
+            req.numero_expediente.strip(), req.demandante.upper().strip(), req.demandado.upper().strip(),
+            req.asignado_juez if req.asignado_juez else None,
+            req.asignado_secretario if req.asignado_secretario else None,
+            req.asignado_asistente if req.asignado_asistente else None,
+            req.asignado_mesapartes if req.asignado_mesapartes else None,
+            req.asignado_liquidador if req.asignado_liquidador else None
+        ))
+        conn.commit()
+        return {"status": "success", "message": "Expediente pre-registrado exitosamente en la base de datos."}
+    except Exception as e:
+        print(f"Error al registrar expediente manual: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al registrar el caso.")
+    finally:
+        conn.close()
+
+@app.put("/api/v1/expedientes/{numero}")
+async def editar_expediente(numero: str, req: EditarExpedienteRequest):
+    """Permite al Administrador corregir errores ortográficos en los nombres de las partes."""
+    conn = get_db_connection()
+    try:
+        # Verificamos que exista
+        existe = conn.execute("SELECT id FROM registro_expedientes WHERE numero_expediente = ?", (numero,)).fetchone()
+        if not existe:
+            raise HTTPException(status_code=404, detail="Expediente no encontrado.")
+            
+        conn.execute('''
+            UPDATE registro_expedientes 
+            SET demandante = ?, demandado = ?
+            WHERE numero_expediente = ?
+        ''', (req.demandante.upper().strip(), req.demandado.upper().strip(), numero))
+        conn.commit()
+        return {"status": "success", "message": "Metadatos del expediente actualizados con éxito."}
+    except Exception as e:
+        print(f"Error al editar expediente: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al editar el caso.")
+    finally:
+        conn.close()
+
+@app.delete("/api/v1/expedientes/{numero}")
+async def eliminar_expediente(numero: str):
+    """Elimina un expediente físicamente de la base de datos (Operación exclusiva de Admin)."""
+    conn = get_db_connection()
+    try:
+        # Se podría hacer un borrado lógico (estado='ELIMINADO'), pero haremos borrado físico para limpiar
+        conn.execute("DELETE FROM registro_expedientes WHERE numero_expediente = ?", (numero,))
+        conn.commit()
+        return {"status": "success", "message": "Expediente eliminado definitivamente."}
+    except Exception as e:
+        print(f"Error al eliminar expediente: {e}")
+        raise HTTPException(status_code=500, detail="Error interno al eliminar el caso.")
+    finally:
+        conn.close()
+
+@app.get("/api/v1/expedientes/{numero}/pdf")
+async def obtener_pdf_expediente(numero: str):
+    """
+    Retorna el archivo PDF binario original utilizando FileResponse 
+    para permitir una navegación fluida e indexación en el visor de React.
+    """
+    import os
+    from fastapi.responses import FileResponse
+    
+    nombre_seguro = re.sub(r'[^a-zA-Z0-9-]', '_', numero)
+    ruta_archivo = f"pdfs_guardados/{nombre_seguro}.pdf"
+    
+    if not os.path.exists(ruta_archivo):
+        raise HTTPException(status_code=404, detail="El archivo PDF físico no se encuentra en el servidor.")
+        
+    return FileResponse(ruta_archivo, media_type="application/pdf")
 
 # Punto de entrada para levantar el servidor localmente
 if __name__ == "__main__":

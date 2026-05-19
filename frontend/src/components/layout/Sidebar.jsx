@@ -1,5 +1,5 @@
 import { Home, BrainCircuit, BarChart3, ShieldCheck, LogOut } from 'lucide-react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom'; // 🚀 1. Importamos useNavigate
 
 const menuItems = [
   { icon: Home, label: 'Página Principal', path: '/dashboard' },
@@ -10,6 +10,16 @@ const menuItems = [
 
 export const Sidebar = () => {
   const location = useLocation();
+  const navigate = useNavigate(); // 🚀 2. Inicializamos el hook de navegación
+
+  // 🚀 3. Creamos la función que maneja el cierre de sesión
+  const handleLogout = () => {
+    // Limpiamos los datos de la sesión actual guardados en el navegador
+    localStorage.removeItem('usuario');
+    
+    // Redirigimos al usuario a la pantalla de login (asumiendo que tu ruta raíz es '/')
+    navigate('/');
+  };
 
   return (
     <div className="w-64 bg-[#1a3059] min-h-screen flex flex-col text-white shadow-xl">
@@ -47,7 +57,10 @@ export const Sidebar = () => {
 
       {/* 3. Footer del Sidebar */}
       <div className="p-4 border-t border-slate-700/50">
-        <button className="flex items-center w-full px-4 py-3 bg-slate-200 text-slate-800 rounded-lg hover:bg-white transition-all text-sm font-bold shadow-md active:scale-95">
+        <button 
+          onClick={handleLogout} // 🚀 4. Conectamos la función al evento clic del botón
+          className="flex items-center w-full px-4 py-3 bg-slate-200 text-slate-800 rounded-lg hover:bg-white transition-all text-sm font-bold shadow-md active:scale-95"
+        >
           <LogOut className="w-4 h-4 mr-2" />
           Cerrar Sesión
         </button>
