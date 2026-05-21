@@ -864,37 +864,41 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
     demdo_nombre = entidades.get("demandado", {}).get("nombre", "No detectado").title()
 
     prompt = f"""
-    Eres un asistente legal experto. Tu tarea es extraer información del expediente y redactarla en DOS FORMATOS.
-    Genera textos detallados y narrativos, pero con PRECISIÓN QUIRÚRGICA.
+    Eres un Relator y Asistente Legal experto de los Juzgados de Familia. Tu tarea es extraer información del expediente y redactar informes EXTENSOS, PROFUNDOS y con lenguaje jurídico sumamente formal, manteniendo una PRECISIÓN QUIRÚRGICA.
 
     DATOS RELEVANTES:
     - Demandante: {dem_nombre}
     - Demandado: {demdo_nombre}
 
-    REGLAS ESTRICTAS ANTI-ALUCINACIÓN Y FORMATO (CRÍTICO):
-    1. FECHAS EXACTAS: Copia la fecha LITERAL de la audiencia que aparece en el texto. NO inventes años ni meses.
-    2. CARGOS EXACTOS: Fíjate bien quién es la "Juez" y quién el "Especialista Legal". NO los intercambies.
-    3. DEVENGADOS: Lee cuidadosamente quién reconoce que no hay devengados pendientes (usualmente la demandante).
-    4. REGLA DEL ACUERDO: Si el acta dice "fracasó" pero luego detalla un acuerdo de pago, ignora el fracaso y céntrate en detallar el acuerdo final.
-    5. CORRECCIÓN ORTOGRÁFICA (ANTI-OCR): Los documentos escaneados tienen errores tipográficos generados por la máquina (ej. "Espenoza" por Espinoza, "Munoz" por Muñoz, "Chumpitaza" por Chumpitaz). CORRIGE lógicamente estos errores en los nombres y apellidos al redactar para que el texto sea impecable.
+    REGLAS ESTRICTAS DE REDACCIÓN Y FORMATO (CRÍTICO):
+    1. EXTENSIÓN OBLIGATORIA: Los campos 'tecnico' y 'estandar' DEBEN tener al menos 2 o 3 párrafos robustos. PROHIBIDO dar respuestas de una sola oración.
+    2. ESTRUCTURA DEL RESUMEN: Debes detallar los antecedentes, la pretensión exacta, quiénes son las autoridades (Juez y Especialista con nombres completos y cargos correctos) y la fecha LITERAL de la audiencia o resolución. NO inventes años.
+    3. ESTRUCTURA DE LA POSTURA: Debes detallar la actitud procesal (ej. rebeldía, asistencia), los términos económicos completos (monto, días de pago, banco) y acuerdos accesorios (devengados, costas, etc.).
+    4. PUNTOS CONTROVERTIDOS (CRÍTICO): Genera minimo 3 sugerencias ESPECÍFICAS Y REALES basadas SOLO en el texto.
+       - Si hay errores ortográficos del OCR o de formato, DEBES citar la palabra exacta usando comillas y REDACTAR UNA ORACIÓN COMPLETA explicando el problema. 
+       - NO des respuestas de pocas palabras. Explica siempre el contexto de tu sugerencia.
+       - Las sugerencias deben ser prácticas y accionables para mejorar el expediente o la redacción del mismo.
+       - Las sugerencias deben ser reales y basadas en el texto, NO inventes problemas que no existan.
+       - Una sugerencia deber ser especificamente centrado en los nombres de las partes, deben estar correctamente escritos y similares a los nombres y apellidos comunes del Perú, si sospechas de algun caso, no dudes y colocalo como sugerencia.
 
     EXPEDIENTE:
     {texto_plano[:25000]}
 
-    RESPONDE ÚNICAMENTE CON ESTE JSON (Completa las oraciones extendiéndote con los detalles REALES y nombres corregidos):
+    RESPONDE ÚNICAMENTE CON ESTE JSON (Reemplaza los corchetes con tu redacción extensa y profesional):
     {{
         "resumen": {{
-            "tecnico": "La parte demandante interpone una demanda de alimentos contra el demandado a favor de su menor hijo. [Continúa redactando de forma detallada. Menciona la FECHA EXACTA de la audiencia, quién es la Juez y el Especialista, y los artículos procesales. Menciona que el proceso concluyó con un acuerdo, pero NO MENCIONES MONTOS NI DINERO AQUÍ.]",
-            "estandar": "En este caso, la madre del menor [Nombre del hijo corregido] solicita mediante la vía judicial una pensión de alimentos. [Explica de forma ciudadana quiénes asistieron a la audiencia y que terminaron en un acuerdo pacífico, pero NO hables de montos de dinero todavía.]"
+            "tecnico": "[REDACTA AQUÍ UN ANÁLISIS EXTENSO. Párrafo 1: Antecedentes y pretensión. Párrafo 2: Detalles de la audiencia, fecha exacta y autoridades. Párrafo 3: Conclusión de esta etapa procesal. Usa lenguaje jurídico formal y detallado. No hables de montos aquí.]",
+            "estandar": "[REDACTA AQUÍ UN RESUMEN LARGO EN LENGUAJE CIUDADANO. Explica de forma detallada todo el contexto del caso, quién demanda a quién y qué ocurrió en la audiencia, para que cualquier persona sin estudios de derecho lo entienda a la perfección. No hables de montos aquí.]"
         }},
         "postura": {{
-            "tecnico": "Durante la audiencia, pese a la condición de rebeldía inicial del demandado, las partes arribaron a un acuerdo conciliatorio. [AQUÍ SÍ detalla todos los términos económicos: el monto exacto, los días de pago, el Banco de la Nación, y que la demandante reconoció que no hay devengados pendientes.]",
-            "estandar": "Aunque el papá no había respondido los documentos al inicio, se presentó a la audiencia y llegó a un acuerdo con la mamá. [Detalla aquí las promesas económicas: cuánto dinero pagará, qué días depositará en el Banco de la Nación y que la mamá aceptó que no hay pagos atrasados.]"
+            "tecnico": "[REDACTA AQUÍ LA POSTURA Y ACUERDOS DE FORMA EXTENSA. Párrafo 1: Actitud del demandado en el proceso. Párrafo 2: Detalles económicos exhaustivos (monto exacto, fechas, cuenta bancaria). Párrafo 3: Observaciones adicionales como el reconocimiento de devengados.]",
+            "estandar": "[REDACTA AQUÍ LOS ACUERDOS ECONÓMICOS EN LENGUAJE CIUDADANO. Explica de forma extensa y detallada cuánto se pagará, cómo se pagará y qué otras promesas se hicieron.]"
         }},
         "puntos_controvertidos": [
-            {{"tema": "Cumplimiento del acuerdo", "sugerencia": "Verificar la apertura de la cuenta en el Banco de la Nación y confirmar los depósitos."}},
-            {{"tema": "Auditoría de Documento (Errores OCR)", "sugerencia": "El sistema detectó errores de escaneo en el expediente original, como el apellido escrito como 'Espenoza' (posiblemente Espinoza) o apellidos unidos incorrectamente (ej. 'Chumpitaza'). Se sugiere revisar la digitación del documento original."}},
-            {{"tema": "Auditoría de Formato", "sugerencia": "Se detectaron bloques de palabras juntas sin espacios debido a la baja calidad del escaneo (OCR) del juzgado."}}
+            {{
+                "tema": "[Título del problema o sugerencia real]", 
+                "sugerencia": "[Descripción sumamente específica. Si es un error de texto, pon la palabra equivocada entre comillas '...' y redacta la oración completa de sugerencia]"
+            }}
         ]
     }}
     """
@@ -902,16 +906,16 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
     try:
         url = "http://localhost:11434/api/generate"
         payload = {
-            "model": "mistral",
+            "model": "mistral-nemo",
             "prompt": prompt,
             "format": "json",
             "stream": False,
             "options": {
-                "temperature": 0.1,   # Aumentado a 0.4 para más creatividad y textos largos
-                "num_predict": 7000,  # Aumentado a 7000 para permitir respuestas MÁS largas
-                "top_p": 0.9,         # Aumentado a 0.9 para más variabilidad
-                "top_k": 50,          # Aumentado a 50
-                "num_ctx": 25000      # Aumentado a 25k para mucho más contexto
+                "temperature": 0.2,   # Bajamos un poco la temperatura para evitar alucinaciones
+                "num_predict": 7000, 
+                "top_p": 0.9,         
+                "top_k": 50,          
+                "num_ctx": 25000      
             }
         }
         
@@ -993,12 +997,15 @@ async def analizar_expediente(
         expediente_interno = extraer_numero_expediente(texto_extraido)
         
         if expediente_interno:
+            # Quitamos prefijos como "EXP_", "EXP.", o "EXPEDIENTE" del número seleccionado
+            str_esperado = re.sub(r'(?i)^(expediente|exp_?|exp\.\s*)', '', numero_expediente)
+            
             clean_interno = re.sub(r'[^a-zA-Z0-9]', '', expediente_interno).lower()
-            clean_esperado = re.sub(r'[^a-zA-Z0-9]', '', numero_expediente).lower()
+            clean_esperado = re.sub(r'[^a-zA-Z0-9]', '', str_esperado).lower()
             
             # Si el contenido interno de las páginas no coincide con el caso seleccionado, abortamos la carga
             if clean_interno != clean_esperado:
-                print(f"🛑 BLOQUEO DE INTEGRIDAD: El PDF interno es {expediente_interno}, pero se esperaba {numero_expediente}.")
+                print(f"🛑 BLOQUEO DE INTEGRIDAD: El PDF interno es {clean_interno}, pero se esperaba {clean_esperado}.")
                 timestamp_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 conn.execute('''
                     INSERT INTO log_seguridad (timestamp, usuario, accion_registrada, expediente, ip_origen)
@@ -1029,7 +1036,7 @@ async def analizar_expediente(
         tiempo_total = round(fin_timer - inicio_timer, 2)
         paginas_estimadas = max(1, len(texto_extraido) // 1500)
 
-        # Estructuramos el diccionario exclusivo de resultados procesados por los módulos
+# Estructuramos el diccionario exclusivo de resultados procesados por los módulos
         diccionario_resultados = {
             "sujetos_procesales": entidades_ner,
             "sintesis_rag": analisis_llm["resumen"],
@@ -1038,7 +1045,19 @@ async def analizar_expediente(
             "plazos": analisis_plazos,
             "admisibilidad": analisis_admisibilidad,
             "revision_financiera": analisis_financiero,
-            "capacidad_cargas": analisis_cargas
+            "capacidad_cargas": analisis_cargas,
+            
+            "historial": [
+                {
+                    "id": int(time.time() * 1000),
+                    "fecha": datetime.now().strftime("%d/%m/%Y, %H:%M:%S"),
+                    "version": "v1",
+                    "titulo": "Generación Inicial RAG",
+                    "usuario": f"{usuario_auditoria} (Con Inconsistencia)" if inconsistencia_nombre else "Sistema SIPLAN (IA)",
+                    "comentario": "Subida forzada con discrepancia en carátula." if inconsistencia_nombre else "Análisis automático completado con éxito.",
+                    "isActual": True
+                }
+            ]
         }
 
         # 💾 5. PERSISTENCIA EN BASE DE DATOS SQLITE (Elimina el Hardcodeo)

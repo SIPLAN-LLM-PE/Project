@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { 
   CheckCircle, Save, Loader2, Bell, ChevronDown, Upload, Trash2, Search, ZoomIn, ZoomOut, 
-  Printer, Menu, ChevronUp, User, Bot, FileText, FileQuestion, ShieldAlert, AlertCircle
+  Printer, Menu, ChevronUp, User, Bot, FileText, FileQuestion, ShieldAlert, AlertCircle, ExternalLink
 } from 'lucide-react';
 
 // Importación de componentes locales
@@ -26,13 +26,17 @@ import { apiService } from '../../services/api';
 // ==========================================
 // CACHÉ DE MEMORIA GLOBAL
 // ==========================================
+// ==========================================
+// CACHÉ DE MEMORIA GLOBAL
+// ==========================================
 let draftAnalysisData = null;
 let draftPdfUrl = null;
 let draftPdfName = "";
 let draftHasDocument = false;
 let draftTextoExpediente = "";
+let draftHistorialEntries = []; 
 let draftChatMessages = [
-  { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIPLAN. ¿En qué te puedo ayudar?' }
+  { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIGEJA. ¿En qué te puedo ayudar?' }
 ];
 
 export const Analysis = () => {
@@ -56,11 +60,12 @@ export const Analysis = () => {
   const [listaExpedientes, setListaExpedientes] = useState([]);
   const [expedienteSeleccionado, setExpedienteSeleccionado] = useState(null);
   const [isReadOnly, setIsReadOnly] = useState(false);
+  const [pdfSearchTerm, setPdfSearchTerm] = useState("");
 
   // 2. ESTADOS DE DATOS
   const [analysisData, setAnalysisData] = useState(draftAnalysisData);
   const [textoExpediente, setTextoExpediente] = useState(draftTextoExpediente);
-  const [historialEntries, setHistorialEntries] = useState([]);
+  const [historialEntries, setHistorialEntries] = useState(draftHistorialEntries);
   const [hasDocument, setHasDocument] = useState(draftHasDocument);
   const [isLoading, setIsLoading] = useState(false);
   const [pdfUrl, setPdfUrl] = useState(draftPdfUrl);
@@ -105,8 +110,9 @@ export const Analysis = () => {
     draftPdfUrl = pdfUrl;
     draftPdfName = pdfName;
     draftHasDocument = hasDocument;
-    draftTextoExpediente = textoExpediente; // <-- ¡Esto era lo que faltaba!
-  }, [analysisData, pdfUrl, pdfName, hasDocument, textoExpediente]);
+    draftTextoExpediente = textoExpediente;
+    draftHistorialEntries = historialEntries;
+  }, [analysisData, pdfUrl, pdfName, hasDocument, textoExpediente, historialEntries]);
 
   // 🚀 NUEVO: Al cargar la pantalla, si ya hay un expediente seleccionado en el panel
   // y este ya tiene un análisis guardado en la BD, lo descarga automáticamente.
@@ -182,9 +188,11 @@ export const Analysis = () => {
 // 🚀 LÓGICA DE APERTURA AUTOMÁTICA DESDE EL DASHBOARD (Cargar bandeja y leer URL)
   useEffect(() => {
     const inicializarVistaAnalisis = async () => {
+      // 1. Recuperamos el perfil del usuario conectado desde el almacenamiento local
       const usuarioActivo = JSON.parse(localStorage.getItem('usuario')) || { username: "", rol: "" };
       
       try {
+        // 2. Cargamos la bandeja segmentada según el rol del operador judicial
         const res = await fetch(`http://localhost:8000/api/v1/expedientes?username=${usuarioActivo.username}&rol=${usuarioActivo.rol}`);
         const data = await res.json();
         
@@ -196,6 +204,7 @@ export const Analysis = () => {
           
           setListaExpedientes(listaMapeada);
 
+          // 3. Capturamos el parámetro 'exp' enviado a través de la redirección de la URL
           const params = new URLSearchParams(window.location.search);
           const expedienteUrl = params.get('exp');
 
@@ -206,17 +215,28 @@ export const Analysis = () => {
               setExpedienteSeleccionado(casoEncontrado);
               
               if (casoEncontrado.tiene_analisis) {
+                // 4. Descargamos las métricas persistidas en SQLite
                 const resDetalle = await fetch(`http://localhost:8000/api/v1/expedientes/${casoEncontrado.numero_expediente}`);
                 const dataDetalle = await resDetalle.json();
 
                 if (resDetalle.ok && dataDetalle.data && dataDetalle.data.tiene_analisis) {
-                  setAnalysisData(dataDetalle.data.resultados);
+                  const resData = dataDetalle.data.resultados;
+                  
+                  setAnalysisData(resData);
                   setHasDocument(true);
                   setPdfName(`${casoEncontrado.numero_expediente}.pdf`);
                   
-                  // 🚀 👇 NUEVA LÍNEA: Cargamos el PDF directamente desde el servidor web 👇
+                  // 🚀 PERSISTENCIA BINARIA: Enlazamos el visor al recurso PDF físico guardado en el servidor
                   setPdfUrl(`http://localhost:8000/api/v1/expedientes/${casoEncontrado.numero_expediente}/pdf`);
                   
+                  // 🚀 RESTAURACIÓN DEL HISTORIAL RAG: Recomponemos la línea de tiempo de auditoría guardada
+                  if (resData && resData.historial) {
+                    setHistorialEntries(resData.historial);
+                  } else {
+                    setHistorialEntries([]);
+                  }
+                  
+                  // Desplegamos automáticamente las tarjetas analíticas de la interfaz
                   setCardVisibility({
                     resumen: true, postura: true, plazos: true, sujetos: true,
                     financiera: true, capacidad: true, controversias: true
@@ -257,15 +277,19 @@ export const Analysis = () => {
           .then(res => res.json())
           .then(data => {
             if (data && data.data && (data.data.resultados_json || data.data.resultados)) {
-              // Sincronizamos las métricas analíticas estructuradas de Mistral IA
-              setAnalysisData(data.data.resultados_json || data.data.resultados);
+              const resData = data.data.resultados_json || data.data.resultados;
+              setAnalysisData(resData);
               setHasDocument(true);
-              setIsReadOnly(true); // Activamos Modo Solo Lectura
-              
-              // 🚀 PERSISTENCIA BINARIA: Enlazamos el visor al endpoint de descarga del servidor
+              setIsReadOnly(true); 
               setPdfUrl(`http://localhost:8000/api/v1/expedientes/${expediente.numero_expediente}/pdf`);
 
-              // Forzamos la visualización activa de todos los paneles analíticos
+              // 🚀 NUEVO: Restauramos el historial guardado al abrir de forma manual
+              if (resData && resData.historial) {
+                setHistorialEntries(resData.historial);
+              } else {
+                setHistorialEntries([]);
+              }
+
               setCardVisibility({
                 resumen: true, postura: true, plazos: true, sujetos: true,
                 financiera: true, capacidad: true, controversias: true
@@ -296,6 +320,7 @@ export const Analysis = () => {
       setPdfUrl(null);
     }
   };
+  
   // ==========================================
   // 5. FUNCIONES DE LÓGICA
   // ==========================================
@@ -379,22 +404,28 @@ const handleFileUpload = (event) => {
         setLoadingProgress(100);
         setLoadingText("¡Análisis Completado!");
         
-        setTimeout(() => {
+      setTimeout(() => {
           const data = response.resultados || response;
           setAnalysisData(data);
           setTextoExpediente(response.texto_ocr || response.texto_completo || "");
           setHasDocument(true);
 
-          const hitoInicial = {
-            id: Date.now(),
-            fecha: new Date().toLocaleString(),
-            version: 'v1',
-            titulo: 'Generación Inicial RAG',
-            usuario: marcarInconsistencia ? `${firmaUsuario} (Con Inconsistencia)` : 'Sistema SIPLAN (IA)',
-            comentario: marcarInconsistencia ? 'Subida forzada con discrepancia en carátula.' : 'Análisis automático completado con éxito.',
-            isActual: true
-          };
-          setHistorialEntries([hitoInicial]);
+          // 🚀 NUEVO: Leemos el historial inicial estructurado desde el backend
+          if (data && data.historial) {
+            setHistorialEntries(data.historial);
+          } else {
+            // Respaldo en caso de que falle la lectura
+            const hitoInicial = {
+              id: Date.now(),
+              fecha: new Date().toLocaleString(),
+              version: 'v1',
+              titulo: 'Generación Inicial RAG',
+              usuario: 'Sistema SIPLAN (IA)',
+              comentario: 'Análisis automático completado con éxito.',
+              isActual: true
+            };
+            setHistorialEntries([hitoInicial]);
+          }
 
           setCardVisibility({
             resumen: true, postura: true, plazos: true, sujetos: true,
@@ -417,6 +448,17 @@ const handleFileUpload = (event) => {
       setLoadingText("Error en el análisis. Revisa la consola.");
       setTimeout(() => setIsLoading(false), 2000);
     }
+  };
+
+  // 🚀 FUNCIÓN PARA SALTAR A LA CITA EN EL PDF
+  const handleJumpToSource = (textoExtraido) => {
+    if (!textoExtraido || textoExtraido === "No detectado") return;
+    
+    // Si la IA nos devuelve el nombre completo (ej: "SÁNCHEZ ROJAS, CARLOS"), 
+    // tomamos solo el primer apellido para asegurar que el buscador del PDF lo encuentre fácilmente
+    const terminoClave = textoExtraido.split(' ')[0].replace(',', '');
+    
+    setPdfSearchTerm(terminoClave);
   };
 
   const handleRegenerarResumen = async (correcciones) => {
@@ -471,13 +513,14 @@ const handleFileUpload = (event) => {
       draftPdfName = "";
       draftHasDocument = false;
       draftTextoExpediente = "";
+      draftHistorialEntries = [];
       draftChatMessages = [
         { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIPLAN. ¿En qué te puedo ayudar?' }
       ];
     };
 
   // NUEVA FUNCIÓN: Envía el análisis definitivo a la base de datos
-  const handleGuardarEnBD = async () => {
+const handleGuardarEnBD = async () => {
     if (!analysisData || !pdfName) return;
     setIsSavingDB(true);
     try {
@@ -488,15 +531,18 @@ const handleFileUpload = (event) => {
           numero_expediente: pdfName.replace('.pdf', ''),
           tiempo_procesamiento_seg: 15.5, // Tiempo referencial
           paginas_ocr: 2,                 // Páginas referenciales
-          resultados_json: analysisData   // Todo el estado actual (con o sin correcciones manuales)
+          
+          // 🚀 NUEVO: Inyectamos el historial de auditoría activo dentro del JSON antes de guardarlo
+          resultados_json: {
+            ...analysisData,
+            historial: historialEntries
+          }
         })
       });
-      
       const data = await res.json();
       if(data.status === "success") {
         setIsSavedDB(true);
         registrarCambioManual("Análisis oficial aprobado y guardado en la base de datos central.");
-        // Ocultar el estado de éxito después de 3 segundos
         setTimeout(() => setIsSavedDB(false), 3000);
       }
     } catch (error) {
@@ -802,11 +848,14 @@ const handleExportWord = async () => {
             {!isLoading && hasDocument && pdfUrl && (
               <div className="w-full h-full bg-white shadow-2xl rounded-lg overflow-hidden border border-slate-300 relative z-10">
                 <embed 
-                  src={pdfUrl} 
+                  // 🚀 MAGIA AQUÍ: Inyectamos el comando de búsqueda nativo del navegador
+                  src={pdfSearchTerm ? `${pdfUrl}#search="${encodeURIComponent(pdfSearchTerm)}"` : pdfUrl} 
                   type="application/pdf" 
                   width="100%" 
                   height="100%" 
                   className="min-h-full"
+                  // Clave (key) dinámica: Fuerza a React a recargar el iframe cuando cambia la búsqueda
+                  key={pdfSearchTerm || "default"}
                 />
               </div>
             )}
@@ -879,7 +928,7 @@ const handleExportWord = async () => {
                   />
                 )}
                 
-                {cardVisibility.sujetos && <SujetosProcesalesCard data={analysisData.sujetos_procesales} />}
+                {cardVisibility.sujetos && <SujetosProcesalesCard data={analysisData.sujetos_procesales} onJumpToSource={handleJumpToSource} />}
                 {cardVisibility.financiera && <FinancieraCard data={analysisData.revision_financiera} />}
                 
                 {!Object.values(cardVisibility).some(Boolean) && (
