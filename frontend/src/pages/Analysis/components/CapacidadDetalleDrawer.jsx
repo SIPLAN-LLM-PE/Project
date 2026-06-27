@@ -3,6 +3,16 @@ import { X, Scale, Calculator, AlertTriangle, Landmark } from 'lucide-react';
 
 export const CapacidadDetalleDrawer = ({ isOpen, onClose, data }) => {
   if (!data) return null;
+  const totalIngresos = Number(data.total_ingresos || 0);
+  const cargaEspecieReportada = Number(data.carga_especie_reportada ?? data.total_cargas ?? 0);
+  const cargaEspecieAplicada = Number(data.carga_especie_aplicada ?? data.total_cargas ?? cargaEspecieReportada);
+  const estadoCarga = String(data.carga_especie_estado || "no detectada").toLowerCase();
+  const estadoCargaColor =
+    estadoCarga === "probada"
+      ? "text-green-700 bg-green-100"
+      : estadoCarga === "alegada"
+      ? "text-amber-700 bg-amber-100"
+      : "text-slate-600 bg-slate-100";
 
   return (
     <div className={`fixed inset-y-0 right-0 w-[450px] bg-white shadow-2xl z-[100] transform transition-transform duration-300 ease-in-out border-l border-slate-200 ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}>
@@ -40,15 +50,18 @@ export const CapacidadDetalleDrawer = ({ isOpen, onClose, data }) => {
              <div className="space-y-3">
                 <div className="flex justify-between text-sm">
                    <span className="text-slate-500">Ingresos Totales Brutos</span>
-                   <span className="font-bold text-slate-800">S/. {data.total_ingresos.toFixed(2)}</span>
+                   <span className="font-bold text-slate-800">S/. {totalIngresos.toFixed(2)}</span>
                 </div>
                 <div className="flex justify-between text-sm">
                    <span className="text-slate-500">Límite Legal Máximo (60%)</span>
                    <span className="font-bold text-blue-600">S/. {data.tope_legal_60.toFixed(2)}</span>
                 </div>
                 <div className="flex justify-between text-sm border-b border-slate-100 pb-3">
-                   <span className="text-slate-500">Cargas Previas Detectadas</span>
-                   <span className="font-bold text-red-500">- S/. {data.total_cargas.toFixed(2)}</span>
+                   <span className="text-slate-500">Carga en Especie (HU14)</span>
+                   <div className="text-right">
+                     <span className="font-bold text-red-500">- S/. {cargaEspecieAplicada.toFixed(2)}</span>
+                     <p className={`mt-1 text-[9px] inline-block px-2 py-0.5 rounded font-bold ${estadoCargaColor}`}>{estadoCarga}</p>
+                   </div>
                 </div>
                 <div className="flex justify-between items-center pt-2">
                    <span className="text-slate-800 font-bold text-xs uppercase">Margen Libre para Sentencia</span>

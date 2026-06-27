@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Bell, ChevronDown, Download, BrainCircuit, Activity, Fingerprint, ShieldCheck, Loader2 
+import {
+  Bell, ChevronDown, Download, BrainCircuit, Activity, Fingerprint, ShieldCheck, Loader2, X, ChevronRight
 } from 'lucide-react';
 
 const Audit = () => {
@@ -8,6 +8,17 @@ const Audit = () => {
   const [securityData, setSecurityData] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
+  const [isOcrModalOpen, setIsOcrModalOpen] = useState(false);
+  const [ocrDetails, setOcrDetails] = useState(null);
+  const [isLoadingOcr, setIsLoadingOcr] = useState(false);
+
+  const [isBertModalOpen, setIsBertModalOpen] = useState(false);
+  const [bertDetails, setBertDetails] = useState(null);
+  const [isLoadingBert, setIsLoadingBert] = useState(false);
+
+  const [isF1ModalOpen, setIsF1ModalOpen] = useState(false);
+  const [f1Details, setF1Details] = useState(null);
+  const [isLoadingF1, setIsLoadingF1] = useState(false);
 
   // 2. Fetch para traer los datos del backend al cargar la página
   useEffect(() => {
@@ -25,7 +36,51 @@ const Audit = () => {
     fetchSecurityData();
   }, []);
 
-  // 3. Función para descargar el CSV de auditoría
+  // 3. Abrir el modal con detalle OCR por expediente
+  const handleAbrirOcrDetalle = async () => {
+    setIsOcrModalOpen(true);
+    if (ocrDetails) return; // ya cargado
+    setIsLoadingOcr(true);
+    try {
+      const res = await fetch('http://localhost:8000/api/v1/security/ocr-details');
+      const data = await res.json();
+      setOcrDetails(data);
+    } catch (e) {
+      console.error('Error cargando detalle OCR:', e);
+    } finally {
+      setIsLoadingOcr(false);
+    }
+  };
+
+  const handleAbrirBertDetalle = async () => {
+    setIsBertModalOpen(true);
+    if (bertDetails) return;
+    setIsLoadingBert(true);
+    try {
+      const res = await fetch('http://localhost:8000/api/v1/security/bertscore-details');
+      setBertDetails(await res.json());
+    } catch (e) {
+      console.error('Error cargando detalle BERTScore:', e);
+    } finally {
+      setIsLoadingBert(false);
+    }
+  };
+
+  const handleAbrirF1Detalle = async () => {
+    setIsF1ModalOpen(true);
+    if (f1Details) return;
+    setIsLoadingF1(true);
+    try {
+      const res = await fetch('http://localhost:8000/api/v1/security/f1-details');
+      setF1Details(await res.json());
+    } catch (e) {
+      console.error('Error cargando detalle F1:', e);
+    } finally {
+      setIsLoadingF1(false);
+    }
+  };
+
+  // 4. Función para descargar el CSV de auditoría
   const handleExportarCSV = async () => {
     setIsExporting(true);
     try {
@@ -106,13 +161,23 @@ const Audit = () => {
             {/* Tarjetas de Métricas de Calidad dinámicas */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
               
-              {/* Card 1: BERTScore */}
-              <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-                <h4 className="text-sm font-bold text-[#1a3059] mb-4">BERTSCORE (RAG)</h4>
+              {/* Card 1: BERTScore — clickeable */}
+              <div
+                onClick={securityData?.kpis?.docs_bert > 0 ? handleAbrirBertDetalle : undefined}
+                className={`bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between transition-all ${securityData?.kpis?.docs_bert > 0 ? 'cursor-pointer hover:border-slate-400 hover:shadow-md' : ''}`}
+              >
+                <div className="flex justify-between items-start mb-4">
+                  <h4 className="text-sm font-bold text-[#1a3059]">BERTSCORE (RAG)</h4>
+                  {securityData?.kpis?.docs_bert > 0 && (
+                    <span className="text-[9px] font-bold text-slate-500 flex items-center gap-0.5">
+                      Ver detalle <ChevronRight size={10} />
+                    </span>
+                  )}
+                </div>
                 <div className="flex justify-between items-center mb-4">
                   <div className="flex items-baseline gap-1">
                     <span className="text-4xl font-extrabold text-slate-800">
-                      {securityData?.kpis?.bertscore || "0.00"}
+                      {securityData?.kpis?.bertscore ?? "—"}
                     </span>
                     <span className="text-xs font-bold text-slate-500">/ 1.0</span>
                   </div>
@@ -121,18 +186,32 @@ const Audit = () => {
                   </div>
                 </div>
                 <div className="flex gap-3 text-[10px] font-medium">
-                  <span className="text-slate-700">Meta Superada</span>
+                  <span className="text-slate-700">
+                    {securityData?.kpis?.docs_bert > 0
+                      ? `Promedio de ${securityData.kpis.docs_bert} doc(s)`
+                      : "Sin datos aún"}
+                  </span>
                   <span className="text-slate-400">Objetivo: {'>'} 0.70</span>
                 </div>
               </div>
 
-              {/* Card 2: F1-Score NER */}
-              <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-                <h4 className="text-sm font-bold text-[#1a3059] mb-4">F1 - Score (NER)</h4>
+              {/* Card 2: F1-Score NER — clickeable */}
+              <div
+                onClick={securityData?.kpis?.docs_f1 > 0 ? handleAbrirF1Detalle : undefined}
+                className={`bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between transition-all ${securityData?.kpis?.docs_f1 > 0 ? 'cursor-pointer hover:border-blue-300 hover:shadow-md' : ''}`}
+              >
+                <div className="flex justify-between items-start mb-4">
+                  <h4 className="text-sm font-bold text-[#1a3059]">F1 - Score (NER)</h4>
+                  {securityData?.kpis?.docs_f1 > 0 && (
+                    <span className="text-[9px] font-bold text-blue-500 flex items-center gap-0.5">
+                      Ver detalle <ChevronRight size={10} />
+                    </span>
+                  )}
+                </div>
                 <div className="flex justify-between items-center mb-4">
                   <div className="flex items-baseline gap-1">
                     <span className="text-4xl font-extrabold text-blue-600">
-                      {securityData?.kpis?.f1_score || "0.00"}
+                      {securityData?.kpis?.f1_score ?? "—"}
                     </span>
                     <span className="text-xs font-bold text-slate-500">/ 1.0</span>
                   </div>
@@ -141,18 +220,32 @@ const Audit = () => {
                   </div>
                 </div>
                 <div className="flex gap-3 text-[10px] font-medium">
-                  <span className="text-slate-700">Meta Superada</span>
+                  <span className="text-slate-700">
+                    {securityData?.kpis?.docs_f1 > 0
+                      ? `Promedio de ${securityData.kpis.docs_f1} doc(s)`
+                      : "Sin datos aún"}
+                  </span>
                   <span className="text-slate-400">Objetivo: {'>'} 0.80</span>
                 </div>
               </div>
 
-              {/* Card 3: Precisión OCR */}
-              <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-                <h4 className="text-sm font-bold text-[#1a3059] mb-4">Presición OCR</h4>
+              {/* Card 3: Precisión OCR — clickeable para ver detalle por expediente */}
+              <div
+                onClick={securityData?.kpis?.docs_ocr > 0 ? handleAbrirOcrDetalle : undefined}
+                className={`bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between transition-all ${securityData?.kpis?.docs_ocr > 0 ? 'cursor-pointer hover:border-amber-300 hover:shadow-md' : ''}`}
+              >
+                <div className="flex justify-between items-start mb-4">
+                  <h4 className="text-sm font-bold text-[#1a3059]">Precisión OCR</h4>
+                  {securityData?.kpis?.docs_ocr > 0 && (
+                    <span className="text-[9px] font-bold text-amber-500 flex items-center gap-0.5">
+                      Ver detalle <ChevronRight size={10} />
+                    </span>
+                  )}
+                </div>
                 <div className="flex justify-between items-center mb-4">
                   <div className="flex items-baseline gap-1">
                     <span className="text-4xl font-extrabold text-amber-500">
-                      {securityData?.kpis?.precision_ocr || "0"}%
+                      {securityData?.kpis?.precision_ocr ?? "—"}{securityData?.kpis?.precision_ocr != null ? "%" : ""}
                     </span>
                   </div>
                   <div className="p-2.5 bg-amber-100 text-amber-500 rounded-lg">
@@ -160,8 +253,14 @@ const Audit = () => {
                   </div>
                 </div>
                 <div className="flex gap-3 text-[10px] font-medium">
-                  <span className="text-slate-700">Óptimo</span>
-                  <span className="text-slate-400">Objetivo: {'>'} 0.85%</span>
+                  <span className="text-slate-700">
+                    {securityData?.kpis?.docs_ocr > 0
+                      ? `Promedio de ${securityData.kpis.docs_ocr} doc(s)`
+                      : securityData?.kpis?.primera_fecha
+                        ? `Desde ${securityData.kpis.primera_fecha.split(" ")[0]}`
+                        : "Sin datos aún"}
+                  </span>
+                  <span className="text-slate-400">Objetivo: {'>'} 85%</span>
                 </div>
               </div>
 
@@ -229,6 +328,275 @@ const Audit = () => {
         )}
 
       </main>
+
+      {/* Modal de detalle OCR por expediente */}
+      {isOcrModalOpen && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+
+            {/* Header */}
+            <div className="flex justify-between items-start p-6 border-b border-slate-100">
+              <div>
+                <h3 className="text-lg font-bold text-[#1a3059]">Precisión OCR por Expediente</h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Comparación texto nativo (PyPDF2) vs texto procesado por OCR.
+                  Para PDFs escaneados sin texto nativo se usa una heurística de calidad de caracteres.
+                </p>
+              </div>
+              <button
+                onClick={() => setIsOcrModalOpen(false)}
+                className="text-slate-400 hover:text-slate-700 hover:bg-slate-100 p-1.5 rounded-lg transition-colors ml-4 shrink-0"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            {/* Contenido */}
+            <div className="overflow-y-auto flex-1 p-6">
+              {isLoadingOcr ? (
+                <div className="flex items-center justify-center h-32 text-amber-500">
+                  <Loader2 size={28} className="animate-spin mr-2" />
+                  <span className="text-sm font-bold">Cargando datos...</span>
+                </div>
+              ) : ocrDetails?.expedientes?.length > 0 ? (
+                <>
+                  {/* Resumen global */}
+                  <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 mb-5 flex justify-between items-center">
+                    <div>
+                      <p className="text-xs font-bold text-amber-700 uppercase tracking-wide">Promedio global</p>
+                      <p className="text-3xl font-extrabold text-amber-600">{ocrDetails.promedio_global}%</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xs text-slate-500">{ocrDetails.total} expediente(s) analizados</p>
+                      <p className="text-[10px] text-slate-400 mt-1">Objetivo: &gt; 85%</p>
+                    </div>
+                  </div>
+
+                  {/* Un bloque por expediente */}
+                  <div className="flex flex-col gap-3">
+                    {ocrDetails.expedientes.map((exp, idx) => {
+                      const colorProm = exp.ocr_promedio >= 85 ? 'text-emerald-600' : exp.ocr_promedio >= 70 ? 'text-amber-500' : 'text-red-500';
+                      return (
+                        <div key={idx} className="border border-slate-200 rounded-xl overflow-hidden">
+                          {/* Cabecera del expediente */}
+                          <div className="flex justify-between items-center bg-slate-50 px-4 py-3 border-b border-slate-200">
+                            <div>
+                              <p className="text-[11px] font-mono font-bold text-slate-700">{exp.expediente}</p>
+                              <p className="text-[10px] text-slate-400 mt-0.5">{exp.fecha}</p>
+                            </div>
+                            <div className="text-right">
+                              <p className="text-[10px] text-slate-500 font-medium">Promedio expediente</p>
+                              <p className={`text-xl font-extrabold ${colorProm}`}>{exp.ocr_promedio}%</p>
+                            </div>
+                          </div>
+
+                          {/* Desglose por PDF */}
+                          {exp.documentos && exp.documentos.length > 0 ? (
+                            <div className="divide-y divide-slate-100">
+                              {exp.documentos.map((pdf, pIdx) => {
+                                const colorPdf = pdf.ocr_precision >= 85 ? 'text-emerald-600' : pdf.ocr_precision >= 70 ? 'text-amber-500' : 'text-red-500';
+                                const badgeColor = pdf.metodo === 'PyPDF2'
+                                  ? 'bg-blue-100 text-blue-600'
+                                  : pdf.metodo === 'pdfplumber'
+                                    ? 'bg-purple-100 text-purple-600'
+                                    : 'bg-orange-100 text-orange-600';
+                                return (
+                                  <div key={pIdx} className="flex justify-between items-center px-4 py-2.5 hover:bg-slate-50">
+                                    <div className="flex items-center gap-2 min-w-0">
+                                      <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded shrink-0 ${badgeColor}`}>
+                                        {pdf.metodo}
+                                      </span>
+                                      <span className="text-[11px] text-slate-600 truncate font-medium" title={pdf.archivo}>
+                                        {pdf.archivo}
+                                      </span>
+                                    </div>
+                                    <span className={`text-sm font-extrabold shrink-0 ml-3 ${colorPdf}`}>
+                                      {pdf.ocr_precision}%
+                                    </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          ) : (
+                            <p className="px-4 py-2.5 text-[11px] text-slate-400 italic">
+                              Detalle por PDF no disponible (analizado antes de esta versión)
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Leyenda */}
+                  <div className="flex gap-4 mt-5 text-[10px] font-medium text-slate-500">
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span>≥ 85% Bueno</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block"></span>70–84% Aceptable</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-400 inline-block"></span>&lt; 70% Revisar</span>
+                  </div>
+                </>
+              ) : (
+                <div className="text-center text-slate-500 py-10 text-sm">
+                  No hay expedientes con datos de precisión OCR aún.
+                </div>
+              )}
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* Modal BERTScore */}
+      {isBertModalOpen && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xl max-h-[75vh] flex flex-col">
+            <div className="flex justify-between items-start p-6 border-b border-slate-100">
+              <div>
+                <h3 className="text-lg font-bold text-[#1a3059]">BERTScore (RAG) por Expediente</h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Fracción del vocabulario del resumen IA que proviene del documento fuente.
+                  Valores cercanos a 1.0 indican alta fidelidad (sin alucinaciones).
+                </p>
+              </div>
+              <button onClick={() => setIsBertModalOpen(false)} className="text-slate-400 hover:text-slate-700 hover:bg-slate-100 p-1.5 rounded-lg ml-4 shrink-0">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 p-6">
+              {isLoadingBert ? (
+                <div className="flex items-center justify-center h-32 text-slate-500">
+                  <Loader2 size={28} className="animate-spin mr-2" /><span className="text-sm font-bold">Cargando...</span>
+                </div>
+              ) : bertDetails?.expedientes?.length > 0 ? (
+                <>
+                  <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 mb-5 flex justify-between items-center">
+                    <div>
+                      <p className="text-xs font-bold text-slate-600 uppercase tracking-wide">Promedio global</p>
+                      <p className="text-3xl font-extrabold text-slate-800">{bertDetails.promedio_global}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xs text-slate-500">{bertDetails.total} expediente(s)</p>
+                      <p className="text-[10px] text-slate-400 mt-1">Objetivo: &gt; 0.70</p>
+                    </div>
+                  </div>
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="text-[10px] font-bold text-slate-500 uppercase tracking-widest border-b border-slate-200">
+                        <th className="pb-3 pr-4">Expediente</th>
+                        <th className="pb-3 pr-4">Fecha</th>
+                        <th className="pb-3 pr-4 text-right">Score</th>
+                        <th className="pb-3 text-right">Chars resumen</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100">
+                      {bertDetails.expedientes.map((e, i) => {
+                        const color = e.bert_score >= 0.70 ? 'text-emerald-600' : e.bert_score >= 0.50 ? 'text-amber-500' : 'text-red-500';
+                        return (
+                          <tr key={i} className="hover:bg-slate-50">
+                            <td className="py-3 pr-4 font-mono font-bold text-slate-700 text-[10px]">{e.expediente}</td>
+                            <td className="py-3 pr-4 text-slate-500">{e.fecha}</td>
+                            <td className={`py-3 pr-4 text-right font-extrabold text-sm ${color}`}>{e.bert_score}</td>
+                            <td className="py-3 text-right text-slate-400">{e.chars_resumen > 0 ? `${e.chars_resumen} chars` : '—'}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  <div className="flex gap-4 mt-4 text-[10px] font-medium text-slate-500">
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500 inline-block"></span>≥ 0.70 Fiel</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-400 inline-block"></span>0.50–0.69 Aceptable</span>
+                    <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-400 inline-block"></span>&lt; 0.50 Revisar</span>
+                  </div>
+                </>
+              ) : (
+                <p className="text-center text-slate-500 py-10 text-sm">Sin datos aún.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal F1-Score NER */}
+      {isF1ModalOpen && (
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col">
+            <div className="flex justify-between items-start p-6 border-b border-slate-100">
+              <div>
+                <h3 className="text-lg font-bold text-[#1a3059]">F1-Score NER por Expediente</h3>
+                <p className="text-xs text-slate-500 mt-1">
+                  Campos detectados por el sistema NER (spaCy + Regex + Mistral). 5 campos esperados por expediente.
+                </p>
+              </div>
+              <button onClick={() => setIsF1ModalOpen(false)} className="text-slate-400 hover:text-slate-700 hover:bg-slate-100 p-1.5 rounded-lg ml-4 shrink-0">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="overflow-y-auto flex-1 p-6">
+              {isLoadingF1 ? (
+                <div className="flex items-center justify-center h-32 text-blue-500">
+                  <Loader2 size={28} className="animate-spin mr-2" /><span className="text-sm font-bold">Cargando...</span>
+                </div>
+              ) : f1Details?.expedientes?.length > 0 ? (
+                <>
+                  <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-5 flex justify-between items-center">
+                    <div>
+                      <p className="text-xs font-bold text-blue-700 uppercase tracking-wide">Promedio global</p>
+                      <p className="text-3xl font-extrabold text-blue-600">{f1Details.promedio_global}</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-xs text-slate-500">{f1Details.total} expediente(s)</p>
+                      <p className="text-[10px] text-slate-400 mt-1">Objetivo: &gt; 0.80</p>
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-3">
+                    {f1Details.expedientes.map((exp, idx) => {
+                      const nulos = ['No detectado', 'No encontrado', '', null, undefined];
+                      const campos = exp.campos || {};
+                      const filas = [
+                        { label: 'Nombre demandante', valor: campos.demandante_nombre },
+                        { label: 'DNI demandante',    valor: campos.demandante_dni },
+                        { label: 'Nombre demandado',  valor: campos.demandado_nombre },
+                        { label: 'DNI demandado',     valor: campos.demandado_dni },
+                        { label: 'Monto petitorio',   valor: campos.monto > 0 ? `S/. ${campos.monto.toFixed(2)}` : null },
+                      ];
+                      const colorF1 = exp.f1_ner >= 0.80 ? 'text-emerald-600' : exp.f1_ner >= 0.60 ? 'text-amber-500' : 'text-red-500';
+                      return (
+                        <div key={idx} className="border border-slate-200 rounded-xl overflow-hidden">
+                          <div className="flex justify-between items-center bg-slate-50 px-4 py-3 border-b border-slate-200">
+                            <div>
+                              <p className="text-[11px] font-mono font-bold text-slate-700">{exp.expediente}</p>
+                              <p className="text-[10px] text-slate-400 mt-0.5">{exp.fecha}</p>
+                            </div>
+                            <p className={`text-xl font-extrabold ${colorF1}`}>{exp.f1_ner} / 1.0</p>
+                          </div>
+                          <div className="divide-y divide-slate-100">
+                            {filas.map((f, fi) => {
+                              const detectado = f.valor && !nulos.includes(f.valor);
+                              return (
+                                <div key={fi} className="flex justify-between items-center px-4 py-2.5">
+                                  <span className="text-[11px] text-slate-600 font-medium">{f.label}</span>
+                                  <div className="flex items-center gap-2">
+                                    <span className={`text-[11px] font-mono ${detectado ? 'text-slate-800' : 'text-slate-400 italic'}`}>
+                                      {detectado ? f.valor : 'No encontrado'}
+                                    </span>
+                                    <span className={`w-2 h-2 rounded-full shrink-0 ${detectado ? 'bg-emerald-500' : 'bg-red-400'}`}></span>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              ) : (
+                <p className="text-center text-slate-500 py-10 text-sm">Sin datos aún.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 };

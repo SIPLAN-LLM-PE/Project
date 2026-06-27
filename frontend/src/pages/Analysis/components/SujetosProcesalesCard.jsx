@@ -49,11 +49,13 @@ export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
           <div className="grid grid-cols-1 gap-2 text-xs text-slate-600 font-medium">
             <div className="flex items-center gap-2">
               <CreditCard size={12} className="text-slate-400" />
-              <span>DNI: <span className="font-mono text-slate-800">{data.demandante?.dni || "---"}</span></span>
-              
+              <span>DNI: <span className="font-mono text-slate-800">
+                {data.demandante?.dni && data.demandante.dni !== "No detectado" ? data.demandante.dni : "No encontrado"}
+              </span></span>
+
               {/* 🚀 BOTÓN DE TRAZABILIDAD PARA EL DNI */}
               {data.demandante?.dni && data.demandante.dni !== "No detectado" && (
-                <button 
+                <button
                   onClick={() => onJumpToSource(data.demandante.dni)}
                   title="Verificar DNI original"
                   className="text-slate-400 hover:text-blue-600 hover:bg-blue-50 p-1 rounded transition-colors"
@@ -95,11 +97,13 @@ export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
           <div className="grid grid-cols-1 gap-2 text-xs text-slate-600 font-medium">
             <div className="flex items-center gap-2">
               <CreditCard size={12} className="text-slate-400" />
-              <span>DNI: <span className="font-mono text-slate-800">{data.demandado?.dni || "---"}</span></span>
-              
+              <span>DNI: <span className="font-mono text-slate-800">
+                {data.demandado?.dni && data.demandado.dni !== "No detectado" ? data.demandado.dni : "No encontrado"}
+              </span></span>
+
               {/* 🚀 BOTÓN DE TRAZABILIDAD PARA EL DNI */}
               {data.demandado?.dni && data.demandado.dni !== "No detectado" && (
-                <button 
+                <button
                   onClick={() => onJumpToSource(data.demandado.dni)}
                   title="Verificar DNI original"
                   className="text-slate-400 hover:text-blue-600 hover:bg-blue-50 p-1 rounded transition-colors"

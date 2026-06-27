@@ -15,6 +15,8 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle }) => {
   const safeFormat = (value) => {
     return Number(value || 0).toFixed(2);
   };
+  const claseNivel = String(data.carga_nivel || "").toLowerCase();
+  const esNivelCritico = claseNivel.includes("alta") || claseNivel.includes("crítica") || claseNivel.includes("critica");
 
   return (
     <div className="mb-8">
@@ -112,15 +114,15 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle }) => {
 
         {/* FOOTER: Ratio de Disponibilidad */}
         <div className={`p-4 border-t flex justify-between items-center ${
-          data.carga_nivel === 'Carga Alta' ? 'bg-red-50/50 border-red-100' : 'bg-slate-50 border-slate-100'
+          esNivelCritico ? 'bg-red-50/50 border-red-100' : 'bg-slate-50 border-slate-100'
         }`}>
           <div className="flex gap-3">
-            <BrainCircuit className={data.carga_nivel === 'Carga Alta' ? 'text-red-400' : 'text-slate-400'} size={20} />
+            <BrainCircuit className={esNivelCritico ? 'text-red-400' : 'text-slate-400'} size={20} />
             <div>
-              <p className={`text-xs font-bold ${data.carga_nivel === 'Carga Alta' ? 'text-red-700' : 'text-slate-700'}`}>
+              <p className={`text-xs font-bold ${esNivelCritico ? 'text-red-700' : 'text-slate-700'}`}>
                 Ratio de Disponibilidad: {data.ratio_disponibilidad || 0}% <span className="opacity-70">→ {data.carga_nivel}.</span>
               </p>
-              <p className={`text-[10px] ${data.carga_nivel === 'Carga Alta' ? 'text-red-600' : 'text-slate-500'}`}>
+              <p className={`text-[10px] ${esNivelCritico ? 'text-red-600' : 'text-slate-500'}`}>
                 {data.mensaje}
               </p>
             </div>
@@ -129,7 +131,7 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle }) => {
           <button 
             onClick={onOpenDetalle}
             className={`text-xs font-bold transition-colors hover:underline ${
-              data.carga_nivel === 'Carga Alta' ? 'text-red-700 hover:text-red-800' : 'text-indigo-600 hover:text-indigo-800'
+              esNivelCritico ? 'text-red-700 hover:text-red-800' : 'text-indigo-600 hover:text-indigo-800'
             }`}
           >
             Ver Detalle

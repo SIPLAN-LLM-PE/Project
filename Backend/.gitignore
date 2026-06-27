@@ -1,0 +1,35 @@
+# Bytecode y caché
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Entorno virtual
+.venv/
+venv/
+env/
+
+# Empaquetado / build
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Base de datos (datos sensibles)
+*.db
+*.sqlite
+*.sqlite3
+
+# PDFs judiciales (documentos procesales)
+pdfs_guardados/
+*.pdf
+
+# Entorno y secretos
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
+Thumbs.db
