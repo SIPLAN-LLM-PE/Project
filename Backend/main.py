@@ -837,25 +837,37 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
 
     # Recopilar todos los 8-digit numbers únicos con su posición y contexto previo
     dnis_en_texto = {}  # dni -> primer item encontrado
-    for m in re.finditer(r'(?<!\d)(\d{8})(?!\d)', texto_plano):
-        dni = m.group(1)
+
+    # Búsqueda global tolerante a errores OCR comunes (O por 0)
+    for m in re.finditer(r'(?<![A-Za-z0-9])([Oo0]\d{7}|\d{8})(?![A-Za-z0-9])', texto_plano):
+        dni = m.group(1).upper().replace('O', '0')
         if dni in _cui_menores:
             continue  # nunca asignar CUI de menor como DNI de parte adulta
         if dni not in dnis_en_texto:
             ctx_previo = texto_plano[max(0, m.start() - 600):m.start()]
             dnis_en_texto[dni] = {'pos': m.start(), 'ctx_previo': ctx_previo}
 
-    # PASO 0: "GENERALES DE LEY DEL DEMANDANDO" — el primer 8-dígitos que sigue es del demandado.
-    # Búsqueda en dos pasos: primero el marcador, luego el número en los siguientes 350 chars.
-    for _m_of in re.finditer(r'GENERALES\s+DE\s+LEY\s+DEL\s+DEMANDAND[OA]', texto_plano, re.IGNORECASE):
-        _post_of = texto_plano[_m_of.end(): _m_of.end() + 350]
-        _m_dni_of = re.search(r'(?<!\d)(\d{8})(?!\d)', _post_of)
+    # PASO 0: "GENERALES DE LEY DEL DEMANDANDO / DEMANDADO" (Blindado contra subrayados)
+    # Hacemos la búsqueda ultra-tolerante: permitimos cualquier ruido (hasta 20 caracteres) en medio de la frase
+    patron_paso_0 = r'GENERALES\s+DE\s+LEY[\s\S]{1,25}DEMANDAN?D[OA]'
+    
+    for _m_of in re.finditer(patron_paso_0, texto_plano, re.IGNORECASE):
+        # Ampliamos la ventana de búsqueda a 400 caracteres por si el texto se extrajo en columnas
+        _post_of = texto_plano[_m_of.end(): _m_of.end() + 400]
+        
+        # Estrategia 1: Buscar explícitamente la etiqueta "DNI" seguida del número (la más segura)
+        _m_dni_of = re.search(r'D\.?N\.?I\.?[\s:=_.-]{1,15}(?<!\d)(\d{8})(?!\d)', _post_of, re.IGNORECASE)
+        
+        # Estrategia 2: Fallback, si no dice "DNI", atrapamos el primer número de 8 dígitos
+        if not _m_dni_of:
+            _m_dni_of = re.search(r'(?<!\d)(\d{8})(?!\d)', _post_of)
+            
         if _m_dni_of:
             _dni_of = _m_dni_of.group(1)
             if _dni_of not in _cui_menores and entidades["demandado"]["dni"] == "No detectado":
                 entidades["demandado"]["dni"] = _dni_of
-                print(f"✓ DNI {_dni_of} → DEMANDADO (GENERALES DE LEY DEL DEMANDANDO, prioridad máxima)")
-                break
+                print(f"✓ DNI {_dni_of} → DEMANDADO (GENERALES DE LEY, captura robusta)")
+                break        
 
     # Asignar por contexto semántico — agrega señales de TODAS las ocurrencias del DNI.
     # Usar solo la primera ocurrencia falla cuando está en frontera entre documentos concatenados.
@@ -975,7 +987,7 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
                     "stream": False,
                     "options": {"temperature": 0.0}
                 },
-                timeout=45
+                timeout=400
             )
             ia_ner = json.loads(res.json().get("response", "{}"))
 
@@ -1016,6 +1028,7 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
         dnis_globales = [d for d in re.findall(r'(?<!\d)\d{8}(?!\d)', texto_plano)
                          if d not in _cui_menores]
         dnis_unicos = list(dict.fromkeys(dnis_globales))
+        
         dni_ya_demandado = entidades["demandado"]["dni"]
         dni_ya_demandante = entidades["demandante"]["dni"]
 
@@ -1044,6 +1057,7 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
                         r'demandad[ao]|demandando|generales\s+de\s+ley\s+del', _ctx_u))
                     _cnt_dte += len(re.findall(
                         r'\bdemandante\b|parte\s+actora|accionante', _ctx_u))
+                
                 if _cnt_ddo > _cnt_dte:
                     entidades["demandado"]["dni"] = unico
                     print(f"✓ DNI {unico} → DEMANDADO (red de seguridad, señales ddo={_cnt_ddo} dte={_cnt_dte})")
@@ -1051,8 +1065,44 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
                     entidades["demandante"]["dni"] = unico
                     print(f"✓ DNI {unico} → DEMANDANTE (red de seguridad, señales dte={_cnt_dte} ddo={_cnt_ddo})")
                 else:
-                    # Sin señales claras: dejar que Mistral decida, no asignar a ciegas
-                    print(f"⚠ DNI único {unico} sin contexto claro — omitido, Mistral lo resolverá")
+                    # NUEVA LÓGICA CORREGIDA: Verdadera proximidad (mención más cercana)
+                    nom_dte = entidades["demandante"]["nombre"]
+                    nom_ddo = entidades["demandado"]["nombre"]
+                    
+                    dist_dte, dist_ddo = float('inf'), float('inf')
+                    
+                    # Buscamos la posición del DNI en el texto
+                    m_dni = re.search(r'(?<!\d)' + re.escape(unico) + r'(?!\d)', texto_plano)
+                    
+                    if m_dni:
+                        pos_dni = m_dni.start()
+                        
+                        def distancia_minima(nombre_completo, pos_objetivo, texto):
+                            if not nombre_completo or nombre_completo == "No detectado": 
+                                return float('inf')
+                            # Usamos los primeros 15 caracteres (usualmente los apellidos)
+                            snippet = nombre_completo[:15].upper()
+                            # Encontramos TODAS las apariciones de la persona en el texto
+                            posiciones = [m.start() for m in re.finditer(re.escape(snippet), texto.upper())]
+                            if not posiciones:
+                                return float('inf')
+                            # Retornamos la distancia de la aparición que esté más cerca del DNI
+                            return min(abs(p - pos_objetivo) for p in posiciones)
+                        
+                        dist_dte = distancia_minima(nom_dte, pos_dni, texto_plano)
+                        dist_ddo = distancia_minima(nom_ddo, pos_dni, texto_plano)
+                        
+                    # Asignamos al que esté físicamente más cerca
+                    if dist_ddo < dist_dte:
+                        entidades["demandado"]["dni"] = unico
+                        print(f"✓ DNI {unico} → DEMANDADO (proximidad real: ddo={dist_ddo} vs dte={dist_dte})")
+                    elif dist_dte < dist_ddo and dist_dte != float('inf'):
+                        entidades["demandante"]["dni"] = unico
+                        print(f"✓ DNI {unico} → DEMANDANTE (proximidad real: dte={dist_dte} vs ddo={dist_ddo})")
+                    else:
+                        # Fallback legal: el DNI único suelto suele ser del demandado (obligado)
+                        entidades["demandado"]["dni"] = unico
+                        print(f"⚠ DNI único {unico} asignado a DEMANDADO por descarte legal")
 
     # 5. VALIDACIÓN CRUZADA CON MISTRAL
     # Siempre corre, incluso si el regex ya asignó valores.
