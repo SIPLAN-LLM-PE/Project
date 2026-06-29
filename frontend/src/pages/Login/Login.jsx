@@ -36,6 +36,10 @@ const Login = () => {
       if (res.ok && responseData.status === 'success') {
         // 3. ÉXITO: Guardamos la sesión en localStorage para consumirla en Dashboard y Análisis
         localStorage.setItem('usuario', JSON.stringify(responseData.data));
+        if (responseData.access_token) {
+          localStorage.setItem('access_token', responseData.access_token);
+          localStorage.setItem('token_type', responseData.token_type || 'bearer');
+        }
         
         // Redirigimos al panel principal
         navigate('/dashboard');

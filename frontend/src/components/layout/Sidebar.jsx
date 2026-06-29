@@ -1,4 +1,4 @@
-import { Home, BrainCircuit, BarChart3, ShieldCheck, LogOut } from 'lucide-react';
+import { Home, BrainCircuit, BarChart3, ShieldCheck, LogOut, UserCircle } from 'lucide-react';
 import { Link, useLocation, useNavigate } from 'react-router-dom'; // 🚀 1. Importamos useNavigate
 
 const menuItems = [
@@ -6,6 +6,7 @@ const menuItems = [
   { icon: BrainCircuit, label: 'Análisis IA', path: '/analysis' },
   { icon: BarChart3, label: 'Reportes', path: '/reports' },
   { icon: ShieldCheck, label: 'Auditoria', path: '/audit' },
+  { icon: UserCircle, label: 'Mi Perfil', path: '/profile' },
 ];
 
 export const Sidebar = () => {
@@ -16,6 +17,8 @@ export const Sidebar = () => {
   const handleLogout = () => {
     // Limpiamos los datos de la sesión actual guardados en el navegador
     localStorage.removeItem('usuario');
+    localStorage.removeItem('access_token');
+    localStorage.removeItem('token_type');
     
     // Redirigimos al usuario a la pantalla de login (asumiendo que tu ruta raíz es '/')
     navigate('/');

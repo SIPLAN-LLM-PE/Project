@@ -1,221 +1,152 @@
-import React, { useState } from 'react';
-import { 
-  Bell, ChevronDown, Mail, Phone, MapPin, Edit2, User, Lock 
-} from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { Edit2, Lock, Mail, MapPin, Phone, Save, ShieldCheck, User, UserCog } from 'lucide-react';
+import { TopUserActions } from '../../components/layout/TopUserActions';
 
-const Profile = () => {
-  // Estados para los menús
-  const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+const getInitials = (name = '') => {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return 'US';
+  return parts.slice(0, 2).map(part => part[0]).join('').toUpperCase();
+};
 
-  // Estados para los formularios (simulando datos del usuario)
-  const [formData, setFormData] = useState({
-    nombres: 'Diego Alonso Valdivia Mendoza',
-    dni: '70214589',
-    correo: 'd.valdivia@sigeja.gob.pe',
-    especialidad: 'Derecho Alimentario',
+const getDefaultProfile = () => {
+  const usuario = JSON.parse(localStorage.getItem('usuario')) || {};
+  const nombre = usuario.nombre || 'Usuario SIGEJA';
+  const cargo = usuario.cargo || 'Personal Judicial';
+  const username = usuario.username || 'usuario';
+
+  return {
+    nombres: nombre,
+    dni: usuario.dni || usuario.id || 'No registrado',
+    correo: usuario.correo || `${username}@sigeja.gob.pe`,
+    especialidad: usuario.especialidad || 'Derecho Alimentario',
+    cargo,
+    telefono: usuario.telefono || '+51 987 654 321',
+    sede: usuario.sede || 'Sede Central - Corte Superior',
     passwordActual: '',
     passwordNueva: ''
-  });
+  };
+};
+
+const Field = ({ label, name, value, type = 'text', onChange }) => (
+  <label className="block">
+    <span className="block text-[10px] font-bold text-slate-500 mb-2">{label}</span>
+    <input
+      type={type}
+      name={name}
+      value={value}
+      onChange={onChange}
+      className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-sm text-slate-700 focus:outline-none focus:border-[#2546b0] focus:ring-1 focus:ring-[#2546b0]"
+    />
+  </label>
+);
+
+const Profile = () => {
+  const [formData, setFormData] = useState(getDefaultProfile);
+  const initials = useMemo(() => getInitials(formData.nombres), [formData.nombres]);
+  const displayName = formData.nombres.split(/\s+/).slice(0, 3).join(' ');
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
     setFormData(prev => ({ ...prev, [name]: value }));
   };
 
+  const handleSave = () => {
+    const usuario = JSON.parse(localStorage.getItem('usuario')) || {};
+    localStorage.setItem('usuario', JSON.stringify({
+      ...usuario,
+      nombre: formData.nombres,
+      cargo: formData.cargo,
+      correo: formData.correo,
+      dni: formData.dni,
+      especialidad: formData.especialidad,
+      telefono: formData.telefono,
+      sede: formData.sede
+    }));
+  };
+
   return (
     <div className="flex-1 bg-[#f8fafc] flex flex-col min-h-screen">
-      
-      {/* Header Superior */}
       <header className="bg-white border-b border-slate-200 w-full h-[93px] px-8 sticky top-0 z-10 flex items-center shrink-0">
         <div className="flex justify-between items-center w-full">
-          <h2 className="text-xl font-bold text-slate-800 tracking-tight">Mi Perfil</h2>
-          
-          <div className="flex items-center gap-4">
-            <div className="flex items-center bg-slate-100 border border-slate-200 rounded-lg px-4 py-1.5 gap-3 cursor-pointer hover:bg-slate-200 transition-all">
-               <Bell className="w-5 h-5 text-slate-600" />
-               <div className="text-[10px] leading-tight text-left hidden md:block">
-                 <span className="font-bold block text-slate-700">Notificaciones</span>
-                 <span className="text-slate-500">Tu buzón de mensajes</span>
-               </div>
-               <ChevronDown className="w-4 h-4 ml-1 text-slate-400" />
-            </div>
-
-            {/* Selector de Usuario con Dropdown */}
-            <div className="relative">
-              <div 
-                onClick={() => setIsProfileMenuOpen(!isProfileMenuOpen)}
-                className="flex items-center bg-[#2546b0] text-white rounded-lg px-4 py-1.5 gap-3 cursor-pointer hover:bg-blue-800 transition-all shadow-sm"
-              >
-                 <div className="w-8 h-8 bg-blue-400 rounded flex items-center justify-center font-bold text-xs shadow-inner">DV</div>
-                 <div className="text-[10px] leading-tight text-left">
-                   <span className="font-bold block tracking-wide">Dr. Diego Valdivia</span>
-                   <span className="opacity-80">Juez de Paz Letrado</span>
-                 </div>
-                 <ChevronDown className={`w-4 h-4 ml-1 opacity-60 transition-transform ${isProfileMenuOpen ? 'rotate-180' : ''}`} />
-              </div>
-
-              {isProfileMenuOpen && (
-                <div className="absolute right-0 mt-2 w-48 bg-white rounded-lg shadow-lg border border-slate-200 py-2 z-50">
-                  <button className="w-full text-left px-4 py-2 text-sm text-slate-700 bg-slate-50 font-medium">
-                    Mi Perfil
-                  </button>
-                  <div className="h-px bg-slate-200 my-1 w-full"></div>
-                  <button className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 font-bold transition-colors">
-                    Cerrar Sesión
-                  </button>
-                </div>
-              )}
-            </div>
-          </div>
+          <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Mi Perfil</h2>
+          <TopUserActions />
         </div>
       </header>
 
-      {/* Contenido Principal */}
-      <main className="p-8 w-full max-w-[1200px] mx-auto overflow-y-auto">
-        
-        <div className="flex flex-col lg:flex-row gap-6 mt-4">
-          
-          {/* TARJETA IZQUIERDA: RESUMEN DE PERFIL */}
-          <div className="w-full lg:w-1/3">
-            <div className="bg-[#1a3059] rounded-xl shadow-md p-8 flex flex-col items-center text-center relative overflow-hidden">
-              
-              {/* Avatar con botón de edición */}
-              <div className="relative mb-6 mt-4">
-                <div className="w-32 h-32 bg-slate-200 rounded-full border-4 border-[#1a3059] shadow-lg flex items-center justify-center text-slate-400">
-                   {/* En un caso real aquí iría una etiqueta <img src={avatarUrl} /> */}
-                   <User size={64} opacity={0.5} />
+      <main className="p-8 w-full max-w-[1180px] mx-auto overflow-y-auto">
+        <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-6 mt-10">
+          <section className="bg-[#1a3059] rounded-lg shadow-md p-8 text-white">
+            <div className="flex flex-col items-center text-center">
+              <div className="relative mb-6">
+                <div className="w-32 h-32 bg-slate-100 rounded-full flex items-center justify-center text-[#2546b0] text-4xl font-extrabold shadow-inner">
+                  {initials}
                 </div>
-                <button className="absolute bottom-1 right-1 bg-cyan-400 p-2.5 rounded-full text-white shadow-md hover:bg-cyan-300 transition-colors border-2 border-[#1a3059]">
+                <button className="absolute bottom-1 right-1 bg-cyan-400 p-2.5 rounded-full text-[#1a3059] shadow-md hover:bg-cyan-300 transition-colors">
                   <Edit2 size={14} />
                 </button>
               </div>
 
-              {/* Nombres y Título */}
-              <h3 className="text-2xl font-bold text-white mb-1">Dr. Diego Valdivia</h3>
-              <p className="text-cyan-400 text-sm font-medium mb-8">Juez de Paz Letrado</p>
+              <h3 className="text-xl font-bold">{displayName}</h3>
+              <p className="text-cyan-300 text-sm font-medium mb-7">{formData.cargo}</p>
 
-              {/* Lista de Contacto */}
-              <div className="w-full space-y-3">
-                <div className="flex items-center gap-4 bg-white/5 border border-white/10 p-3 rounded-lg">
-                  <Mail size={16} className="text-slate-400" />
-                  <span className="text-sm text-slate-200">{formData.correo}</span>
+              <div className="w-full space-y-3 text-left">
+                <div className="flex items-center gap-3 bg-white/10 p-3 rounded-md">
+                  <Mail size={16} className="text-slate-300" />
+                  <span className="text-xs text-slate-100 truncate">{formData.correo}</span>
                 </div>
-                <div className="flex items-center gap-4 bg-white/5 border border-white/10 p-3 rounded-lg">
-                  <Phone size={16} className="text-slate-400" />
-                  <span className="text-sm text-slate-200">+51 987 654 321</span>
+                <div className="flex items-center gap-3 bg-white/10 p-3 rounded-md">
+                  <Phone size={16} className="text-slate-300" />
+                  <span className="text-xs text-slate-100">{formData.telefono}</span>
                 </div>
-                <div className="flex items-center gap-4 bg-white/5 border border-white/10 p-3 rounded-lg">
-                  <MapPin size={16} className="text-slate-400" />
-                  <span className="text-sm text-slate-200">Sede Central - Corte Superior</span>
+                <div className="flex items-center gap-3 bg-white/10 p-3 rounded-md">
+                  <MapPin size={16} className="text-slate-300" />
+                  <span className="text-xs text-slate-100">{formData.sede}</span>
                 </div>
               </div>
             </div>
-          </div>
+          </section>
 
-          {/* COLUMNA DERECHA: FORMULARIOS */}
-          <div className="w-full lg:w-2/3 flex flex-col gap-6">
-            
-            {/* Formulario 1: Configuración de Cuenta */}
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-              {/* Cabecera Tarjeta */}
+          <section className="space-y-6">
+            <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
               <div className="bg-[#1a3059] px-6 py-4 flex justify-between items-center">
                 <div className="flex items-center gap-3 text-white">
-                  <User size={18} className="text-cyan-400" />
-                  <h3 className="font-bold">Configuración de Cuenta</h3>
+                  <UserCog size={18} className="text-cyan-300" />
+                  <h3 className="font-bold">Configuracion de Cuenta</h3>
                 </div>
-                <button className="bg-cyan-400 text-[#1a3059] px-4 py-1.5 rounded text-xs font-bold hover:bg-cyan-300 transition-colors">
-                  Guardar Cambios
+                <button
+                  onClick={handleSave}
+                  className="bg-cyan-400 text-[#1a3059] px-4 py-1.5 rounded text-xs font-bold hover:bg-cyan-300 transition-colors flex items-center gap-2"
+                >
+                  <Save size={13} /> Guardar Cambios
                 </button>
               </div>
-              
-              {/* Cuerpo Formulario */}
-              <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 mb-2">Nombres Completos</label>
-                  <input 
-                    type="text" 
-                    name="nombres"
-                    value={formData.nombres}
-                    onChange={handleInputChange}
-                    className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-sm text-slate-700 focus:outline-none focus:border-[#2546b0] focus:ring-1 focus:ring-[#2546b0]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 mb-2">DNI / ID Institucional</label>
-                  <input 
-                    type="text" 
-                    name="dni"
-                    value={formData.dni}
-                    onChange={handleInputChange}
-                    className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-sm text-slate-700 focus:outline-none focus:border-[#2546b0] focus:ring-1 focus:ring-[#2546b0]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 mb-2">Correo Electrónico Laboral</label>
-                  <input 
-                    type="email" 
-                    name="correo"
-                    value={formData.correo}
-                    onChange={handleInputChange}
-                    className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-sm text-slate-700 focus:outline-none focus:border-[#2546b0] focus:ring-1 focus:ring-[#2546b0]"
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-slate-500 mb-2">Especialidad Judicial</label>
-                  <input 
-                    type="text" 
-                    name="especialidad"
-                    value={formData.especialidad}
-                    onChange={handleInputChange}
-                    className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-sm text-slate-700 focus:outline-none focus:border-[#2546b0] focus:ring-1 focus:ring-[#2546b0]"
-                  />
-                </div>
+
+              <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-5">
+                <Field label="Nombres Completos" name="nombres" value={formData.nombres} onChange={handleInputChange} />
+                <Field label="DNI / ID Institucional" name="dni" value={formData.dni} onChange={handleInputChange} />
+                <Field label="Correo Electronico Laboral" name="correo" type="email" value={formData.correo} onChange={handleInputChange} />
+                <Field label="Especialidad Judicial" name="especialidad" value={formData.especialidad} onChange={handleInputChange} />
+                <Field label="Telefono Institucional" name="telefono" value={formData.telefono} onChange={handleInputChange} />
+                <Field label="Sede Judicial" name="sede" value={formData.sede} onChange={handleInputChange} />
               </div>
             </div>
 
-            {/* Formulario 2: Cambiar Contraseña */}
-            <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
-              {/* Cabecera Tarjeta */}
+            <div className="bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
               <div className="bg-[#1a3059] px-6 py-4 flex items-center gap-3 text-white">
-                <Lock size={18} className="text-cyan-400" />
-                <h3 className="font-bold">Cambiar Contraseña</h3>
+                <Lock size={18} className="text-cyan-300" />
+                <h3 className="font-bold">Cambiar Contrasena</h3>
               </div>
-              
-              {/* Cuerpo Formulario */}
-              <div className="p-6 flex flex-col md:flex-row gap-6 items-end">
-                <div className="flex-1 w-full">
-                  <label className="block text-xs font-bold text-slate-500 mb-2">Contraseña Actual</label>
-                  <input 
-                    type="password" 
-                    name="passwordActual"
-                    value={formData.passwordActual}
-                    onChange={handleInputChange}
-                    placeholder="••••••••"
-                    className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-sm text-slate-700 focus:outline-none focus:border-[#2546b0] focus:ring-1 focus:ring-[#2546b0]"
-                  />
-                </div>
-                <div className="flex-1 w-full">
-                  <label className="block text-xs font-bold text-slate-500 mb-2">Nueva Contraseña</label>
-                  <input 
-                    type="password" 
-                    name="passwordNueva"
-                    value={formData.passwordNueva}
-                    onChange={handleInputChange}
-                    placeholder="••••••••"
-                    className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-sm text-slate-700 focus:outline-none focus:border-[#2546b0] focus:ring-1 focus:ring-[#2546b0]"
-                  />
-                </div>
-                <div className="w-full md:w-auto">
-                  <button className="w-full md:w-auto bg-[#1a3059] text-white px-6 py-2.5 rounded-lg text-sm font-bold hover:bg-blue-900 transition-colors shadow-md">
-                    Actualizar Seguridad
-                  </button>
-                </div>
+
+              <div className="p-6 grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-5 items-end">
+                <Field label="Contrasena Actual" name="passwordActual" type="password" value={formData.passwordActual} onChange={handleInputChange} />
+                <Field label="Nueva Contrasena" name="passwordNueva" type="password" value={formData.passwordNueva} onChange={handleInputChange} />
+                <button className="bg-[#2546b0] text-white px-6 py-2.5 rounded-lg text-sm font-bold hover:bg-blue-900 transition-colors shadow-md flex items-center justify-center gap-2">
+                  <ShieldCheck size={16} /> Actualizar Seguridad
+                </button>
               </div>
             </div>
-
-          </div>
+          </section>
         </div>
-
       </main>
     </div>
   );

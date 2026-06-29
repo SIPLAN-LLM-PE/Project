@@ -5,6 +5,7 @@ import Register from './pages/Register/Register';
 import Dashboard from './pages/Dashboard/Dashboard';
 import Analysis from './pages/Analysis/Analysis'; 
 import Reports from './pages/Reports/Reports';
+import Profile from './pages/Profile/Profile';
 import Audit from './pages/Audit/Audit'; // <--- 1. Importamos la pantalla de Auditoría
 import { Sidebar } from './components/layout/Sidebar';
 import { useNavigate } from 'react-router-dom';
@@ -66,6 +67,14 @@ function App() {
               <Audit /> {/* <--- 2. Renderizamos el componente aquí */}
             </DashboardLayout>
           } 
+        />
+        <Route
+          path="/profile"
+          element={
+            <DashboardLayout>
+              <Profile />
+            </DashboardLayout>
+          }
         />
       </Routes>
     </BrowserRouter>

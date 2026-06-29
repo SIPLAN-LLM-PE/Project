@@ -233,7 +233,7 @@ const Dashboard = () => {
               <ChevronDown className="w-4 h-4 ml-1 text-slate-400" />
             </div>
 
-            <div className="flex items-center bg-[#2546b0] text-white rounded-lg px-4 py-1.5 gap-3 shadow-sm">
+            <div onClick={() => navigate('/profile')} className="flex items-center bg-[#2546b0] text-white rounded-lg px-4 py-1.5 gap-3 shadow-sm cursor-pointer hover:bg-blue-800 transition-all">
               <div className="w-8 h-8 bg-blue-400 rounded flex items-center justify-center font-bold text-xs shadow-inner">
                 {usuarioActivo.nombre?.split(' ').map(n => n[0]).join('') || "AD"}
               </div>

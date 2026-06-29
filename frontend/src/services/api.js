@@ -4,6 +4,14 @@ import axios from 'axios';
 // Tu URL base de FastAPI (usualmente corre en el puerto 8000 en local)
 const API_URL = 'http://localhost:8000/api/v1'; 
 
+axios.interceptors.request.use((config) => {
+  const token = localStorage.getItem('access_token');
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
 export const apiService = {
   // 1. Subir el expediente (PDF) para el análisis inicial
   uploadExpediente: async (file) => {

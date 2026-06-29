@@ -18,6 +18,7 @@ import { JurisprudenciaDrawer } from './components/JurisprudenciaDrawer';
 import { HistorialDrawer } from './components/HistorialDrawer';
 import { CapacidadDetalleDrawer } from './components/CapacidadDetalleDrawer';
 import { RatingModal } from './components/RatingModal';
+import { useNavigate } from 'react-router-dom';
 
 import { apiService } from '../../services/api';
 
@@ -31,10 +32,20 @@ let draftHasDocument = false;
 let draftTextoExpediente = "";
 let draftHistorialEntries = [];
 let draftChatMessages = [
-  { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIGEJA. ¿En qué te puedo ayudar?' }
+  { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIGEJA. \u00bfEn qu\u00e9 te puedo ayudar?' }
 ];
 
 export const Analysis = () => {
+  const navigate = useNavigate();
+  const usuarioHeader = JSON.parse(localStorage.getItem('usuario')) || {
+    nombre: 'Usuario SIGEJA',
+    cargo: 'Personal Judicial'
+  };
+
+  const crearMensajesChatIniciales = () => [
+    { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIGEJA. \u00bfEn qu\u00e9 te puedo ayudar?' }
+  ];
+
   // 1. ESTADOS DE INTERFAZ
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
@@ -86,6 +97,14 @@ export const Analysis = () => {
     setCardVisibility(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
+  const resetChat = () => {
+    const mensajesIniciales = crearMensajesChatIniciales();
+    setChatInput("");
+    setIsChatLoading(false);
+    setChatMessages(mensajesIniciales);
+    draftChatMessages = mensajesIniciales;
+  };
+
   // ==========================================
   // HOOKS
   // ==========================================
@@ -108,6 +127,11 @@ export const Analysis = () => {
   useEffect(() => {
     const cargarAnalisisExistente = async () => {
       if (!expedienteSeleccionado) return;
+      setPdfFiles([]);
+      setActivePdfIndex(0);
+      setResumenPorPdf([]);
+      setPdfSearchTerm("");
+      resetChat();
       try {
         const res = await fetch(`http://localhost:8000/api/v1/expedientes/${expedienteSeleccionado.numero_expediente}`);
         const data = await res.json();
@@ -186,6 +210,7 @@ export const Analysis = () => {
                   const resData = dataDetalle.data.resultados;
                   setAnalysisData(resData);
                   setHasDocument(true);
+                  setIsReadOnly(true);
                   cargarPDFsDesdeServidor(casoEncontrado.numero_expediente);
                   if (resData && resData.historial) {
                     setHistorialEntries(resData.historial);
@@ -284,6 +309,9 @@ export const Analysis = () => {
   };
 
   const cargarPDFsDesdeServidor = async (numero) => {
+    setPdfFiles([]);
+    setActivePdfIndex(0);
+    if (!numero) return;
     try {
       const res = await fetch(`http://localhost:8000/api/v1/expedientes/${numero}/pdfs`);
       const data = await res.json();
@@ -294,9 +322,14 @@ export const Analysis = () => {
         }));
         setPdfFiles(archivos);
         setActivePdfIndex(0);
+      } else {
+        setPdfFiles([]);
+        setActivePdfIndex(0);
       }
     } catch (err) {
       console.error("Error cargando PDFs desde servidor:", err);
+      setPdfFiles([]);
+      setActivePdfIndex(0);
     }
   };
 
@@ -309,6 +342,11 @@ export const Analysis = () => {
   const procesarEnvioDocumento = async (files) => {
     setIsLoading(true);
     setLoadingProgress(0);
+    setPdfFiles([]);
+    setActivePdfIndex(0);
+    setResumenPorPdf([]);
+    setPdfSearchTerm("");
+    resetChat();
 
     const usuarioActivo = JSON.parse(localStorage.getItem('usuario'));
     const firmaUsuario = usuarioActivo ? `${usuarioActivo.username}` : 'm.gomez';
@@ -416,7 +454,7 @@ export const Analysis = () => {
     setTextoExpediente("");
     setHistorialEntries([]);
     setChatMessages([
-      { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIPLAN. ¿En qué te puedo ayudar?' }
+      { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIGEJA. \u00bfEn qu\u00e9 te puedo ayudar?' }
     ]);
     setCardVisibility(Object.keys(cardVisibility).reduce((acc, key) => ({ ...acc, [key]: false }), {}));
     draftAnalysisData = null;
@@ -426,7 +464,7 @@ export const Analysis = () => {
     draftTextoExpediente = "";
     draftHistorialEntries = [];
     draftChatMessages = [
-      { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIPLAN. ¿En qué te puedo ayudar?' }
+      { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIGEJA. \u00bfEn qu\u00e9 te puedo ayudar?' }
     ];
   };
 
@@ -462,7 +500,12 @@ export const Analysis = () => {
 
   const handleSendChat = async (e) => {
     if (e) e.preventDefault();
-    if (!chatInput.trim() || !textoExpediente) return;
+    const contextoChat = textoExpediente?.trim()
+      ? textoExpediente
+      : analysisData
+        ? JSON.stringify(analysisData)
+        : "";
+    if (!chatInput.trim() || !contextoChat || isChatLoading) return;
     const userMsg = { rol: 'user', contenido: chatInput };
     const nuevosMensajes = [...chatMessages, userMsg];
     setChatMessages(nuevosMensajes);
@@ -475,7 +518,7 @@ export const Analysis = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           query: userMsg.contenido,
-          texto_expediente: textoExpediente,
+          texto_expediente: contextoChat,
           historial: chatMessages.map(m => ({ rol: m.rol, contenido: m.contenido })),
           datos_extraidos: analysisData ? analysisData.sujetos_procesales : {}
         })
@@ -551,14 +594,14 @@ export const Analysis = () => {
               </div>
               <ChevronDown className="w-4 h-4 ml-1 text-slate-400" />
             </div>
-            <div className="flex items-center bg-[#2546b0] text-white rounded-lg px-4 py-1.5 gap-3 cursor-pointer hover:bg-blue-800 transition-all shadow-sm">
+            <div onClick={() => navigate('/profile')} className="flex items-center bg-[#2546b0] text-white rounded-lg px-4 py-1.5 gap-3 cursor-pointer hover:bg-blue-800 transition-all shadow-sm">
               <div className="w-8 h-8 bg-blue-400 rounded flex items-center justify-center font-bold text-xs shadow-inner">
-                {JSON.parse(localStorage.getItem('usuario'))?.nombre?.split(' ').map(n => n[0]).join('') || "DV"}
+                {usuarioHeader.nombre?.split(' ').slice(0, 2).map(n => n[0]).join('').toUpperCase() || "US"}
               </div>
               <div className="text-[10px] leading-tight text-left font-bold">
-                {JSON.parse(localStorage.getItem('usuario'))?.nombre || "Dr. Diego Valdivia"}<br/>
+                {usuarioHeader.nombre || "Usuario SIGEJA"}<br/>
                 <span className="opacity-80 font-medium text-[9px]">
-                  {JSON.parse(localStorage.getItem('usuario'))?.cargo || "Juez de Paz Letrado"}
+                  {usuarioHeader.cargo || "Personal Judicial"}
                 </span>
               </div>
               <ChevronDown className="w-4 h-4 ml-1 opacity-60" />
@@ -969,6 +1012,11 @@ export const Analysis = () => {
                   type="text"
                   value={chatInput}
                   onChange={(e) => setChatInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      handleSendChat(e);
+                    }
+                  }}
                   placeholder="Pregúntale a la IA sobre este expediente..."
                   disabled={isChatLoading || !hasDocument}
                   className="w-full border border-slate-300 bg-slate-50 rounded-xl px-5 py-3 text-[11px] font-bold focus:outline-none focus:border-[#2546b0] focus:ring-1 focus:ring-[#2546b0] transition-all shadow-sm pr-12 disabled:opacity-50"

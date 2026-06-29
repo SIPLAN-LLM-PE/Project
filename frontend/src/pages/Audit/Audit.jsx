@@ -1,9 +1,12 @@
 import React, { useState, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Bell, ChevronDown, Download, BrainCircuit, Activity, Fingerprint, ShieldCheck, Loader2, X, ChevronRight
 } from 'lucide-react';
 
 const Audit = () => {
+  const navigate = useNavigate();
+  const usuarioActivo = JSON.parse(localStorage.getItem('usuario')) || { nombre: 'Usuario SIGEJA', cargo: 'Personal Judicial' };
   // 1. Estados para almacenar los datos de seguridad y manejar las pantallas de carga
   const [securityData, setSecurityData] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -119,11 +122,11 @@ const Audit = () => {
                <ChevronDown className="w-4 h-4 ml-1 text-slate-400" />
             </div>
 
-            <div className="flex items-center bg-[#2546b0] text-white rounded-lg px-4 py-1.5 gap-3 cursor-pointer hover:bg-blue-800 transition-all shadow-sm">
-               <div className="w-8 h-8 bg-blue-400 rounded flex items-center justify-center font-bold text-xs shadow-inner">DV</div>
+            <div onClick={() => navigate('/profile')} className="flex items-center bg-[#2546b0] text-white rounded-lg px-4 py-1.5 gap-3 cursor-pointer hover:bg-blue-800 transition-all shadow-sm">
+               <div className="w-8 h-8 bg-blue-400 rounded flex items-center justify-center font-bold text-xs shadow-inner">{usuarioActivo.nombre?.split(' ').slice(0, 2).map(n => n[0]).join('').toUpperCase() || 'US'}</div>
                <div className="text-[10px] leading-tight text-left">
-                 <span className="font-bold block tracking-wide">Dr. Diego Valdivia</span>
-                 <span className="opacity-80">Juez de Paz Letrado</span>
+                 <span className="font-bold block tracking-wide">{usuarioActivo.nombre}</span>
+                 <span className="opacity-80">{usuarioActivo.cargo}</span>
                </div>
                <ChevronDown className="w-4 h-4 ml-1 opacity-60" />
             </div>
@@ -308,9 +311,9 @@ const Audit = () => {
                        <tr key={item.id} className="hover:bg-slate-50 transition-colors">
                          <td className="px-6 py-6">{item.timestamp}</td>
                          <td className="px-6 py-6">{item.usuario}</td>
-                         <td className="px-6 py-6">{item.accion}</td>
+                         <td className="px-6 py-6">{item.accion_registrada || item.accion || '—'}</td>
                          <td className="px-6 py-6">{item.expediente}</td>
-                         <td className="px-6 py-6">{item.ip}</td>
+                         <td className="px-6 py-6">{item.ip_origen || item.ip || '—'}</td>
                        </tr>
                      ))}
                    </tbody>
