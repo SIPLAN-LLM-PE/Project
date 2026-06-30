@@ -47,7 +47,7 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle }) => {
                     <div>
                       <p className="text-xs font-bold text-slate-700">{ingreso.tipo}</p>
                       <span className={`text-[9px] font-bold px-2 py-0.5 rounded mt-1 inline-block ${
-                        ingreso.estado?.includes('Validado') ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'
+                        ingreso.aplicado_calculo ? 'bg-emerald-100 text-emerald-700' : ingreso.estado?.includes('Validado') ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'
                       }`}>
                         {ingreso.estado || "Detectado"}
                       </span>
@@ -65,7 +65,7 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle }) => {
 
             {/* Totalizador de Ingresos */}
             <div className="bg-slate-50 rounded-lg p-4 flex justify-between items-center border border-slate-100">
-              <p className="text-xs font-medium text-slate-500 max-w-[100px]">Total Ingresos Mensuales:</p>
+              <p className="text-xs font-medium text-slate-500 max-w-[100px]">Ingreso Base Mensual:</p>
               <p className="text-lg font-bold text-[#1a3059] font-mono">
                 {/* FIX 2: Uso de safeFormat */}
                 S/. {safeFormat(data.total_ingresos)}

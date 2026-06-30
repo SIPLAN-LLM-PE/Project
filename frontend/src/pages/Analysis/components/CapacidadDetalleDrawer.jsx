@@ -49,7 +49,7 @@ export const CapacidadDetalleDrawer = ({ isOpen, onClose, data }) => {
              
              <div className="space-y-3">
                 <div className="flex justify-between text-sm">
-                   <span className="text-slate-500">Ingresos Totales Brutos</span>
+                   <span className="text-slate-500">Ingreso Base Mensual</span>
                    <span className="font-bold text-slate-800">S/. {totalIngresos.toFixed(2)}</span>
                 </div>
                 <div className="flex justify-between text-sm">
@@ -57,9 +57,9 @@ export const CapacidadDetalleDrawer = ({ isOpen, onClose, data }) => {
                    <span className="font-bold text-blue-600">S/. {data.tope_legal_60.toFixed(2)}</span>
                 </div>
                 <div className="flex justify-between text-sm border-b border-slate-100 pb-3">
-                   <span className="text-slate-500">Carga en Especie (HU14)</span>
+                   <span className="text-slate-500">Cargas Aplicadas (HU14)</span>
                    <div className="text-right">
-                     <span className="font-bold text-red-500">- S/. {cargaEspecieAplicada.toFixed(2)}</span>
+                     <span className="font-bold text-red-500">- S/. {Number(data.total_cargas || cargaEspecieAplicada || 0).toFixed(2)}</span>
                      <p className={`mt-1 text-[9px] inline-block px-2 py-0.5 rounded font-bold ${estadoCargaColor}`}>{estadoCarga}</p>
                    </div>
                 </div>

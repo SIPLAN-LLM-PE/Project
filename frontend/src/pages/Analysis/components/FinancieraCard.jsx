@@ -20,6 +20,10 @@ export const FinancieraCard = ({ data }) => {
   const detalles = Array.isArray(data.detalles_gastos) ? data.detalles_gastos : [];
   const ingresos = Array.isArray(data.ingresos) ? data.ingresos : [];
   const alerta = data.alerta ?? (porcentaje > 10);
+  const trazabilidad = data.trazabilidad_financiera || {};
+  const petitorioTrace = trazabilidad.petitorio || {};
+  const controles = Array.isArray(trazabilidad.controles) ? trazabilidad.controles : [];
+  const montosDetectados = Array.isArray(trazabilidad.montos_detectados) ? trazabilidad.montos_detectados : [];
 
   return (
     <div className="mb-8">
@@ -39,7 +43,7 @@ export const FinancieraCard = ({ data }) => {
           <div className="flex justify-between items-end">
             <div>
               <span className="text-[10px] font-bold text-slate-400 uppercase block mb-1 tracking-tight">
-                Brecha de Sustento (B = Pa - Σ Gn)
+                Brecha sin Sustento (B = max(0, PA - ΣGN))
               </span>
               <h5 className={`text-2xl font-mono font-bold ${alerta ? 'text-amber-600' : 'text-emerald-600'}`}>
                 S/. {brecha.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -77,11 +81,25 @@ export const FinancieraCard = ({ data }) => {
             <div className="bg-white rounded-lg border border-slate-200 divide-y divide-slate-50 overflow-hidden shadow-sm">
               {detalles.length > 0 ? (
                 detalles.map((g, i) => (
-                  <div key={i} className="px-3 py-2.5 flex justify-between items-center hover:bg-slate-50 transition-colors">
-                    <span className="text-[10px] text-slate-600 font-semibold capitalize">{g.concepto || "Gasto identificado"}</span>
-                    <span className="text-[10px] font-mono font-bold text-slate-800 bg-slate-100 px-2 py-0.5 rounded">
-                      S/. {Number(g.monto || 0).toFixed(2)}
-                    </span>
+                  <div key={i} className="px-3 py-2.5 hover:bg-slate-50 transition-colors">
+                    <div className="flex justify-between items-center gap-3">
+                      <span className="text-[10px] text-slate-600 font-semibold capitalize">{g.concepto || "Gasto identificado"}</span>
+                      <span className="text-[10px] font-mono font-bold text-slate-800 bg-slate-100 px-2 py-0.5 rounded">
+                        S/. {Number(g.monto || 0).toFixed(2)}
+                      </span>
+                    </div>
+                    {(g.observacion || g.fuente_validacion || g.tipo_documento) && (
+                      <details className="mt-1.5 group">
+                        <summary className="cursor-pointer list-none text-[9px] font-bold uppercase tracking-wide text-slate-400 hover:text-slate-600">
+                          Ver evidencia
+                        </summary>
+                        <div className="mt-1.5 border-l-2 border-slate-200 pl-2 text-[10px] leading-snug text-slate-500">
+                          {g.fuente_validacion && <p className="font-semibold text-slate-600">{g.fuente_validacion}</p>}
+                          {g.tipo_documento && <p>Documento: {g.tipo_documento}</p>}
+                          {g.observacion && <p className="italic">"{g.observacion}"</p>}
+                        </div>
+                      </details>
+                    )}
                   </div>
                 ))
               ) : (
@@ -91,6 +109,43 @@ export const FinancieraCard = ({ data }) => {
               )}
             </div>
           </div>
+
+          {(petitorioTrace.fuente || controles.length > 0 || montosDetectados.length > 0) && (
+            <div className="rounded-lg border border-slate-200 bg-white/70 p-3">
+              <h6 className="text-[10px] font-bold text-slate-500 uppercase mb-2 flex items-center gap-1.5">
+                <Info size={12} className="text-slate-400" />
+                Trazabilidad del Cálculo
+              </h6>
+              <div className="grid grid-cols-1 gap-2 text-[10px] text-slate-600">
+                <div>
+                  <span className="font-bold text-slate-700">PA:</span> {petitorioTrace.fuente || "Sin fuente registrada"}
+                  {petitorioTrace.validado_en_texto && (
+                    <span className="ml-2 rounded bg-emerald-100 px-1.5 py-0.5 text-[9px] font-bold text-emerald-700">validado</span>
+                  )}
+                </div>
+                {petitorioTrace.evidencia && (
+                  <p className="border-l-2 border-slate-200 pl-2 italic leading-snug text-slate-500">"{petitorioTrace.evidencia}"</p>
+                )}
+                {trazabilidad.formula && (
+                  <p><span className="font-bold text-slate-700">Fórmula:</span> {trazabilidad.formula}</p>
+                )}
+                {controles.length > 0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {controles.map((control, i) => (
+                      <span key={i} className="rounded bg-slate-100 px-2 py-1 text-[9px] font-semibold text-slate-600">
+                        {control}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {montosDetectados.length > 0 && (
+                  <p className="text-slate-500">
+                    <span className="font-bold text-slate-700">Montos S/ detectados:</span> {montosDetectados.map(m => Number(m).toFixed(2)).join(", ")}
+                  </p>
+                )}
+              </div>
+            </div>
+          )}
 
           {/* Sección: Capacidad Económica (Ingresos) */}
           {ingresos.length > 0 && (

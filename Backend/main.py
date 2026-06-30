@@ -454,11 +454,13 @@ _OCR_NOMBRES_PARTES = {
     'JONATHAN', 'JOSE', 'JUAN', 'JULIO', 'LUIS', 'MARIA', 'MARIO', 'MIGUEL',
     'PEDRO', 'ROSA', 'SEYLIT', 'TERESA', 'TIFANI', 'VICTOR',
     # Apellidos frecuentes en expedientes peruanos
-    'APAZA', 'CASTILLA', 'CASTILLO', 'CUEVA', 'DIAZ', 'ESPINOZA', 'FERNANDEZ',
-    'FLORES', 'GARCIA', 'GOMEZ', 'GONZALES', 'GUERRA', 'GUTIERREZ', 'HUAMAN',
-    'LEON', 'LITTORIBIO', 'LOPEZ', 'MAMANI', 'MENDOZA', 'PEREZ', 'QUISPE',
-    'PORTUGAL', 'RAMOS', 'RODRIGUEZ', 'ROJAS', 'SANCHEZ', 'SILVA', 'TICONA',
-    'TICSE', 'TORIBIO', 'TORRES', 'VARGAS'
+    'ACOSTA', 'AGUILAR', 'APAZA', 'AQUINO', 'ARIAS', 'AYALA', 'CASTILLA',
+    'CASTILLO', 'CHAVEZ', 'CONDORI', 'CRUZ', 'CUEVA', 'DIAZ', 'ESPINOZA',
+    'FERNANDEZ', 'FLORES', 'GARCIA', 'GOMEZ', 'GONZALES', 'GUERRA',
+    'GUTIERREZ', 'HUAMAN', 'HUANCA', 'LEON', 'LITTORIBIO', 'LOPEZ', 'MAMANI',
+    'MENDOZA', 'MORALES', 'PAREDES', 'PARKER', 'PEREZ', 'PORTUGAL', 'QUISPE',
+    'RAMIREZ', 'RAMOS', 'RODRIGUEZ', 'ROJAS', 'SALAZAR', 'SANCHEZ', 'SILVA',
+    'TICONA', 'TICSE', 'TOLENTINO', 'TORIBIO', 'TORRES', 'VARGAS', 'VEGA'
 }
 
 
@@ -511,6 +513,14 @@ def normalizar_nombre_ocr(nombre: str) -> str:
         "LEON GUERRA ANDRES EMILIO": "ANDRES EMILIO LEON GUERRA",
     }
     return correcciones_orden.get(limpio, limpio)
+
+
+def _nombre_posiblemente_pegado(nombre: str) -> bool:
+    """Detecta nombres OCR con apellidos/nombres pegados por falta de espacios."""
+    if not nombre or nombre in ("No detectado", "No encontrado"):
+        return False
+    tokens = re.findall(r'[A-ZÁÉÍÓÚÑ]{18,}', str(nombre).upper())
+    return bool(tokens)
 
 
 def normalizar_sujetos_procesales_json(resultados: dict) -> dict:
@@ -691,7 +701,8 @@ _UMBRAL_CALIDAD_OCR = 75.0  # Si la precisión baja de este valor, se activa OCR
 
 def _limpiar_texto_pdf(texto: str) -> str:
     """Limpieza estándar post-extracción."""
-    texto = texto.replace(" ", "").replace("\x00", "").replace("•", "")
+    texto = texto.replace("\x00", "").replace("•", "")
+    texto = re.sub(r'[ \t]+', ' ', texto)
     texto = re.sub(r'\.{3,}', ' ', texto)
     texto = re.sub(r'\n{3,}', '\n\n', texto)
     return texto.strip()
@@ -755,6 +766,18 @@ def _comparar_textos_ocr(texto_nativo: str, texto_ocr: str) -> float:
     return round(ratio * 100, 1)
 
 
+def _extraer_texto_pypdf2_pagina(pagina) -> str:
+    """
+    Usa extraction_mode='layout' cuando la versión de PyPDF2 lo soporta.
+    En versiones antiguas, cae al extract_text() clásico sin tratarlo como
+    fallo del PDF.
+    """
+    try:
+        return pagina.extract_text(extraction_mode="layout") or ""
+    except TypeError:
+        return pagina.extract_text() or ""
+
+
 def modulo_ocr_tesseract(contenido_pdf: bytes) -> tuple:
     """
     Extrae texto con estrategia de 3 niveles + auto-escalado por calidad.
@@ -771,7 +794,7 @@ def modulo_ocr_tesseract(contenido_pdf: bytes) -> tuple:
     try:
         lector_pdf = PyPDF2.PdfReader(io.BytesIO(contenido_pdf))
         for pagina in lector_pdf.pages:
-            t = pagina.extract_text()
+            t = _extraer_texto_pypdf2_pagina(pagina)
             if t:
                 texto_extraido += t + "\n"
         texto_extraido = _limpiar_texto_pdf(texto_extraido)
@@ -780,7 +803,12 @@ def modulo_ocr_tesseract(contenido_pdf: bytes) -> tuple:
             calidad = calcular_ocr_precision(texto_extraido)
             print(f"✓ PyPDF2: {len(texto_extraido)} chars, calidad={calidad}%")
             if calidad >= _UMBRAL_CALIDAD_OCR:
-                # PDF digital limpio — sin OCR, la precisión es la del propio texto
+                # PDF digital: usar pdfplumber words para respetar espacios entre palabras en negrita
+                texto_nativo = texto_extraido
+                texto_plumber = _extraer_con_pdfplumber_words(contenido_pdf)
+                if texto_plumber and len(texto_plumber) > 200:
+                    print(f"✓ PyPDF2 (pdfplumber words): {len(texto_plumber)} chars, calidad={calidad}%")
+                    return texto_plumber, calidad, "PyPDF2"
                 return texto_extraido, calidad, "PyPDF2"
             texto_nativo = texto_extraido  # guardar como referencia antes de escalar
             print(f"⚠ Calidad {calidad}% < {_UMBRAL_CALIDAD_OCR}% — escalando a pdfplumber words...")
@@ -951,6 +979,7 @@ REGLAS DE VALIDACIÓN (aplica todas):
 5. DNI VÁLIDO: Un DNI correcto de demandante aparece explícitamente como "DEMANDANTE... identificado/a con DNI XXXXXXXX" o "Documento Nacional de Identidad N° XXXXXXXX" en la sección de identificación.
 6. MONTO PETITORIO: Es el monto que la demandante SOLICITA (pensión mensual). NO son costas, gastos judiciales, honorarios, ni montos históricos pagados.
 7. NOMBRES: El demandante es quien presenta la demanda (generalmente la madre o quien cuida al menor). El demandado es contra quien se demanda (generalmente el padre obligado a pagar).
+8. NOMBRES PEGADOS POR OCR: Si un nombre aparece como una palabra muy larga en mayúsculas sin espacios (por ejemplo por texto en negrita del PDF), considérelo sospechoso y sepárelo en apellidos/nombres usando el contexto formal del documento. No elimines apellidos compuestos.
 
 Si un dato es incorrecto, busca el valor correcto en la sección formal. Si no lo encuentras, usa "No encontrado".
 
@@ -999,7 +1028,7 @@ Responde ÚNICAMENTE con este JSON (sin texto adicional):
                 entidades_v["demandante"]["dni"] = "No detectado"
 
         # Corregir nombre demandante
-        if not v.get("demandante_nombre_correcto", True):
+        if not v.get("demandante_nombre_correcto", True) or _nombre_posiblemente_pegado(dem_nombre):
             nom = str(v.get("demandante_nombre", "")).upper().strip()
             if nom and nom not in ("NO ENCONTRADO", "", dem_nombre):
                 print(f"⚠ Validación: nombre demandante \"{dem_nombre}\" → \"{nom}\"")
@@ -1018,7 +1047,7 @@ Responde ÚNICAMENTE con este JSON (sin texto adicional):
                     entidades_v["demandado"]["dni"] = m.group()
 
         # Corregir nombre demandado
-        if not v.get("demandado_nombre_correcto", True):
+        if not v.get("demandado_nombre_correcto", True) or _nombre_posiblemente_pegado(ddo_nombre):
             nom = str(v.get("demandado_nombre", "")).upper().strip()
             if nom and nom not in ("NO ENCONTRADO", "", ddo_nombre):
                 print(f"⚠ Validación: nombre demandado \"{ddo_nombre}\" → \"{nom}\"")
@@ -1272,6 +1301,7 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
         - El DNI siempre tiene 8 dígitos exactos
         - NO extraigas números de expediente (estos tienen más o menos dígitos)
         - NO extraigas al "JUEZ" o "ESPECIALISTA"
+        - Si un nombre aparece pegado en una sola palabra larga por OCR/negrita, sepáralo en apellidos y nombres según el contexto
         - Si un dato NO está en el texto, responde "No encontrado"
 
         TEXTO:
@@ -1595,6 +1625,87 @@ def formato_monto(valor, defecto="No detectado"):
         return defecto
     return f"S/. {monto:,.2f}"
 
+_MONTO_LETRAS_UNIDADES = {
+    "un": 1, "uno": 1, "una": 1, "dos": 2, "tres": 3, "cuatro": 4,
+    "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9,
+    "diez": 10, "once": 11, "doce": 12, "trece": 13, "catorce": 14,
+    "quince": 15, "dieciseis": 16, "diecisiete": 17, "dieciocho": 18,
+    "diecinueve": 19, "veinte": 20, "veintiuno": 21, "veintidos": 22,
+    "veintitres": 23, "veinticuatro": 24, "veinticinco": 25,
+    "veintiseis": 26, "veintisiete": 27, "veintiocho": 28, "veintinueve": 29,
+}
+_MONTO_LETRAS_DECENAS = {
+    "treinta": 30, "cuarenta": 40, "cincuenta": 50, "sesenta": 60,
+    "setenta": 70, "ochenta": 80, "noventa": 90,
+}
+_MONTO_LETRAS_CENTENAS = {
+    "cien": 100, "ciento": 100, "doscientos": 200, "doscientas": 200,
+    "trescientos": 300, "trescientas": 300, "cuatrocientos": 400,
+    "cuatrocientas": 400, "quinientos": 500, "quinientas": 500,
+    "seiscientos": 600, "seiscientas": 600, "setecientos": 700,
+    "setecientas": 700, "ochocientos": 800, "ochocientas": 800,
+    "novecientos": 900, "novecientas": 900,
+}
+
+def _normalizar_palabras_monto(texto: str) -> str:
+    texto = unicodedata.normalize("NFKD", str(texto or "").lower())
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = re.sub(r'[^a-zñ\s]', ' ', texto)
+    return re.sub(r'\s+', ' ', texto).strip()
+
+def _monto_en_letras_a_numero(texto: str):
+    """
+    Convierte montos simples en letras a número.
+    Cubre montos usuales de alimentos: quinientos, mil doscientos, etc.
+    """
+    tokens = [t for t in _normalizar_palabras_monto(texto).split() if t != "y"]
+    if not tokens:
+        return None
+    total = 0
+    actual = 0
+    reconocido = False
+    for tok in tokens:
+        if tok == "mil":
+            total += (actual or 1) * 1000
+            actual = 0
+            reconocido = True
+        elif tok in _MONTO_LETRAS_CENTENAS:
+            actual += _MONTO_LETRAS_CENTENAS[tok]
+            reconocido = True
+        elif tok in _MONTO_LETRAS_DECENAS:
+            actual += _MONTO_LETRAS_DECENAS[tok]
+            reconocido = True
+        elif tok in _MONTO_LETRAS_UNIDADES:
+            actual += _MONTO_LETRAS_UNIDADES[tok]
+            reconocido = True
+        else:
+            return None
+    monto = total + actual
+    return float(monto) if reconocido and monto > 0 else None
+
+def _monto_en_letras_desde_frase(texto: str):
+    """
+    Intenta convertir una frase que puede traer ruido antes del monto.
+    Ej.: "pension alimenticia de mil doscientos" -> 1200.
+    """
+    tokens = _normalizar_palabras_monto(texto).split()
+    for inicio in range(len(tokens)):
+        val = _monto_en_letras_a_numero(" ".join(tokens[inicio:]))
+        if val is not None:
+            return val
+    return None
+
+def _extraer_montos_en_letras(texto_plano: str) -> list:
+    montos = []
+    patron = r'\b((?:[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+){0,5}[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)\s+soles\b'
+    for m in re.finditer(patron, texto_plano, re.IGNORECASE):
+        if re.search(r'\d+\s*/\s*\d+\s*$', texto_plano[max(0, m.start() - 12):m.start()]):
+            continue
+        val = _monto_en_letras_desde_frase(m.group(1))
+        if val is not None:
+            montos.append(val)
+    return montos
+
 
 def _extraer_montos_reales(texto_plano: str):
     """
@@ -1607,11 +1718,13 @@ def _extraer_montos_reales(texto_plano: str):
         val = _normalizar_monto_texto(match.group(1))
         if val is not None and val > 0:
             montos.append(val)
+    montos.extend(_extraer_montos_en_letras(texto_plano))
     return montos
 
 def _validar_monto_con_texto(monto_objetivo: float, montos_reales: list, tolerancia: float = 1.0):
     """
-    Verifica que un monto propuesto exista realmente (o sea casi igual) en el texto.
+    Verifica que un monto propuesto exista realmente en el texto, sea como
+    cifra con S/ o como monto en letras convertido.
     Retorna el monto real validado o None.
     """
     try:
@@ -1627,12 +1740,37 @@ def _validar_monto_con_texto(monto_objetivo: float, montos_reales: list, toleran
             return token_val
     return None
 
-def _extraer_petitorio_demanda_regex(texto_plano: str):
+def _contexto_monto_en_texto(texto_plano: str, monto: float, ventana: int = 110) -> str:
     """
-    Extrae el petitorio principal SOLO desde la sección I. PETITORIO
-    de la demanda (no contestación).
+    Devuelve un fragmento cercano a la primera aparición literal del monto.
+    Sirve como trazabilidad visible para auditoría HU18.
     """
-    # Cortamos antes de la contestación para reducir ambigüedad.
+    monto_norm = _normalizar_monto_texto(monto)
+    if monto_norm is None or not texto_plano:
+        return ""
+    patron = r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)'
+    for m in re.finditer(patron, texto_plano):
+        val = _normalizar_monto_texto(m.group(1))
+        if val is not None and abs(val - monto_norm) <= 1.0:
+            inicio = max(0, m.start() - ventana)
+            fin = min(len(texto_plano), m.end() + ventana)
+            return re.sub(r'\s+', ' ', texto_plano[inicio:fin]).strip()
+    patron_letras = r'\b((?:[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+){0,5}[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)\s+soles\b'
+    for m in re.finditer(patron_letras, texto_plano, re.IGNORECASE):
+        if re.search(r'\d+\s*/\s*\d+\s*$', texto_plano[max(0, m.start() - 12):m.start()]):
+            continue
+        val = _monto_en_letras_desde_frase(m.group(1))
+        if val is not None and abs(val - monto_norm) <= 1.0:
+            inicio = max(0, m.start() - ventana)
+            fin = min(len(texto_plano), m.end() + ventana)
+            return re.sub(r'\s+', ' ', texto_plano[inicio:fin]).strip()
+    return ""
+
+def _extraer_petitorio_demanda_info(texto_plano: str) -> dict:
+    """
+    Extrae el petitorio principal y su evidencia desde demanda/sentencia.
+    Evita usar la primera aparición numérica del monto como trazabilidad.
+    """
     texto_demanda = re.split(
         r'CONTESTACI[ÓO]N\s+DE\s+DEMANDA|SUMILLA:\s*CONTESTACI[ÓO]N|ESCRITO:\s*0?2-\d{4}',
         texto_plano,
@@ -1645,20 +1783,70 @@ def _extraer_petitorio_demanda_regex(texto_plano: str):
         texto_demanda,
         re.IGNORECASE | re.DOTALL
     )
-    if not seccion_petitorio:
-        return 0.0
+    if seccion_petitorio:
+        bloque = seccion_petitorio.group(1)
+        prioridad = re.search(
+            r'(?:suma\s+total|pensi[oó]n(?:\s+alimenticia)?|monto\s+solicitado|petitorio).{0,90}?(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
+            bloque,
+            re.IGNORECASE | re.DOTALL
+        )
+        if prioridad:
+            return {
+                "monto": _normalizar_monto_texto(prioridad.group(1)) or 0.0,
+                "evidencia": re.sub(r'\s+', ' ', prioridad.group(0)).strip(),
+                "fuente": "Regex estricto: sección I. PETITORIO de la demanda"
+            }
 
-    bloque = seccion_petitorio.group(1)
-    prioridad = re.search(
-        r'(?:suma\s+total|pensi[oó]n(?:\s+alimenticia)?|monto\s+solicitado|petitorio).{0,90}?(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
-        bloque,
-        re.IGNORECASE | re.DOTALL
+        fallback = re.search(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', bloque, re.IGNORECASE)
+        if fallback:
+            return {
+                "monto": _normalizar_monto_texto(fallback.group(1)) or 0.0,
+                "evidencia": re.sub(r'\s+', ' ', bloque[max(0, fallback.start() - 140): fallback.end() + 180]).strip(),
+                "fuente": "Regex estricto: sección I. PETITORIO de la demanda"
+            }
+
+        fallback_letras = re.search(
+            r'(pensi[oó]n\s+alimenticia[\s\S]{0,90}?([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){0,5})\s+soles)',
+            bloque,
+            re.IGNORECASE
+        )
+        if fallback_letras:
+            return {
+                "monto": _monto_en_letras_desde_frase(fallback_letras.group(2)) or 0.0,
+                "evidencia": re.sub(r'\s+', ' ', fallback_letras.group(1)).strip(),
+                "fuente": "Regex estricto: sección I. PETITORIO de la demanda"
+            }
+
+    sentencia_refiere_petitorio = re.search(
+        r'demandante\s+pretende[\s\S]{0,220}?pensi[oó]n\s+alimenticia[\s\S]{0,90}?(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
+        texto_demanda,
+        re.IGNORECASE
     )
-    if prioridad:
-        return _normalizar_monto_texto(prioridad.group(1)) or 0.0
+    if sentencia_refiere_petitorio:
+        return {
+            "monto": _normalizar_monto_texto(sentencia_refiere_petitorio.group(1)) or 0.0,
+            "evidencia": re.sub(r'\s+', ' ', sentencia_refiere_petitorio.group(0)).strip(),
+            "fuente": "Sentencia: referencia a pretensión de la demandante"
+        }
+    sentencia_refiere_petitorio_letras = re.search(
+        r'(demandante[\s\S]{0,420}?solicita[\s\S]{0,260}?pensi[oó]n\s+alimenticia\s+de\s+([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){0,5})\s+soles)',
+        texto_demanda,
+        re.IGNORECASE
+    )
+    if sentencia_refiere_petitorio_letras:
+        return {
+            "monto": _monto_en_letras_desde_frase(sentencia_refiere_petitorio_letras.group(2)) or 0.0,
+            "evidencia": re.sub(r'\s+', ' ', sentencia_refiere_petitorio_letras.group(1)).strip(),
+            "fuente": "Sentencia: referencia a pretensión de la demandante"
+        }
+    return {"monto": 0.0, "evidencia": "", "fuente": "No detectado"}
 
-    fallback = re.search(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', bloque, re.IGNORECASE)
-    return _normalizar_monto_texto(fallback.group(1)) if fallback else 0.0
+def _extraer_petitorio_demanda_regex(texto_plano: str):
+    """
+    Extrae el petitorio principal SOLO desde la sección I. PETITORIO
+    de la demanda (no contestación).
+    """
+    return _extraer_petitorio_demanda_info(texto_plano).get("monto", 0.0)
 
 def _texto_parece_petitorio_o_oferta(texto: str) -> bool:
     """
@@ -1668,10 +1856,64 @@ def _texto_parece_petitorio_o_oferta(texto: str) -> bool:
     if not texto:
         return False
     return bool(re.search(
-        r'petitorio|solicit[ao]\s+(?:se\s+fije|una\s+pensi)|interpongo\s+demanda|ofrec(?:e|er|iendo)\s+acudir|fundada\s+en\s+parte|pensi[oó]n\s+ascendente\s+a',
+        r'petitorio|solicit[ao]\s+(?:se\s+fije|una\s+pensi)|interpongo\s+demanda|ofrec(?:e|er|iendo)\s+acudir|fundada\s+en\s+parte|pensi[oó]n\s+ascendente\s+a|fall[ao]|ordeno?|asignaci[oó]n\s+anticipada|pensi[oó]n\s+alimenticia\s+mensual|liquidaci[oó]n|devengad|inter[eé]s|intereses|deuda\s+pendiente|genera\s+ingresos|ingresos?\s+(?:de|mensual|que\s+percibe)|percibe\s+(?:un\s+)?ingreso|remuneraci[oó]n\s+mensual|boleta\s+de\s+pago|empleador|contrato\s+administrativo\s+de\s+servicios|\bCAS\b|descuentos?\s+de\s+ley|sueldo|planilla',
         texto,
         re.IGNORECASE
     ))
+
+def _texto_parece_ingreso_hu14(texto: str) -> bool:
+    """
+    Detecta montos que describen capacidad económica del obligado.
+    Estos pueden alimentar HU14, pero no deben convertirse en PA ni GN de HU18.
+    """
+    if not texto:
+        return False
+    return bool(re.search(
+        r'genera\s+ingresos|ingresos?\s+(?:de|mensual|que\s+percibe)|percibe\s+(?:un\s+)?ingreso|remuneraci[oó]n\s+mensual|boleta\s+de\s+pago|empleador|contrato\s+administrativo\s+de\s+servicios|\bCAS\b|descuentos?\s+de\s+ley|sueldo|planilla',
+        texto,
+        re.IGNORECASE
+    ))
+
+def _monto_tiene_contexto_excluido(texto_plano: str, monto: float) -> bool:
+    """
+    Revisa todas las apariciones del monto. Si aparecen solo en contextos de
+    petitorio/fallo/liquidación/devengados, no deben entrar como gasto HU18.
+    """
+    if not texto_plano or monto <= 0:
+        return False
+    patrones = [r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)']
+    patrones.append(r'\b((?:[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+\s+){0,5}[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+)\s+soles\b')
+    apariciones = []
+    for patron in patrones:
+        for m in re.finditer(patron, texto_plano, re.IGNORECASE):
+            if re.search(r'\d+\s*/\s*\d+\s*$', texto_plano[max(0, m.start() - 12):m.start()]):
+                continue
+            val = _normalizar_monto_texto(m.group(1))
+            if val is None:
+                val = _monto_en_letras_desde_frase(m.group(1))
+            if val is not None and abs(float(val) - float(monto)) <= 1.0:
+                ctx = texto_plano[max(0, m.start() - 180): m.end() + 220]
+                apariciones.append(ctx)
+    if not apariciones:
+        return False
+    return all(_texto_parece_petitorio_o_oferta(ctx) for ctx in apariciones)
+
+def _monto_aparece_solo_como_ingreso_hu14(texto_plano: str, monto: float) -> bool:
+    """
+    Para seleccionar PA: descarta montos que en el PDF aparecen solo como
+    ingresos/remuneraciones del obligado.
+    """
+    if not texto_plano or monto <= 0:
+        return False
+    apariciones = []
+    for m in re.finditer(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', texto_plano, re.IGNORECASE):
+        val = _normalizar_monto_texto(m.group(1))
+        if val is not None and abs(float(val) - float(monto)) <= 1.0:
+            apariciones.append(texto_plano[max(0, m.start() - 180): m.end() + 220])
+    if not apariciones:
+        return False
+    return all(_texto_parece_ingreso_hu14(ctx) for ctx in apariciones)
+
 
 def _obtener_bloques_demanda_contestacion(texto_plano: str):
     """
@@ -1761,6 +2003,8 @@ def _extraer_gastos_nativos(texto_plano: str, montos_reales: list, pa: float) ->
         val_validado = _validar_monto_con_texto(val or 0, montos_reales, tolerancia=1.0)
         if not val_validado:
             continue
+        if _texto_parece_petitorio_o_oferta(m.group(0)) or _monto_tiene_contexto_excluido(texto_plano, val_validado):
+            continue
         if abs(val_validado - pa) <= 10:
             continue
         clave = (f"Educación / {nombre_hijo}", round(val_validado, 2))
@@ -1783,6 +2027,8 @@ def _extraer_gastos_nativos(texto_plano: str, montos_reales: list, pa: float) ->
             val = _normalizar_monto_texto(m.group(1))
             val_validado = _validar_monto_con_texto(val or 0, montos_reales, tolerancia=1.0)
             if not val_validado:
+                continue
+            if _texto_parece_petitorio_o_oferta(m.group(0)) or _monto_tiene_contexto_excluido(texto_plano, val_validado):
                 continue
             if abs(val_validado - pa) <= 10:
                 continue
@@ -1825,6 +2071,77 @@ def _extraer_dependientes_nativos(texto_plano: str):
         })
     return dependientes
 
+def _prioridad_ingreso_hu14(item: dict) -> int:
+    """
+    Prioriza la base de cálculo HU14: ingreso neto acreditado > sueldo base >
+    ingreso alegado. Evita sumar montos alternativos del mismo empleo.
+    """
+    texto = " ".join([
+        str(item.get("tipo", "")),
+        str(item.get("estado", "")),
+        str(item.get("evidencia", "")),
+        str(item.get("evidencia_literal", "")),
+    ]).lower()
+    if re.search(r'ingreso\s+neto|neto|descuentos?\s+de\s+ley|l[ií]quido', texto):
+        return 100
+    if re.search(r'boleta|sueldo\s+base|remuneraci[oó]n|empleador|planilla', texto):
+        return 80
+    if re.search(r'demandante\s+ha\s+se[ñn]alado|se[ñn]ala\s+en\s+su\s+demanda|alegad', texto):
+        return 45
+    return 60
+
+def _seleccionar_ingreso_base_hu14(ingresos: list) -> tuple:
+    """
+    Mantiene las fuentes detectadas, pero solo una queda aplicada al cálculo.
+    Retorna (ingresos_marcados, ingreso_base).
+    """
+    if not ingresos:
+        return [], 0.0
+    enriquecidos = []
+    for item in ingresos:
+        copia = dict(item)
+        copia["_prioridad_hu14"] = _prioridad_ingreso_hu14(copia)
+        copia["aplicado_calculo"] = False
+        enriquecidos.append(copia)
+    elegido = max(enriquecidos, key=lambda x: (x.get("_prioridad_hu14", 0), float(x.get("monto") or 0)))
+    ingreso_base = float(elegido.get("monto") or 0)
+    for item in enriquecidos:
+        item["aplicado_calculo"] = item is elegido
+        estado_base = item.get("estado", "Validado por texto")
+        item["estado"] = "Base de cálculo HU14" if item is elegido else f"{estado_base} (referencial)"
+        item.pop("_prioridad_hu14", None)
+    return enriquecidos, ingreso_base
+
+def _extraer_cargas_familiares_nativas(texto_plano: str, montos_reales: list) -> list:
+    """
+    Detecta cargas familiares monetarias explícitas que no corresponden
+    al alimentista principal del expediente.
+    """
+    if not texto_plano:
+        return []
+    cargas = []
+    patrones = [
+        r'([^.]{0,180}(?:otros?\s+menores|menores\s+[A-ZÁÉÍÓÚÑ]|carga\s+familiar|deber\s+familiar)[^.]{0,220}(?:pensi[oó]n|acude)[^.]{0,120}(?:S/|S/\.)\s*([0-9][0-9\.,]*))',
+        r'([^.]{0,180}(?:pensi[oó]n|acude)[^.]{0,120}(?:S/|S/\.)\s*([0-9][0-9\.,]*)[^.]{0,220}(?:otros?\s+menores|carga\s+familiar|acta\s+de\s+conciliaci[oó]n))',
+    ]
+    for patron in patrones:
+        for m in re.finditer(patron, texto_plano, re.IGNORECASE):
+            val = _normalizar_monto_texto(m.group(2))
+            val_validado = _validar_monto_con_texto(val or 0, montos_reales, tolerancia=1.0)
+            if not val_validado:
+                continue
+            evidencia = re.sub(r'\s+', ' ', m.group(1)).strip()
+            clave = round(float(val_validado), 2)
+            if any(round(float(c.get("monto_carga") or 0), 2) == clave for c in cargas):
+                continue
+            cargas.append({
+                "tipo": "Carga familiar acreditada",
+                "detalle": "Otros dependientes del demandado",
+                "monto_carga": clave,
+                "evidencia": evidencia
+            })
+    return cargas
+
 def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
     """
     Versión 5.4: Auditoría Financiera Blindada.
@@ -1837,7 +2154,11 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
     montos_reales_en_texto = _extraer_montos_reales(texto_plano)  # "Verdad Absoluta"
 
     # 2. PROMPT DE CLASIFICACIÓN (Plantilla en blanco)
-    fragmentos = re.findall(r'([^.]{0,70}(?:S/|S/\.)\s*\d+(?:[.,]\d{1,2})?[^.]{0,70})', texto_plano)
+    fragmentos = re.findall(
+        r'([^.]{0,90}(?:(?:S/|S/\.)\s*\d+(?:[.,]\d{1,2})?|(?:mil\s+)?(?:doscientos|trescientos|cuatrocientos|quinientos|seiscientos|setecientos|ochocientos|novecientos|cien|ciento|treinta|cuarenta|cincuenta|sesenta|setenta|ochenta|noventa|veinte|diez|once|doce|quince)[^.]{0,40}?soles)[^.]{0,120})',
+        texto_plano,
+        re.IGNORECASE
+    )
     contexto_ia = "\n".join(fragmentos)
 
     # Prompt reforzado: exige separar demanda/contestación y evidencia literal.
@@ -1850,9 +2171,11 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
     REGLAS CRÍTICAS:
     1. Distingue origen: "demanda_petitorio_actora", "contestacion_oferta_demandado", "gasto_acreditado".
     2. PETITORIO PRINCIPAL = SOLO monto en sección "I. PETITORIO" del escrito de DEMANDA.
-    3. NO uses como petitorio: pensión escolar, oferta del demandado, ni montos históricos.
+    3. NO uses como petitorio: ingresos/remuneraciones del demandado, pensión escolar, oferta del demandado, montos históricos, liquidaciones, devengados ni intereses.
     4. Cada monto debe incluir evidencia_literal exacta y tipo_documento ("demanda" o "contestación").
-    5. Si hay duda, devuelve null y no inventes.
+    5. NO registres como gasto acreditado montos de ingresos/remuneración/boleta/sueldo del demandado, liquidación/devengados/intereses/deuda pendiente.
+    6. Si el petitorio está escrito en letras ("mil doscientos soles"), conviértelo a número.
+    7. Si hay duda, devuelve null y no inventes.
 
     Responde SOLO con este JSON:
     {{
@@ -1893,32 +2216,47 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
         seccion_ia = str(petitorio_ia.get("seccion", "")).strip().lower()
         evidencia_ia = str(petitorio_ia.get("evidencia_literal", "")).strip()
 
-        # Regex nativo estricto para demanda: I. PETITORIO del escrito de demanda.
-        pa_regex = _extraer_petitorio_demanda_regex(texto_plano) or 0.0
+        # Regex nativo estricto para demanda/sentencia con evidencia propia.
+        pa_regex_info = _extraer_petitorio_demanda_info(texto_plano)
+        pa_regex = pa_regex_info.get("monto", 0.0) or 0.0
 
         ia_petitorio_confiable = (
             pa_ia > 0
             and tipo_doc_ia in ("demanda", "demanda de alimentos", "demanda_petitorio_actora")
             and ("petitorio" in seccion_ia or "i. petitorio" in seccion_ia)
             and not _texto_parece_petitorio_o_oferta(evidencia_ia)  # protege contra citas ambiguas
+            and not _monto_aparece_solo_como_ingreso_hu14(texto_plano, pa_ia)
         )
 
-        pa_validado_spacy = _validar_monto_con_texto(pa_spacy, montos_reales_en_texto) if pa_spacy > 0 else None
-        pa_validado_regex = _validar_monto_con_texto(pa_regex, montos_reales_en_texto) if pa_regex > 0 else None
+        pa_validado_spacy = _validar_monto_con_texto(pa_spacy, montos_reales_en_texto) if pa_spacy > 0 and not _monto_aparece_solo_como_ingreso_hu14(texto_plano, pa_spacy) else None
+        pa_validado_regex = _validar_monto_con_texto(pa_regex, montos_reales_en_texto) if pa_regex > 0 and not _monto_aparece_solo_como_ingreso_hu14(texto_plano, pa_regex) else None
         pa_validado_ia = _validar_monto_con_texto(pa_ia, montos_reales_en_texto) if ia_petitorio_confiable else None
-        pa_validado_ia_legacy = _validar_monto_con_texto(pa_ia, montos_reales_en_texto) if pa_ia > 0 else None
+        pa_validado_ia_legacy = _validar_monto_con_texto(pa_ia, montos_reales_en_texto) if pa_ia > 0 and not _monto_aparece_solo_como_ingreso_hu14(texto_plano, pa_ia) else None
+
+        fuente_petitorio = "No detectado"
+        evidencia_petitorio = ""
 
         # Prioridad: regex demanda estricto > IA confiable validada > NER validado > IA legacy validada > fallback NER > 0
         if pa_validado_regex:
             pa = pa_validado_regex
+            fuente_petitorio = pa_regex_info.get("fuente") or "Regex estricto: sección I. PETITORIO de la demanda"
+            evidencia_petitorio = pa_regex_info.get("evidencia") or _contexto_monto_en_texto(texto_plano, pa)
         elif pa_validado_ia:
             pa = pa_validado_ia
+            fuente_petitorio = "IA validada: petitorio principal de demanda"
+            evidencia_petitorio = evidencia_ia or _contexto_monto_en_texto(texto_plano, pa)
         elif pa_validado_spacy:
             pa = pa_validado_spacy
+            fuente_petitorio = "NER/regex general validado contra texto"
+            evidencia_petitorio = _contexto_monto_en_texto(texto_plano, pa)
         elif pa_validado_ia_legacy:
             pa = pa_validado_ia_legacy
-        elif pa_spacy > 0:
+            fuente_petitorio = "IA legacy validada contra texto"
+            evidencia_petitorio = evidencia_ia or _contexto_monto_en_texto(texto_plano, pa)
+        elif pa_spacy > 0 and not _monto_aparece_solo_como_ingreso_hu14(texto_plano, pa_spacy):
             pa = pa_spacy
+            fuente_petitorio = "Fallback NER sin validación literal estricta"
+            evidencia_petitorio = _contexto_monto_en_texto(texto_plano, pa)
         else:
             pa = 0.0
 
@@ -1943,6 +2281,9 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
             # No permitir que un texto de petitorio/oferta termine como gasto.
             if _texto_parece_petitorio_o_oferta(evidencia):
                 continue
+            if _monto_tiene_contexto_excluido(texto_plano, monto_validado):
+                print(f"Alerta HU18: gasto S/ {monto_validado} descartado por contexto excluido.")
+                continue
             
             # Condición de negocio: El gasto no puede ser igual al petitorio total
             if monto_validado > 0 and abs(monto_validado - pa) > 10:
@@ -1950,7 +2291,9 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
                     "concepto": g.get("concepto", "Gasto general"),
                     "monto": monto_validado,
                     "observacion": evidencia or g.get("observacion", "Mención en el texto"),
-                    "tipo_documento": tipo_doc_gasto or "no especificado"
+                    "tipo_documento": tipo_doc_gasto or "no especificado",
+                    "validado_en_texto": True,
+                    "fuente_validacion": "Monto literal encontrado en el PDF"
                 })
                 suma_gn += monto_validado
 
@@ -1960,6 +2303,8 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
         montos_ya_incluidos = {round(d["monto"], 2) for d in detalles_finales}
         for gn in gastos_nativos:
             if round(gn["monto"], 2) not in montos_ya_incluidos:
+                gn["validado_en_texto"] = True
+                gn["fuente_validacion"] = "Regex nativo con monto literal encontrado en el PDF"
                 detalles_finales.append(gn)
                 suma_gn += gn["monto"]
                 montos_ya_incluidos.add(round(gn["monto"], 2))
@@ -1990,6 +2335,28 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
             "porcentaje_brecha": round((brecha/pa*100), 1) if pa > 0 else 0,
             "detalles_gastos": detalles_finales,
             "alerta": hay_alerta,
+            "trazabilidad_financiera": {
+                "formula": "B = max(0, PA - ΣGN)",
+                "petitorio": {
+                    "monto": round(pa, 2),
+                    "fuente": fuente_petitorio,
+                    "evidencia": evidencia_petitorio,
+                    "validado_en_texto": bool(_validar_monto_con_texto(pa, montos_reales_en_texto)) if pa > 0 else False
+                },
+                "gastos": {
+                    "items_aceptados": len(detalles_finales),
+                    "suma": round(suma_gn, 2),
+                    "criterio": "Solo se suman gastos cuyo monto aparece literalmente en el PDF y que no parecen petitorio, oferta, ingreso/remuneración del obligado o duplicado del PA."
+                },
+                "controles": [
+                    "Escaneo previo de todos los montos S/ del PDF",
+                    "Validación anti-alucinación: cada monto aceptado debe existir en el texto",
+                    "Separación demanda/contestación para no mezclar petitorio con oferta",
+                    "Descarte de ingresos/remuneraciones del obligado en HU18",
+                    "Descarte de montos iguales o casi iguales al petitorio"
+                ],
+                "montos_detectados": sorted({round(m, 2) for m in montos_reales_en_texto})[:40]
+            },
             "validaciones_hu12": {
                 "hijos_con_escolaridad": len(hijos_escolar),
                 "items_educacion_detectados": len(items_educacion),
@@ -2000,6 +2367,8 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
     except Exception as e:
         print(f"Error en auditoría financiera: {e}")
         monto_fallback = monto_seguro(monto_p_spacy)
+        if _monto_aparece_solo_como_ingreso_hu14(texto_plano, monto_fallback):
+            monto_fallback = 0.0
         return {"petitorio": monto_fallback, "suma_gastos_sustentados": 0, "brecha_valor": monto_fallback, "porcentaje_brecha": 100 if monto_fallback > 0 else 0, "detalles_gastos": [], "alerta": True}
 
 def modulo_capacidad_cargas(texto_plano: str) -> dict:
@@ -2075,7 +2444,8 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
                 ingresos_nativos.append({
                     "tipo": "Ingreso detectado en texto",
                     "monto": val_validado,
-                    "estado": "Validado por texto"
+                    "estado": "Validado por texto",
+                    "evidencia": m.group(1).strip()
                 })
 
         # Validación estricta de montos IA contra texto real.
@@ -2144,6 +2514,14 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
                 dependientes.append(dn)
                 presentes.add(detalle_key)
 
+        cargas_familiares_nativas = _extraer_cargas_familiares_nativas(texto_plano, montos_reales_en_texto)
+        montos_carga_presentes = {round(float(d.get("monto_carga") or 0), 2) for d in dependientes}
+        for carga in cargas_familiares_nativas:
+            clave = round(float(carga.get("monto_carga") or 0), 2)
+            if clave > 0 and clave not in montos_carga_presentes:
+                dependientes.append(carga)
+                montos_carga_presentes.add(clave)
+
         # Detectar carga en especie con prioridad nativa (texto real) y respaldo IA.
         carga_especie = _extraer_carga_especie_desde_texto(texto_plano, montos_reales_en_texto)
         carga_especie_ia = data.get("carga_especie", {}) if isinstance(data, dict) else {}
@@ -2160,14 +2538,15 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
             }
 
         # --- 1. Cálculos Base ---
-        total_ingresos = sum(float(item.get("monto") or 0) for item in ingresos)
+        ingresos, total_ingresos = _seleccionar_ingreso_base_hu14(ingresos)
         carga_especie_acreditada = float(carga_especie.get("monto_acreditado") or 0)
         carga_especie_reportada = float(carga_especie.get("monto_reportado") or 0)
         estado_carga = carga_especie.get("estado", "no detectada")
         # Regla HU14 actualizada: si es alegada con monto reportado, también se aplica al ratio.
         carga_especie_aplicada = carga_especie_reportada if estado_carga in ("probada", "alegada") else 0.0
+        cargas_monetarias_dependientes = sum(float(dep.get("monto_carga") or 0) for dep in dependientes)
         # Para compatibilidad de métricas existentes, total_cargas refleja lo aplicado al ratio.
-        total_cargas_existentes = carga_especie_aplicada
+        total_cargas_existentes = carga_especie_aplicada + cargas_monetarias_dependientes
         
         # --- 2. CÁLCULO LEGAL CPC 648 (NUEVO) ---
         # El 60% es lo máximo que el Juez puede embargar por ley
@@ -2183,8 +2562,8 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
         alerta_revision_hu14 = False
         ingreso_disponible = 0.0
         if total_ingresos > 0:
-            # Regla HU14: usar SIEMPRE carga en especie aplicada (probada o alegada) para el ratio.
-            ingreso_disponible = total_ingresos - carga_especie_aplicada
+            # Regla HU14: aplicar cargas familiares monetarias y carga en especie validada/alegada.
+            ingreso_disponible = max(0.0, total_ingresos - total_cargas_existentes)
             ratio = (ingreso_disponible / total_ingresos) * 100
 
             if ratio >= 90:
@@ -2197,11 +2576,11 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
                 carga_nivel = "Carga Crítica"
 
             if estado_carga == "probada":
-                mensaje_ratio = f"Ratio HU14 de {ratio:.1f}%. Se aplicó carga en especie probada por S/ {carga_especie_aplicada:.2f}."
+                mensaje_ratio = f"Ratio HU14 de {ratio:.1f}%. Se aplicó carga en especie probada por S/ {carga_especie_aplicada:.2f} y cargas familiares por S/ {cargas_monetarias_dependientes:.2f}."
             elif estado_carga == "alegada":
-                mensaje_ratio = f"Ratio HU14 de {ratio:.1f}%. La carga en especie alegada (S/ {carga_especie_aplicada:.2f}) se aplicó como estimación."
+                mensaje_ratio = f"Ratio HU14 de {ratio:.1f}%. Se aplicó carga en especie alegada por S/ {carga_especie_aplicada:.2f} y cargas familiares por S/ {cargas_monetarias_dependientes:.2f}."
             else:
-                mensaje_ratio = f"Ratio HU14 de {ratio:.1f}%. No se detectó carga en especie acreditada."
+                mensaje_ratio = f"Ratio HU14 de {ratio:.1f}%. Cargas familiares monetarias aplicadas: S/ {cargas_monetarias_dependientes:.2f}."
 
         # --- 4. Ensamblaje del JSON Final ---
         return {
@@ -2214,6 +2593,7 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
             "carga_especie_reportada": round(carga_especie_reportada, 2),
             "carga_especie_acreditada": round(carga_especie_acreditada, 2),
             "carga_especie_aplicada": round(carga_especie_aplicada, 2),
+            "cargas_monetarias_dependientes": round(cargas_monetarias_dependientes, 2),
             "carga_especie_estado": carga_especie.get("estado", "no detectada"),
             "carga_especie_evidencia": carga_especie.get("evidencia", ""),
             "ingreso_disponible_neto": round(ingreso_disponible, 2),
@@ -2223,8 +2603,15 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
             "alerta_revision_hu14": alerta_revision_hu14,
             "validaciones_dependientes": {
                 "n_detectados_patron_nombre_edad": len(dependientes_nativos),
+                "n_cargas_familiares_monetarias": len(cargas_familiares_nativas),
                 "n_dependientes_final": len(dependientes),
                 "estado": "ok" if len(dependientes) >= len(dependientes_nativos) else "revisar"
+            },
+            "trazabilidad_hu14": {
+                "criterio_ingreso": "No se suman ingresos alternativos del mismo obligado; se prioriza ingreso neto acreditado, luego sueldo base, luego ingreso alegado.",
+                "criterio_cargas": "Se descuentan cargas familiares monetarias explícitas y cargas en especie probadas o alegadas con monto literal.",
+                "ingreso_base": round(total_ingresos, 2),
+                "cargas_aplicadas": round(total_cargas_existentes, 2)
             }
         }
 
