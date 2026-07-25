@@ -2071,26 +2071,61 @@ def _extraer_dependientes_nativos(texto_plano: str):
         })
     return dependientes
 
-def _prioridad_ingreso_hu14(item: dict) -> int:
+def _oracion_que_contiene_monto(texto_plano: str, monto: float) -> str:
+    """
+    Devuelve la oración completa (entre puntos) donde aparece el monto en el
+    texto fuente. Una ventana de caracteres fija puede cortar antes de llegar
+    a la frase reveladora ("la demandante señala que...") cuando la oración es
+    larga; usar límites de oración reales evita ese recorte.
+    """
+    if not texto_plano or monto <= 0:
+        return ""
+    for m in re.finditer(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', texto_plano):
+        val = _normalizar_monto_texto(m.group(1))
+        if val is not None and abs(float(val) - float(monto)) <= 1.0:
+            inicio = texto_plano.rfind('.', 0, m.start())
+            inicio = inicio + 1 if inicio != -1 else 0
+            fin = texto_plano.find('.', m.end())
+            fin = fin if fin != -1 else len(texto_plano)
+            return re.sub(r'\s+', ' ', texto_plano[inicio:fin]).strip()
+    return ""
+
+def _prioridad_ingreso_hu14(item: dict, texto_plano: str = "") -> int:
     """
     Prioriza la base de cálculo HU14: ingreso neto acreditado > sueldo base >
     ingreso alegado. Evita sumar montos alternativos del mismo empleo.
+
+    Regla crítica: una afirmación de la parte contraria (demandante) sobre los
+    ingresos del obligado es un ALEGATO, no una prueba, así que se evalúa
+    primero y actúa como techo — sin importar si de paso menciona palabras como
+    "remuneración" o "empleador", nunca debe empatar ni superar a un ingreso
+    realmente acreditado (boleta, informe del empleador, confesión propia).
+
+    La detección se hace sobre la oración completa del texto fuente (no solo
+    el fragmento corto que guarda el ítem), porque tanto el fallback nativo
+    como la IA pueden recortar o parafrasear la evidencia y perder la frase
+    de alegato si esta queda lejos del monto dentro de la misma oración.
     """
+    oracion_fuente = _oracion_que_contiene_monto(texto_plano, float(item.get("monto") or 0)) if texto_plano else ""
     texto = " ".join([
         str(item.get("tipo", "")),
         str(item.get("estado", "")),
         str(item.get("evidencia", "")),
         str(item.get("evidencia_literal", "")),
+        oracion_fuente,
     ]).lower()
+    if re.search(
+        r'(?:el|la)?\s*demandante\s+(?:ha\s+)?(?:se[ñn]ala|indica|refiere|afirma|sostiene|manifiesta|alega|precisa|expresa)\w*\s+que',
+        texto
+    ) or re.search(r'alegad', texto):
+        return 20
     if re.search(r'ingreso\s+neto|neto|descuentos?\s+de\s+ley|l[ií]quido', texto):
         return 100
     if re.search(r'boleta|sueldo\s+base|remuneraci[oó]n|empleador|planilla', texto):
         return 80
-    if re.search(r'demandante\s+ha\s+se[ñn]alado|se[ñn]ala\s+en\s+su\s+demanda|alegad', texto):
-        return 45
     return 60
 
-def _seleccionar_ingreso_base_hu14(ingresos: list) -> tuple:
+def _seleccionar_ingreso_base_hu14(ingresos: list, texto_plano: str = "") -> tuple:
     """
     Mantiene las fuentes detectadas, pero solo una queda aplicada al cálculo.
     Retorna (ingresos_marcados, ingreso_base).
@@ -2100,7 +2135,7 @@ def _seleccionar_ingreso_base_hu14(ingresos: list) -> tuple:
     enriquecidos = []
     for item in ingresos:
         copia = dict(item)
-        copia["_prioridad_hu14"] = _prioridad_ingreso_hu14(copia)
+        copia["_prioridad_hu14"] = _prioridad_ingreso_hu14(copia, texto_plano)
         copia["aplicado_calculo"] = False
         enriquecidos.append(copia)
     elegido = max(enriquecidos, key=lambda x: (x.get("_prioridad_hu14", 0), float(x.get("monto") or 0)))
@@ -2141,6 +2176,34 @@ def _extraer_cargas_familiares_nativas(texto_plano: str, montos_reales: list) ->
                 "evidencia": evidencia
             })
     return cargas
+
+def _extraer_medios_probatorios_sin_monto(texto_plano: str) -> list:
+    """
+    Detecta medios probatorios admitidos en audiencia (patrón "se admite: ...")
+    que no traen un monto en soles asociado. Sirve para distinguir "no hay
+    gasto cuantificado" de "no hay ninguna prueba": el expediente puede tener
+    evidencia documental válida (orden médica, receta, comprobante) aunque
+    ningún monto exacto entre a la suma de gastos sustentados (ΣGN).
+    """
+    if not texto_plano:
+        return []
+    medios = []
+    vistos = set()
+    for m in re.finditer(r'(?<!no\s)se\s+admite\b\s*:?\s*([^.]{10,320})\.', texto_plano, re.IGNORECASE):
+        descripcion = re.sub(r'\s+', ' ', m.group(1)).strip()
+        if re.search(r'(?:S/|S/\.)\s*[0-9]', descripcion):
+            continue  # Ya tiene monto explícito; eso se cuenta en ΣGN, no aquí.
+        clave = descripcion.lower()
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        # Nombre corto del documento (antes de la primera coma) para mostrar de
+        # un vistazo; la descripción completa queda disponible como evidencia.
+        documento = descripcion.split(',')[0].strip()
+        if len(documento) > 80:
+            documento = documento[:77].rstrip() + "…"
+        medios.append({"documento": documento, "descripcion": descripcion})
+    return medios
 
 def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
     """
@@ -2325,6 +2388,11 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
         brecha = max(0.0, pa - suma_gn)
         hay_alerta = brecha > 10.0
 
+        # Medios probatorios admitidos sin monto: evita que "ΣGN = 0" se lea como
+        # "no hay ninguna prueba" cuando en realidad sí existe evidencia documental,
+        # solo que no trae un monto exacto en soles (ej. orden médica, receta).
+        medios_probatorios_sin_monto = _extraer_medios_probatorios_sin_monto(texto_plano)
+
         return {
             "petitorio": pa,
             "monto_petitorio": pa,
@@ -2334,6 +2402,7 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
             "brecha": round(brecha, 2),
             "porcentaje_brecha": round((brecha/pa*100), 1) if pa > 0 else 0,
             "detalles_gastos": detalles_finales,
+            "medios_probatorios_sin_monto": medios_probatorios_sin_monto,
             "alerta": hay_alerta,
             "trazabilidad_financiera": {
                 "formula": "B = max(0, PA - ΣGN)",
@@ -2369,7 +2438,62 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
         monto_fallback = monto_seguro(monto_p_spacy)
         if _monto_aparece_solo_como_ingreso_hu14(texto_plano, monto_fallback):
             monto_fallback = 0.0
-        return {"petitorio": monto_fallback, "suma_gastos_sustentados": 0, "brecha_valor": monto_fallback, "porcentaje_brecha": 100 if monto_fallback > 0 else 0, "detalles_gastos": [], "alerta": True}
+        return {"petitorio": monto_fallback, "suma_gastos_sustentados": 0, "brecha_valor": monto_fallback, "porcentaje_brecha": 100 if monto_fallback > 0 else 0, "detalles_gastos": [], "medios_probatorios_sin_monto": [], "alerta": True}
+
+def _extraer_pension_ordenada_sentencia(texto_plano: str) -> dict:
+    """
+    Busca en el FALLO/RESUELVE/ORDENO de la sentencia lo que el juez YA ordenó
+    pagar: como PORCENTAJE de los ingresos (ej. "30% de sus ingresos") o como
+    monto fijo en soles. Esto es distinto del tope legal genérico del Art. 648
+    CPC (60%): si ya existe una orden concreta, esa es la que rige el caso, no
+    el máximo legal abstracto.
+    """
+    if not texto_plano:
+        return {"tipo": "no_detectado", "valor": 0.0, "evidencia": ""}
+
+    # Nota: se exige la palabra completa "ORDENO" (no "ORDEN\b" ni "ORDENO?"),
+    # porque un patrón laxo matchea falsamente cosas como "Orden Médica" en
+    # actas de audiencia, capturando el bloque equivocado antes del FALLO real.
+    #
+    # Un expediente concatena VARIAS resoluciones ("SE RESUELVE" aparece también
+    # en el auto admisorio, en medidas cautelares, etc.), así que no basta con
+    # tomar la primera coincidencia: hay que revisar cada bloque dispositivo y
+    # quedarse con el primero que realmente fije una pensión (por % o monto
+    # fijo), no con el primero que solo diga "SE RESUELVE" sin fijar nada.
+    patron_marcador = re.compile(r'(?:FALLA|RESUELVE|SE\s+ORDENA|ORDENO)\b', re.IGNORECASE)
+    for m_marcador in patron_marcador.finditer(texto_plano):
+        universo = texto_plano[m_marcador.start(): m_marcador.start() + 900]
+
+        # 1) Porcentaje de ingresos: "(30%) de sus ingresos" / "30% de sus ingresos mensuales"
+        m_pct = re.search(
+            r'\(?\s*(\d{1,3})\s*%\s*\)?\s*de\s+(?:sus|los|las)\s+(?:ingresos|remuneraci[oó]n(?:es)?)',
+            universo, re.IGNORECASE
+        )
+        if m_pct:
+            valor = float(m_pct.group(1))
+            if 0 < valor <= 100:
+                return {
+                    "tipo": "porcentaje",
+                    "valor": valor,
+                    "evidencia": re.sub(r'\s+', ' ', universo[max(0, m_pct.start() - 100): m_pct.end() + 40]).strip()
+                }
+
+        # 2) Monto fijo ordenado en el fallo
+        m_fijo = re.search(
+            r'(?:pension(?:es)?\s+alimenticia|acuda\s+con\s+(?:la\s+)?(?:suma|pension|cantidad))'
+            r'[^$]{0,120}?(?:S/|S/\.)\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)',
+            universo, re.IGNORECASE | re.DOTALL
+        )
+        if m_fijo:
+            valor = float(m_fijo.group(1).replace(',', ''))
+            if 50.0 < valor < 50000.0:
+                return {
+                    "tipo": "monto_fijo",
+                    "valor": valor,
+                    "evidencia": re.sub(r'\s+', ' ', m_fijo.group(0)).strip()
+                }
+
+    return {"tipo": "no_detectado", "valor": 0.0, "evidencia": ""}
 
 def modulo_capacidad_cargas(texto_plano: str) -> dict:
     """
@@ -2380,15 +2504,20 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
 
     if not texto_plano or texto_plano == "[TEXTO NO DETECTADO - REQUIERE OCR PROFUNDO]":
         return {
-            "ingresos": [], "dependientes": [], "total_ingresos": 0, "total_cargas": 0, 
-            "tope_legal_60": 0, "margen_libre": 0, "ratio_disponibilidad": 0, 
+            "ingresos": [], "dependientes": [], "total_ingresos": 0, "total_cargas": 0,
+            "tope_legal_60": 0, "margen_libre": 0, "ratio_disponibilidad": 0,
+            "pension_ordenada": {"tipo": "no_detectado", "valor": 0.0, "evidencia": ""},
+            "monto_pension_ordenada_estimado": 0,
             "carga_nivel": "Desconocida", "mensaje": "Sin datos",
             "carga_especie_reportada": 0, "carga_especie_acreditada": 0,
             "carga_especie_estado": "no detectada", "carga_especie_evidencia": "",
             "ingreso_disponible_neto": 0, "alerta_revision_hu14": False
         }
 
-    prompt = f"""
+    NUM_PREDICT_CARGAS = 1500
+
+    def _construir_prompt_cargas(texto_expediente: str) -> str:
+        return f"""
     Eres un Asistente Social de los Juzgados de Familia del Callao.
     Analiza el texto y extrae la capacidad económica del demandado (quien debe pagar los alimentos).
 
@@ -2405,7 +2534,7 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
     8. No copies valores de plantilla. Cualquier monto sin evidencia literal debe omitirse.
 
     TEXTO DEL EXPEDIENTE:
-    {texto_plano[:8000]}
+    {texto_expediente}
 
     Responde ESTRICTAMENTE con este formato JSON:
     {{
@@ -2419,9 +2548,15 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
     }}
     """
 
+    overhead_chars = len(_construir_prompt_cargas(""))
+    num_ctx, max_chars_entrada = _dimensionar_llm_dinamico(
+        len(texto_plano), NUM_PREDICT_CARGAS, overhead_chars=overhead_chars, techo_ctx=24000
+    )
+    prompt = _construir_prompt_cargas(texto_plano[:max_chars_entrada])
+
     try:
         url = "http://localhost:11434/api/generate"
-        payload = {"model": "mistral", "prompt": prompt, "format": "json", "stream": False, "options": {"temperature": 0.1, "num_predict": 1500, "top_p": 0.85, "num_ctx": 10000}}
+        payload = {"model": "mistral", "prompt": prompt, "format": "json", "stream": False, "options": {"temperature": 0.1, "num_predict": NUM_PREDICT_CARGAS, "top_p": 0.85, "num_ctx": num_ctx}}
         response = requests.post(url, json=payload, timeout=60)
         
         data = cargar_json_llm(response.json().get("response", "{}"), {})
@@ -2538,7 +2673,7 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
             }
 
         # --- 1. Cálculos Base ---
-        ingresos, total_ingresos = _seleccionar_ingreso_base_hu14(ingresos)
+        ingresos, total_ingresos = _seleccionar_ingreso_base_hu14(ingresos, texto_plano)
         carga_especie_acreditada = float(carga_especie.get("monto_acreditado") or 0)
         carga_especie_reportada = float(carga_especie.get("monto_reportado") or 0)
         estado_carga = carga_especie.get("estado", "no detectada")
@@ -2553,6 +2688,15 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
         tope_legal_60 = total_ingresos * 0.60
         # El "Margen Libre" es lo que queda de ese 60% tras restar lo que ya paga
         margen_disponible_sentencia = tope_legal_60 - total_cargas_existentes
+
+        # Lo que el juez YA ordenó (si el expediente ya tiene sentencia), para no
+        # confundirlo con el tope legal genérico del 60% que es solo un máximo abstracto.
+        pension_ordenada = _extraer_pension_ordenada_sentencia(texto_plano)
+        monto_pension_ordenada_estimado = 0.0
+        if pension_ordenada["tipo"] == "porcentaje" and total_ingresos > 0:
+            monto_pension_ordenada_estimado = total_ingresos * (pension_ordenada["valor"] / 100.0)
+        elif pension_ordenada["tipo"] == "monto_fijo":
+            monto_pension_ordenada_estimado = pension_ordenada["valor"]
 
         # --- 3. Análisis de Ratio y Alertas ---
         ratio = 0
@@ -2590,6 +2734,8 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
             "total_cargas": total_cargas_existentes,
             "tope_legal_60": round(tope_legal_60, 2),
             "margen_libre": round(max(0, margen_disponible_sentencia), 2),
+            "pension_ordenada": pension_ordenada,
+            "monto_pension_ordenada_estimado": round(monto_pension_ordenada_estimado, 2),
             "carga_especie_reportada": round(carga_especie_reportada, 2),
             "carga_especie_acreditada": round(carga_especie_acreditada, 2),
             "carga_especie_aplicada": round(carga_especie_aplicada, 2),
@@ -2618,8 +2764,10 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
     except Exception as e:
         print(f"Error en módulo de cargas: {e}")
         return {
-            "ingresos": [], "dependientes": [], "total_ingresos": 0, "total_cargas": 0, 
-            "tope_legal_60": 0, "margen_libre": 0, "ratio_disponibilidad": 0, 
+            "ingresos": [], "dependientes": [], "total_ingresos": 0, "total_cargas": 0,
+            "tope_legal_60": 0, "margen_libre": 0, "ratio_disponibilidad": 0,
+            "pension_ordenada": {"tipo": "no_detectado", "valor": 0.0, "evidencia": ""},
+            "monto_pension_ordenada_estimado": 0,
             "carga_nivel": "Error", "mensaje": "Error de análisis",
             "carga_especie_reportada": 0, "carga_especie_acreditada": 0,
             "carga_especie_aplicada": 0,
@@ -2627,51 +2775,104 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
             "ingreso_disponible_neto": 0, "alerta_revision_hu14": True
         }
 
+def _dimensionar_llm_dinamico(chars_texto: int, num_predict: int, overhead_chars: int = 2000,
+                               techo_ctx: int = 60000, piso_ctx: int = 4096,
+                               chars_por_token: float = 4.0) -> tuple:
+    """
+    Calcula un num_ctx ajustado al tamaño real del expediente en vez de usar un
+    valor fijo: expedientes chicos usan un contexto chico (rápido, buen reparto
+    GPU/CPU); expedientes grandes reciben más contexto automáticamente, hasta
+    un techo de seguridad, en vez de truncarse silenciosamente a mitad de un
+    documento importante (ej. la sentencia).
+
+    Retorna (num_ctx, max_chars_entrada). Si el expediente excede lo que cabe
+    en el techo, max_chars_entrada queda por debajo de chars_texto (única
+    situación en la que sí se recorta contenido).
+    """
+    import math
+    overhead_tokens = overhead_chars / chars_por_token
+    max_chars_al_techo = int(max(0, (techo_ctx / 1.15 - num_predict - overhead_tokens)) * chars_por_token)
+
+    if chars_texto <= max_chars_al_techo:
+        tokens_necesarios = int((chars_texto / chars_por_token + overhead_tokens + num_predict) * 1.15)
+        num_ctx = max(piso_ctx, min(techo_ctx, math.ceil(tokens_necesarios / 2048) * 2048))
+        max_chars_entrada = chars_texto
+    else:
+        num_ctx = techo_ctx
+        max_chars_entrada = max_chars_al_techo
+
+    return num_ctx, max_chars_entrada
+
 def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
     import json, requests
 
     dem_nombre = entidades.get("demandante", {}).get("nombre", "No detectado").title()
     demdo_nombre = entidades.get("demandado", {}).get("nombre", "No detectado").title()
 
-    prompt = f"""
+    NUM_PREDICT_RESUMEN = 7000
+
+    def _construir_prompt(texto_expediente: str) -> str:
+        return f"""
     Eres un Relator y Asistente Legal experto de los Juzgados de Familia. Tu tarea es extraer información del expediente y redactar informes EXTENSOS, PROFUNDOS y con lenguaje jurídico sumamente formal, manteniendo una PRECISIÓN QUIRÚRGICA.
 
     DATOS RELEVANTES:
     - Demandante: {dem_nombre}
     - Demandado: {demdo_nombre}
 
+    PASO PREVIO OBLIGATORIO — DETERMINAR EL ESTADO REAL DEL CASO:
+    Antes de redactar, revisa TODO el expediente (no solo el acta de audiencia) buscando el documento MÁS AVANZADO procesalmente. Un expediente puede contener, en este orden de avance: admisorio → audiencia única → sentencia (FALLO/RESUELVE/ORDENO) → resolución de consentida (cosa juzgada) → oficios de ejecución/retención.
+    - Si existe una SENTENCIA (palabras clave: "SENTENCIA", "FALLA:", "SE RESUELVE", "ORDENO", "DECLARO FUNDADA/INFUNDADA"), el caso YA ESTÁ RESUELTO: el resumen y la postura deben describir la DECISIÓN FINAL, no solo la audiencia.
+    - Si además existe una resolución de "CONSENTIDA" (cosa juzgada, sentencia firme), acláralo explícitamente: el caso es firme e inimpugnable.
+    - Si hay oficios de retención/ejecución posteriores a la sentencia, el caso está en etapa de EJECUCIÓN, no de trámite.
+    - NUNCA describas el caso como "pendiente de sentencia" o "a la espera de resolución" si el expediente contiene una sentencia o una resolución de consentida.
+    - ASIGNACIÓN ANTICIPADA NUNCA ES LA PENSIÓN VIGENTE (CRÍTICO, REGLA ABSOLUTA): cualquier monto descrito como "asignación anticipada", "medida cautelar" o "pago provisional" es SIEMPRE temporal y queda automáticamente reemplazado en cuanto existe SENTENCIA — sin importar si ese texto en particular menciona o no la palabra "sin efecto" cerca. NUNCA reportes una asignación anticipada como la pensión vigente si el expediente ya tiene sentencia. La ÚNICA pensión vigente es la que aparece en el FALLO/ORDENO de la SENTENCIA (monto fijo o porcentaje de ingresos, tal como está escrito ahí) — ese es el único monto que corresponde citar como "la pensión" en el resumen y la postura.
+    - OBLIGATORIO: el ÚLTIMO párrafo de 'resumen.tecnico' y 'resumen.estandar' DEBE empezar textualmente con una de estas frases, la que corresponda al estado real detectado (complétala con los datos del expediente, no la dejes genérica):
+      · Si hay oficios de retención/ejecución: "Actualmente el proceso se encuentra en etapa de EJECUCIÓN, habiendo quedado consentida la sentencia..."
+      · Si hay resolución de consentida sin oficios de ejecución: "El proceso cuenta con sentencia firme y consentida..."
+      · Si hay sentencia pero no consta que quedó consentida: "El proceso cuenta con sentencia de primera instancia, aún pendiente de quedar firme..."
+      · Solo si NO hay ninguna sentencia en el expediente: "El proceso se encuentra en trámite, pendiente de sentencia..."
+
     REGLAS ESTRICTAS DE REDACCIÓN Y FORMATO (CRÍTICO):
     1. EXTENSIÓN OBLIGATORIA: Los campos 'tecnico' y 'estandar' DEBEN tener al menos 2 o 3 párrafos robustos. PROHIBIDO dar respuestas de una sola oración.
-    2. ESTRUCTURA DEL RESUMEN: Debes detallar los antecedentes, la pretensión exacta, quiénes son las autoridades (Juez y Especialista con nombres completos y cargos correctos) y la fecha LITERAL de la audiencia o resolución. NO inventes años.
-    3. ESTRUCTURA DE LA POSTURA: Debes detallar la actitud procesal (ej. rebeldía, asistencia), los términos económicos completos (monto, días de pago, banco) y acuerdos accesorios (devengados, costas, etc.).
+    2. ESTRUCTURA DEL RESUMEN: Debes detallar los antecedentes, la pretensión exacta, quiénes son las autoridades (Juez y Especialista con nombres completos y cargos correctos) y la fecha LITERAL de la audiencia o resolución. El párrafo de conclusión DEBE reflejar el estado procesal MÁS AVANZADO detectado en el paso previo (resuelto/consentida/en ejecución), no asumir que sigue en trámite. NO inventes años.
+    3. ESTRUCTURA DE LA POSTURA — DISTINGUE PETITORIO DE FALLO: El monto/porcentaje que la parte demandante PIDIÓ (petitorio) y lo que el juez REALMENTE ORDENÓ en el FALLO pueden ser distintos (ej. se pidió un monto fijo, pero el juez ordenó un PORCENTAJE de los ingresos). Si hay sentencia, reporta la ORDEN REAL DEL FALLO (monto fijo o porcentaje, tal como está escrito), NUNCA el petitorio como si fuera lo ordenado. Detalla también la actitud procesal (ej. rebeldía, asistencia), fechas de pago, banco, y acuerdos accesorios (devengados, costas, etc.).
     4. PUNTOS CONTROVERTIDOS (CRÍTICO): Genera minimo 3 sugerencias ESPECÍFICAS Y REALES basadas SOLO en el texto.
-       - Si hay errores ortográficos del OCR o de formato, DEBES citar la palabra exacta usando comillas y REDACTAR UNA ORACIÓN COMPLETA explicando el problema. 
+       - Si hay errores ortográficos del OCR o de formato, DEBES citar la palabra exacta usando comillas y REDACTAR UNA ORACIÓN COMPLETA explicando el problema.
        - NO des respuestas de pocas palabras. Explica siempre el contexto de tu sugerencia.
        - Las sugerencias deben ser prácticas y accionables para mejorar el expediente o la redacción del mismo.
        - Las sugerencias deben ser reales y basadas en el texto, NO inventes problemas que no existan.
        - Una sugerencia deber ser especificamente centrado en los nombres de las partes, deben estar correctamente escritos y similares a los nombres y apellidos comunes del Perú, si sospechas de algun caso, no dudes y colocalo como sugerencia.
+       - NO sugieras "falta especificar el monto de la pensión" ni "falta información de capacidad económica" si el expediente ya contiene una sentencia con esos datos — verifica el expediente completo antes de sugerir vacíos de información.
 
     EXPEDIENTE:
-    {texto_plano[:25000]}
+    {texto_expediente}
 
     RESPONDE ÚNICAMENTE CON ESTE JSON (Reemplaza los corchetes con tu redacción extensa y profesional):
     {{
         "resumen": {{
-            "tecnico": "[REDACTA AQUÍ UN ANÁLISIS EXTENSO. Párrafo 1: Antecedentes y pretensión. Párrafo 2: Detalles de la audiencia, fecha exacta y autoridades. Párrafo 3: Conclusión de esta etapa procesal. Usa lenguaje jurídico formal y detallado. No hables de montos aquí.]",
-            "estandar": "[REDACTA AQUÍ UN RESUMEN LARGO EN LENGUAJE CIUDADANO. Explica de forma detallada todo el contexto del caso, quién demanda a quién y qué ocurrió en la audiencia, para que cualquier persona sin estudios de derecho lo entienda a la perfección. No hables de montos aquí.]"
+            "tecnico": "[REDACTA AQUÍ UN ANÁLISIS EXTENSO. Párrafo 1: Antecedentes y pretensión. Párrafo 2: Detalles de la audiencia, fecha exacta y autoridades. Párrafo 3: Estado procesal MÁS AVANZADO del expediente (resuelto/consentida/en ejecución, según el paso previo) — NO asumas que sigue pendiente si ya hay sentencia. Usa lenguaje jurídico formal y detallado. No hables de montos aquí.]",
+            "estandar": "[REDACTA AQUÍ UN RESUMEN LARGO EN LENGUAJE CIUDADANO. Explica de forma detallada todo el contexto del caso, quién demanda a quién, qué ocurrió en la audiencia, y el estado ACTUAL real del caso (resuelto/consentida/en ejecución), para que cualquier persona sin estudios de derecho lo entienda a la perfección. No hables de montos aquí.]"
         }},
         "postura": {{
-            "tecnico": "[REDACTA AQUÍ LA POSTURA Y ACUERDOS DE FORMA EXTENSA. Párrafo 1: Actitud del demandado en el proceso. Párrafo 2: Detalles económicos exhaustivos (monto exacto, fechas, cuenta bancaria). Párrafo 3: Observaciones adicionales como el reconocimiento de devengados.]",
-            "estandar": "[REDACTA AQUÍ LOS ACUERDOS ECONÓMICOS EN LENGUAJE CIUDADANO. Explica de forma extensa y detallada cuánto se pagará, cómo se pagará y qué otras promesas se hicieron.]"
+            "tecnico": "[REDACTA AQUÍ LA POSTURA Y ACUERDOS DE FORMA EXTENSA. Párrafo 1: Actitud del demandado en el proceso. Párrafo 2: La ORDEN REAL DEL FALLO si existe sentencia (monto fijo o porcentaje de ingresos, tal como está escrito — NO el petitorio), fechas, cuenta bancaria. Párrafo 3: Observaciones adicionales como el reconocimiento de devengados o si la sentencia quedó consentida.]",
+            "estandar": "[REDACTA AQUÍ LOS ACUERDOS ECONÓMICOS EN LENGUAJE CIUDADANO. Explica de forma extensa y detallada cuánto se pagará (el monto u porcentaje REALMENTE ORDENADO por el juez, no lo que la demandante pidió), cómo se pagará y qué otras promesas se hicieron.]"
         }},
         "puntos_controvertidos": [
             {{
-                "tema": "[Título del problema o sugerencia real]", 
+                "tema": "[Título del problema o sugerencia real]",
                 "sugerencia": "[Descripción sumamente específica. Si es un error de texto, pon la palabra equivocada entre comillas '...' y redacta la oración completa de sugerencia]"
             }}
         ]
     }}
     """
+
+    # Overhead real del prompt (todo menos el texto del expediente), medido en
+    # caracteres, para dimensionar num_ctx con precisión en vez de estimarlo.
+    overhead_chars = len(_construir_prompt(""))
+    num_ctx, max_chars_entrada = _dimensionar_llm_dinamico(
+        len(texto_plano), NUM_PREDICT_RESUMEN, overhead_chars=overhead_chars, techo_ctx=60000
+    )
+    prompt = _construir_prompt(texto_plano[:max_chars_entrada])
 
     try:
         url = "http://localhost:11434/api/generate"
@@ -2682,13 +2883,13 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
             "stream": False,
             "options": {
                 "temperature": 0.2,   # Bajamos un poco la temperatura para evitar alucinaciones
-                "num_predict": 7000, 
-                "top_p": 0.9,         
-                "top_k": 50,          
-                "num_ctx": 25000      
+                "num_predict": NUM_PREDICT_RESUMEN,
+                "top_p": 0.9,
+                "top_k": 50,
+                "num_ctx": num_ctx
             }
         }
-        
+
         response = requests.post(url, json=payload, timeout=400)
         response.raise_for_status()
         
@@ -2938,7 +3139,15 @@ async def analizar_expediente(
         analisis_admisibilidad = modulo_verificacion_admisibilidad(texto_extraido)
         analisis_financiero = modulo_auditoria_financiera(texto_extraido, monto_p)
         analisis_cargas = modulo_capacidad_cargas(texto_extraido)
-        
+
+        # Fuente única de verdad para el petitorio: si el módulo financiero (con
+        # jerarquía regex/IA/validación anti-alucinación) validó un monto, ese
+        # reemplaza al fallback ingenuo de monto_solicitado (primer "S/" del texto),
+        # para que "Pretensión Económica" y "Petitorio (Pa)" nunca se contradigan.
+        petitorio_validado = float(analisis_financiero.get("petitorio") or 0)
+        if petitorio_validado > 0:
+            entidades_ner["monto_solicitado"] = petitorio_validado
+
         # Métrica de rendimiento computacional
         fin_timer = time.time()
         tiempo_total = round(fin_timer - inicio_timer, 2)
@@ -2961,7 +3170,8 @@ async def analizar_expediente(
             "admisibilidad": analisis_admisibilidad,
             "revision_financiera": analisis_financiero,
             "capacidad_cargas": analisis_cargas,
-            
+            "resumen_por_pdf": resumenes_por_pdf,
+
             "historial": [
                 {
                     "id": int(time.time() * 1000),

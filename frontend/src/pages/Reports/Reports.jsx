@@ -1,8 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { 
-  Bell, ChevronDown, Download, Clock, Zap, TrendingUp, Database, Loader2 
+import {
+  Bell, ChevronDown, Download, Clock, Zap, TrendingUp, Database, Loader2
 } from 'lucide-react';
+import Pagination from '../../components/common/Pagination';
+
+const EXPORTACIONES_POR_PAGINA = 8;
 
 const Reports = () => {
   const navigate = useNavigate();
@@ -12,6 +15,14 @@ const Reports = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
 
+  // ESTADO DE PAGINACIÓN DE EXPORTACIONES
+  const [paginaExport, setPaginaExport] = useState(1);
+  const totalExportaciones = dashboardData?.exportaciones_recientes?.length || 0;
+  const exportacionesPaginadas = (dashboardData?.exportaciones_recientes || []).slice(
+    (paginaExport - 1) * EXPORTACIONES_POR_PAGINA,
+    paginaExport * EXPORTACIONES_POR_PAGINA
+  );
+
   // 2. Cargar las métricas al iniciar el componente
   useEffect(() => {
     const fetchMetrics = async () => {
@@ -19,6 +30,7 @@ const Reports = () => {
         const response = await fetch('http://localhost:8000/api/v1/reports/dashboard-metrics');
         const data = await response.json();
         setDashboardData(data);
+        setPaginaExport(1);
       } catch (error) {
         console.error("Error al cargar las métricas:", error);
       } finally {
@@ -84,7 +96,7 @@ const Reports = () => {
       </header>
 
       {/* Contenido de Reportes */}
-      <main className="p-8 w-full max-w-[1600px] mx-auto overflow-y-auto">
+      <main className="p-8 w-full max-w-[1600px] mx-auto overflow-y-auto custom-scrollbar">
         
         {/* Título de Sección y Botón Exportar */}
         <div className="flex justify-between items-center mb-6">
@@ -205,7 +217,7 @@ const Reports = () => {
                      </tr>
                    </thead>
                    <tbody className="divide-y divide-slate-100 text-xs font-bold text-slate-800">
-                     {dashboardData?.exportaciones_recientes?.map((item) => (
+                     {exportacionesPaginadas.map((item) => (
                        <tr key={item.id} className="hover:bg-slate-50 transition-colors">
                          <td className="px-6 py-6">{item.fecha}</td>
                          <td className="px-6 py-6">{item.usuario}</td>
@@ -215,7 +227,7 @@ const Reports = () => {
                      ))}
                    </tbody>
                  </table>
-                 
+
                  {/* Mensaje si no hay historial */}
                  {(!dashboardData?.exportaciones_recientes || dashboardData.exportaciones_recientes.length === 0) && (
                     <div className="p-8 text-center text-slate-500 font-medium">
@@ -223,6 +235,15 @@ const Reports = () => {
                     </div>
                  )}
                </div>
+
+               {/* Controles de Paginación */}
+               <Pagination
+                 currentPage={paginaExport}
+                 totalItems={totalExportaciones}
+                 itemsPerPage={EXPORTACIONES_POR_PAGINA}
+                 onPageChange={setPaginaExport}
+                 itemLabel="exportaciones"
+               />
             </div>
           </>
         )}

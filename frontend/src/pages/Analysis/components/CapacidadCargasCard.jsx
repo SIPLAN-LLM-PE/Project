@@ -75,10 +75,13 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle }) => {
 
           {/* COLUMNA DERECHA: DEPENDIENTES LEGALES */}
           <div className="p-6">
-            <h5 className="text-[10px] font-bold text-[#1a3059] uppercase tracking-widest mb-4 border-b border-slate-100 pb-2">
+            <h5 className="text-[10px] font-bold text-[#1a3059] uppercase tracking-widest mb-1 border-b border-slate-100 pb-2">
               Dependientes Legales Identificados
             </h5>
-            
+            <p className="text-[9px] text-slate-400 italic mb-4">
+              Otras cargas del demandado distintas al alimentista de este expediente (su pensión ya se calcula en Petitorio / Pensión Ordenada).
+            </p>
+
             <div className="space-y-3">
               {data.dependientes.length > 0 ? (
                 data.dependientes.map((dep, index) => (

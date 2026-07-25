@@ -1,5 +1,5 @@
 import React from 'react';
-import { X, Scale, Calculator, AlertTriangle, Landmark } from 'lucide-react';
+import { X, Scale, Calculator, AlertTriangle, Landmark, Gavel } from 'lucide-react';
 
 export const CapacidadDetalleDrawer = ({ isOpen, onClose, data }) => {
   if (!data) return null;
@@ -13,6 +13,10 @@ export const CapacidadDetalleDrawer = ({ isOpen, onClose, data }) => {
       : estadoCarga === "alegada"
       ? "text-amber-700 bg-amber-100"
       : "text-slate-600 bg-slate-100";
+
+  const pensionOrdenada = data.pension_ordenada || { tipo: "no_detectado", valor: 0, evidencia: "" };
+  const hayOrdenVigente = pensionOrdenada.tipo !== "no_detectado";
+  const montoOrdenadoEstimado = Number(data.monto_pension_ordenada_estimado || 0);
 
   return (
     <div className={`fixed inset-y-0 right-0 w-[450px] bg-white shadow-2xl z-[100] transform transition-transform duration-300 ease-in-out border-l border-slate-200 ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}>
@@ -40,6 +44,36 @@ export const CapacidadDetalleDrawer = ({ isOpen, onClose, data }) => {
               </div>
             </div>
           </section>
+
+          {/* Sección 1.5: Pensión ya ordenada (si el expediente ya tiene sentencia) */}
+          {hayOrdenVigente && (
+            <section className="bg-emerald-50 border border-emerald-200 p-4 rounded-xl">
+              <div className="flex gap-3 items-start">
+                <Gavel className="text-emerald-600 mt-1" size={18} />
+                <div className="flex-1">
+                  <h4 className="text-emerald-900 font-bold text-xs uppercase mb-1">Pensión Ya Ordenada por Sentencia</h4>
+                  <p className="text-emerald-800 text-sm font-black">
+                    {pensionOrdenada.tipo === "porcentaje"
+                      ? `${pensionOrdenada.valor}% de los ingresos mensuales`
+                      : `S/. ${pensionOrdenada.valor.toFixed(2)} mensual (monto fijo)`}
+                  </p>
+                  {pensionOrdenada.tipo === "porcentaje" && totalIngresos > 0 && (
+                    <p className="text-emerald-700 text-[11px] font-bold mt-0.5">
+                      ≈ S/. {montoOrdenadoEstimado.toFixed(2)} sobre el ingreso base detectado
+                    </p>
+                  )}
+                  {pensionOrdenada.evidencia && (
+                    <p className="text-emerald-700/80 text-[10px] italic mt-2 border-l-2 border-emerald-300 pl-2 leading-snug">
+                      "{pensionOrdenada.evidencia}"
+                    </p>
+                  )}
+                  <p className="text-emerald-700 text-[10px] font-bold mt-2">
+                    Este caso ya cuenta con una orden judicial vigente: el 60% de abajo es solo el techo legal de referencia, no una sugerencia a aplicar.
+                  </p>
+                </div>
+              </div>
+            </section>
+          )}
 
           {/* Sección 2: Desglose Matemático */}
           <div className="space-y-4">
@@ -73,14 +107,18 @@ export const CapacidadDetalleDrawer = ({ isOpen, onClose, data }) => {
              </div>
           </div>
 
-          {/* Sección 3: Sugerencia de la IA */}
+          {/* Sección 3: Sugerencia de la IA (solo aplica si aún no hay sentencia con orden vigente) */}
           <div className="bg-slate-50 rounded-xl p-5 border border-slate-200">
              <div className="flex gap-3 mb-3">
                 <AlertTriangle className="text-orange-500" size={18} />
-                <h4 className="font-bold text-slate-700 text-xs">Recomendación Judicial IA</h4>
+                <h4 className="font-bold text-slate-700 text-xs">
+                  {hayOrdenVigente ? "Nota sobre el Tope Legal" : "Recomendación Judicial IA"}
+                </h4>
              </div>
              <p className="text-slate-600 text-[11px] leading-relaxed italic">
-                "Basado en el análisis, el juzgado cuenta con un margen máximo de <strong>S/. {data.margen_libre}</strong> para fijar la pensión sin vulnerar el Artículo 648 del CPC. Se sugiere considerar esta cifra como el tope máximo absoluto para evitar futuras nulidades o apelaciones por exceso de embargo."
+                {hayOrdenVigente
+                  ? `El margen de S/. ${data.margen_libre} es el máximo absoluto que permite el Artículo 648 del CPC (60% de ingresos), pero NO es la pensión aplicable a este caso: ese caso ya fue resuelto (ver "Pensión Ya Ordenada" arriba).`
+                  : `"Basado en el análisis, el juzgado cuenta con un margen máximo de S/. ${data.margen_libre} para fijar la pensión sin vulnerar el Artículo 648 del CPC. Se sugiere considerar esta cifra como el tope máximo absoluto para evitar futuras nulidades o apelaciones por exceso de embargo."`}
              </p>
           </div>
         </div>

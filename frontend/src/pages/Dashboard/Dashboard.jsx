@@ -1,8 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { 
+import {
   Bell, ChevronDown, AlertCircle, Clock, FolderOpen, CheckCircle2, Search, Loader2, Users, ShieldAlert, FolderPlus, Edit, Trash2
 } from 'lucide-react';
+import Pagination from '../../components/common/Pagination';
+
+const ITEMS_POR_PAGINA = 8;
 
 const StatCard = ({ label, value, subtext, icon: Icon, color, iconColor }) => (
   <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex justify-between items-start transition-transform hover:scale-[1.02]">
@@ -28,6 +31,13 @@ const Dashboard = () => {
   const [expedientes, setExpedientes] = useState([]);
   const [personalJudicial, setPersonalJudicial] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+
+  // ESTADO DE PAGINACIÓN DE LA BANDEJA
+  const [paginaActual, setPaginaActual] = useState(1);
+  const expedientesPaginados = expedientes.slice(
+    (paginaActual - 1) * ITEMS_POR_PAGINA,
+    paginaActual * ITEMS_POR_PAGINA
+  );
 
   // ESTADOS DEL MODAL DE ASIGNACIÓN (EXCLUSIVO ADMIN)
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -63,6 +73,14 @@ const Dashboard = () => {
       cargarPersonalJudicial();
     }
   }, []);
+
+  // Si la lista se reduce (ej. al eliminar) y la página actual queda vacía, retrocedemos
+  useEffect(() => {
+    const totalPaginasActual = Math.max(1, Math.ceil(expedientes.length / ITEMS_POR_PAGINA));
+    if (paginaActual > totalPaginasActual) {
+      setPaginaActual(totalPaginasActual);
+    }
+  }, [expedientes]);
 
   const cargarDashboard = async () => {
     setIsLoading(true);
@@ -247,7 +265,7 @@ const Dashboard = () => {
       </header>
 
       {/* Contenido */}
-      <main className="p-8 w-full max-w-[1600px] mx-auto flex-1">
+      <main className="p-8 w-full max-w-[1600px] mx-auto flex-1 overflow-y-auto custom-scrollbar">
         
         {/* VISTA DE TARJETAS DE CONTROL */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
@@ -294,7 +312,15 @@ const Dashboard = () => {
                   </tr>
                 )}
 
-                {!isLoading && expedientes.map((exp, index) => (
+                {!isLoading && expedientes.length === 0 && (
+                  <tr>
+                    <td colSpan="5" className="py-12 text-center text-slate-400 text-xs font-bold uppercase tracking-wider">
+                      No hay expedientes registrados
+                    </td>
+                  </tr>
+                )}
+
+                {!isLoading && expedientesPaginados.map((exp, index) => (
                   <tr key={exp.id || index} className="hover:bg-blue-50/30 transition-colors group">
                     <td className="px-6 py-5 font-bold text-slate-700 text-xs">{exp.numero_expediente}</td>
                     <td className="px-6 py-5 text-[11px] text-slate-600 leading-relaxed max-w-xs truncate uppercase">{exp.caratula}</td>
@@ -349,6 +375,17 @@ const Dashboard = () => {
               </tbody>
             </table>
           </div>
+
+          {/* Controles de Paginación */}
+          {!isLoading && (
+            <Pagination
+              currentPage={paginaActual}
+              totalItems={expedientes.length}
+              itemsPerPage={ITEMS_POR_PAGINA}
+              onPageChange={setPaginaActual}
+              itemLabel="expedientes"
+            />
+          )}
         </div>
       </main>
 

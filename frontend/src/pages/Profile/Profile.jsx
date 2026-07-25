@@ -73,7 +73,7 @@ const Profile = () => {
         </div>
       </header>
 
-      <main className="p-8 w-full max-w-[1180px] mx-auto overflow-y-auto">
+      <main className="p-8 w-full max-w-[1180px] mx-auto overflow-y-auto custom-scrollbar">
         <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-6 mt-10">
           <section className="bg-[#1a3059] rounded-lg shadow-md p-8 text-white">
             <div className="flex flex-col items-center text-center">

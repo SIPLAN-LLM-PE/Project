@@ -137,6 +137,7 @@ export const Analysis = () => {
         const data = await res.json();
         if (res.ok && data.data && data.data.tiene_analisis) {
           setAnalysisData(data.data.resultados);
+          setResumenPorPdf(data.data.resultados?.resumen_por_pdf || []);
           setHasDocument(true);
           cargarPDFsDesdeServidor(expedienteSeleccionado.numero_expediente);
           setCardVisibility({

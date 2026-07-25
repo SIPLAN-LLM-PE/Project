@@ -9,3 +9,13 @@
     padding-right: 2.5rem;
   }
 }
+
+/* Permite scroll sin mostrar la barra visual */
+.custom-scrollbar {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE / Edge legacy */
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  display: none; /* Chrome, Safari, Edge Chromium */
+}

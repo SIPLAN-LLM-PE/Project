@@ -1,11 +1,12 @@
 import React from 'react';
-import { 
-  Calculator, 
-  AlertTriangle, 
-  Receipt, 
-  Wallet, 
+import {
+  Calculator,
+  AlertTriangle,
+  Receipt,
+  Wallet,
   CheckCircle2,
-  Info
+  Info,
+  FileCheck
 } from 'lucide-react';
 
 export const FinancieraCard = ({ data }) => {
@@ -19,11 +20,13 @@ export const FinancieraCard = ({ data }) => {
   const porcentaje = Number(data.porcentaje_brecha || 0);
   const detalles = Array.isArray(data.detalles_gastos) ? data.detalles_gastos : [];
   const ingresos = Array.isArray(data.ingresos) ? data.ingresos : [];
+  const mediosProbatoriosSinMonto = Array.isArray(data.medios_probatorios_sin_monto) ? data.medios_probatorios_sin_monto : [];
   const alerta = data.alerta ?? (porcentaje > 10);
   const trazabilidad = data.trazabilidad_financiera || {};
   const petitorioTrace = trazabilidad.petitorio || {};
   const controles = Array.isArray(trazabilidad.controles) ? trazabilidad.controles : [];
   const montosDetectados = Array.isArray(trazabilidad.montos_detectados) ? trazabilidad.montos_detectados : [];
+  const sinGastosMonetizadosPeroConPruebas = sumaGastos === 0 && mediosProbatoriosSinMonto.length > 0;
 
   return (
     <div className="mb-8">
@@ -53,7 +56,7 @@ export const FinancieraCard = ({ data }) => {
               <span className={`text-[10px] font-bold px-2.5 py-1 rounded-md shadow-sm ${
                 alerta ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'
               }`}>
-                {porcentaje.toFixed(1)}% SIN SUSTENTO
+                {sinGastosMonetizadosPeroConPruebas ? "SIN GASTOS MONETIZADOS" : `${porcentaje.toFixed(1)}% SIN SUSTENTO`}
               </span>
             </div>
           </div>
@@ -104,11 +107,45 @@ export const FinancieraCard = ({ data }) => {
                 ))
               ) : (
                 <div className="p-4 text-center">
-                  <p className="text-[10px] text-slate-400 italic">No se hallaron menciones explícitas de gastos individuales en el texto.</p>
+                  <p className="text-[10px] text-slate-400 italic">
+                    {mediosProbatoriosSinMonto.length > 0
+                      ? "No se detectaron montos individualizados de gastos, pero sí existen medios probatorios admitidos (ver abajo)."
+                      : "No se hallaron menciones explícitas de gastos individuales en el texto."}
+                  </p>
                 </div>
               )}
             </div>
           </div>
+
+          {/* Sección: Medios Probatorios Admitidos Sin Monto Cuantificado */}
+          {mediosProbatoriosSinMonto.length > 0 && (
+            <div>
+              <h6 className="text-[10px] font-bold text-slate-500 uppercase mb-2 flex items-center gap-1.5 px-1">
+                <FileCheck size={12} className="text-slate-400" />
+                Medios Probatorios Admitidos (Sin Monto Cuantificado)
+              </h6>
+              <div className="bg-white rounded-lg border border-slate-200 divide-y divide-slate-50 overflow-hidden shadow-sm">
+                {mediosProbatoriosSinMonto.map((mp, i) => (
+                  <div key={i} className="px-3 py-2">
+                    <span className="text-[10px] text-slate-700 font-semibold">{mp.documento || mp.descripcion}</span>
+                    {mp.descripcion && mp.descripcion !== mp.documento && (
+                      <details className="mt-1 group">
+                        <summary className="cursor-pointer list-none text-[9px] font-bold uppercase tracking-wide text-slate-400 hover:text-slate-600">
+                          Ver evidencia
+                        </summary>
+                        <p className="mt-1 border-l-2 border-slate-200 pl-2 text-[10px] italic leading-snug text-slate-500">
+                          "{mp.descripcion}"
+                        </p>
+                      </details>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <p className="text-[9px] text-slate-400 mt-1.5 px-1">
+                Evidencia cualitativa admitida en autos, sin monto exacto en soles, por lo que no entra a la suma de gastos sustentados (ΣGN).
+              </p>
+            </div>
+          )}
 
           {(petitorioTrace.fuente || controles.length > 0 || montosDetectados.length > 0) && (
             <div className="rounded-lg border border-slate-200 bg-white/70 p-3">
@@ -179,8 +216,10 @@ export const FinancieraCard = ({ data }) => {
                 Observación de Auditoría:
               </p>
               <p className="text-[10px] leading-tight text-slate-600 font-medium italic">
-                {alerta 
-                  ? "La pretensión excede los medios probatorios. Se sugiere requerir mayor sustento documental para validar el petitorio."
+                {alerta
+                  ? (mediosProbatoriosSinMonto.length > 0
+                      ? `La pretensión excede los gastos con monto exacto encontrados en el texto, pero existen ${mediosProbatoriosSinMonto.length} medio(s) probatorio(s) admitido(s) sin monto cuantificado (ver arriba). No debe leerse como ausencia total de sustento.`
+                      : "La pretensión excede los medios probatorios. Se sugiere requerir mayor sustento documental para validar el petitorio.")
                   : "Existe una correlación técnica aceptable entre los gastos probados y el monto solicitado."}
               </p>
             </div>

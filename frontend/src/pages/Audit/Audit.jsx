@@ -3,6 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import {
   Bell, ChevronDown, Download, BrainCircuit, Activity, Fingerprint, ShieldCheck, Loader2, X, ChevronRight
 } from 'lucide-react';
+import Pagination from '../../components/common/Pagination';
+
+const LOGS_POR_PAGINA = 8;
 
 const Audit = () => {
   const navigate = useNavigate();
@@ -23,6 +26,14 @@ const Audit = () => {
   const [f1Details, setF1Details] = useState(null);
   const [isLoadingF1, setIsLoadingF1] = useState(false);
 
+  // ESTADO DE PAGINACIÓN DEL LOG DE SEGURIDAD
+  const [paginaLogs, setPaginaLogs] = useState(1);
+  const totalLogs = securityData?.logs?.length || 0;
+  const logsPaginados = (securityData?.logs || []).slice(
+    (paginaLogs - 1) * LOGS_POR_PAGINA,
+    paginaLogs * LOGS_POR_PAGINA
+  );
+
   // 2. Fetch para traer los datos del backend al cargar la página
   useEffect(() => {
     const fetchSecurityData = async () => {
@@ -30,6 +41,7 @@ const Audit = () => {
         const response = await fetch('http://localhost:8000/api/v1/security/dashboard-metrics');
         const data = await response.json();
         setSecurityData(data);
+        setPaginaLogs(1);
       } catch (error) {
         console.error("Error al cargar las métricas de seguridad:", error);
       } finally {
@@ -135,7 +147,7 @@ const Audit = () => {
       </header>
 
       {/* Contenido Principal */}
-      <main className="p-8 w-full max-w-[1600px] mx-auto overflow-y-auto">
+      <main className="p-8 w-full max-w-[1600px] mx-auto overflow-y-auto custom-scrollbar">
         
         {/* Título de Sección y Botón Exportar */}
         <div className="flex justify-between items-center mb-6">
@@ -307,7 +319,7 @@ const Audit = () => {
                      </tr>
                    </thead>
                    <tbody className="divide-y divide-slate-100 text-[11px] font-bold text-slate-800">
-                     {securityData?.logs?.map((item) => (
+                     {logsPaginados.map((item) => (
                        <tr key={item.id} className="hover:bg-slate-50 transition-colors">
                          <td className="px-6 py-6">{item.timestamp}</td>
                          <td className="px-6 py-6">{item.usuario}</td>
@@ -326,6 +338,15 @@ const Audit = () => {
                     </div>
                  )}
                </div>
+
+               {/* Controles de Paginación */}
+               <Pagination
+                 currentPage={paginaLogs}
+                 totalItems={totalLogs}
+                 itemsPerPage={LOGS_POR_PAGINA}
+                 onPageChange={setPaginaLogs}
+                 itemLabel="eventos"
+               />
             </div>
           </>
         )}
