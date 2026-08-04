@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { X, Library, Sparkles, AlertTriangle, ChevronRight, Loader2 } from 'lucide-react';
 
-export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente }) => {
+export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente, numeroExpediente }) => {
   const [casos, setCasos] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [diagnostico, setDiagnostico] = useState("");
+  const [perfilConsulta, setPerfilConsulta] = useState(null);
   const [expandedIndex, setExpandedIndex] = useState(0); // El índice 0 estará abierto por defecto
 
   // Disparar la búsqueda cuando se abre el Drawer
@@ -11,24 +13,33 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente }) => {
     if (isOpen && textoExpediente) {
       buscarJurisprudencia();
     }
-  }, [isOpen, textoExpediente]);
+  }, [isOpen, textoExpediente, numeroExpediente]);
 
   const buscarJurisprudencia = async () => {
     setIsLoading(true);
     setCasos([]);
+    setDiagnostico("");
+    setPerfilConsulta(null);
     setExpandedIndex(0);
     try {
       const res = await fetch('http://localhost:8000/api/v1/jurisprudencia', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ texto_expediente: textoExpediente })
+        body: JSON.stringify({
+          texto_expediente: textoExpediente,
+          numero_expediente: numeroExpediente || ""
+        })
       });
       const data = await res.json();
       if (data.status === "success") {
         setCasos(data.resultados);
+        setPerfilConsulta(data.perfil_consulta || null);
+      } else {
+        setDiagnostico(data.diagnostico || "No se pudo ejecutar la busqueda semantica.");
       }
     } catch (error) {
       console.error("Error buscando jurisprudencia:", error);
+      setDiagnostico("No se pudo conectar con el servicio de jurisprudencia.");
     } finally {
       setIsLoading(false);
     }
@@ -77,6 +88,23 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente }) => {
             </p>
           </div>
 
+          {!isLoading && diagnostico && (
+            <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl text-xs text-amber-800 font-semibold mb-5">
+              {diagnostico}
+            </div>
+          )}
+
+          {!isLoading && perfilConsulta && (
+            <div className="bg-white border border-slate-200 rounded-xl p-3 mb-5">
+              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">Perfil consultado</p>
+              <div className="grid grid-cols-3 gap-2 text-[10px]">
+                <span className="bg-slate-50 border border-slate-100 rounded-md px-2 py-1 font-bold text-slate-700">{perfilConsulta.materia}</span>
+                <span className="bg-slate-50 border border-slate-100 rounded-md px-2 py-1 font-bold text-slate-700">{perfilConsulta.petitorio}</span>
+                <span className="bg-slate-50 border border-slate-100 rounded-md px-2 py-1 font-bold text-slate-700 truncate">{perfilConsulta.riesgo}</span>
+              </div>
+            </div>
+          )}
+
           {/* Estado de Carga */}
           {isLoading && (
             <div className="flex flex-col items-center justify-center py-10 opacity-70">
@@ -108,6 +136,36 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente }) => {
                           <span>{caso.fecha}</span>
                         </div>
 
+                        <div className="mb-4 bg-indigo-50 border border-indigo-100 p-3 rounded-lg">
+                          <div className="flex items-center justify-between gap-3 mb-2">
+                            <span className="text-[10px] font-black uppercase tracking-widest text-indigo-800">
+                              {caso.nivel_relevancia || "Referencia"}
+                            </span>
+                            {caso.score_semantico && (
+                              <span className="text-[10px] font-bold text-indigo-700">
+                                score {caso.score_semantico}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-xs text-indigo-900 leading-relaxed font-medium">
+                            {caso.explicacion_similitud || "Coincidencia semantica calculada con pgvector/RAG."}
+                          </p>
+                          {caso.factores_similitud?.length > 0 && (
+                            <div className="flex flex-wrap gap-1.5 mt-3">
+                              {caso.factores_similitud.map((factor, factorIndex) => (
+                                <span key={factorIndex} className="bg-white border border-indigo-100 text-indigo-700 rounded-md px-2 py-1 text-[10px] font-bold">
+                                  {factor}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                          {caso.caracter_jurisprudencial && (
+                            <p className="text-[10px] text-indigo-700 mt-3 font-semibold">
+                              {caso.caracter_jurisprudencial}
+                            </p>
+                          )}
+                        </div>
+
                         <div className="mb-4">
                           <h6 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Hechos Comparados</h6>
                           <div className="bg-slate-50 border border-slate-100 p-3 rounded-lg text-xs text-slate-700 leading-relaxed font-medium">
@@ -130,6 +188,19 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente }) => {
                             </p>
                           </div>
                         </div>
+
+                        {caso.puntos_comparables?.length > 0 && (
+                          <div className="mb-5">
+                            <h6 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2">Puntos comparables</h6>
+                            <div className="space-y-2">
+                              {caso.puntos_comparables.map((punto, puntoIndex) => (
+                                <p key={puntoIndex} className="bg-slate-50 border border-slate-100 rounded-lg px-3 py-2 text-[11px] text-slate-600 font-medium leading-relaxed">
+                                  {punto}
+                                </p>
+                              ))}
+                            </div>
+                          </div>
+                        )}
 
                         <div className="w-full border-t border-slate-100 mb-4"></div>
 
@@ -157,6 +228,9 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente }) => {
                         <h5 className="text-xs font-bold text-slate-800 mb-1">{caso.expediente}</h5>
                         <p className="text-[10px] font-medium text-slate-500">
                           Materia: Alimentos | Similitud: {caso.similitud}
+                        </p>
+                        <p className="text-[10px] font-bold text-indigo-600 mt-1">
+                          {caso.nivel_relevancia || "Referencia"}
                         </p>
                       </div>
                       <ChevronRight size={16} className="text-slate-300 group-hover:text-indigo-500 transition-colors" />

@@ -42,6 +42,9 @@ const Field = ({ label, name, value, type = 'text', onChange }) => (
 
 const Profile = () => {
   const [formData, setFormData] = useState(getDefaultProfile);
+  const [securityMessage, setSecurityMessage] = useState('');
+  const [securityError, setSecurityError] = useState('');
+  const [securityLoading, setSecurityLoading] = useState(false);
   const initials = useMemo(() => getInitials(formData.nombres), [formData.nombres]);
   const displayName = formData.nombres.split(/\s+/).slice(0, 3).join(' ');
 
@@ -64,17 +67,48 @@ const Profile = () => {
     }));
   };
 
+  const handleChangePassword = async () => {
+    setSecurityMessage('');
+    setSecurityError('');
+    if (!formData.passwordActual || !formData.passwordNueva) {
+      setSecurityError('Completa la contrasena actual y la nueva contrasena.');
+      return;
+    }
+    setSecurityLoading(true);
+    try {
+      const res = await fetch('http://localhost:8000/api/v1/auth/change-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          password_actual: formData.passwordActual,
+          password_nueva: formData.passwordNueva
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setSecurityMessage(data.message || 'Contrasena actualizada correctamente.');
+        setFormData(prev => ({ ...prev, passwordActual: '', passwordNueva: '' }));
+      } else {
+        setSecurityError(data.detail || 'No se pudo actualizar la contrasena.');
+      }
+    } catch (err) {
+      setSecurityError('No se pudo conectar con el servidor de seguridad.');
+    } finally {
+      setSecurityLoading(false);
+    }
+  };
+
   return (
     <div className="flex-1 bg-[#f8fafc] flex flex-col min-h-screen">
-      <header className="bg-white border-b border-slate-200 w-full h-[93px] px-8 sticky top-0 z-10 flex items-center shrink-0">
+      <header className="bg-white border-b border-slate-200 w-full h-[76px] xl:h-[93px] px-4 xl:px-8 sticky top-0 z-10 flex items-center shrink-0">
         <div className="flex justify-between items-center w-full">
           <h2 className="text-2xl font-bold text-slate-900 tracking-tight">Mi Perfil</h2>
           <TopUserActions />
         </div>
       </header>
 
-      <main className="p-8 w-full max-w-[1180px] mx-auto overflow-y-auto custom-scrollbar">
-        <div className="grid grid-cols-1 lg:grid-cols-[360px_1fr] gap-6 mt-10">
+      <main className="p-4 xl:p-8 w-full max-w-[1180px] mx-auto overflow-y-auto custom-scrollbar">
+        <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] xl:grid-cols-[360px_1fr] gap-6 mt-4 xl:mt-10">
           <section className="bg-[#1a3059] rounded-lg shadow-md p-8 text-white">
             <div className="flex flex-col items-center text-center">
               <div className="relative mb-6">
@@ -140,9 +174,18 @@ const Profile = () => {
               <div className="p-6 grid grid-cols-1 md:grid-cols-[1fr_1fr_auto] gap-5 items-end">
                 <Field label="Contrasena Actual" name="passwordActual" type="password" value={formData.passwordActual} onChange={handleInputChange} />
                 <Field label="Nueva Contrasena" name="passwordNueva" type="password" value={formData.passwordNueva} onChange={handleInputChange} />
-                <button className="bg-[#2546b0] text-white px-6 py-2.5 rounded-lg text-sm font-bold hover:bg-blue-900 transition-colors shadow-md flex items-center justify-center gap-2">
-                  <ShieldCheck size={16} /> Actualizar Seguridad
+                <button
+                  onClick={handleChangePassword}
+                  disabled={securityLoading}
+                  className="bg-[#2546b0] text-white px-6 py-2.5 rounded-lg text-sm font-bold hover:bg-blue-900 transition-colors shadow-md flex items-center justify-center gap-2 disabled:opacity-60"
+                >
+                  <ShieldCheck size={16} /> {securityLoading ? 'Actualizando...' : 'Actualizar Seguridad'}
                 </button>
+                {(securityMessage || securityError) && (
+                  <div className={`md:col-span-3 rounded-lg px-4 py-3 text-xs font-semibold border ${securityError ? 'bg-red-50 border-red-200 text-red-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'}`}>
+                    {securityError || securityMessage}
+                  </div>
+                )}
               </div>
             </div>
           </section>

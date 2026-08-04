@@ -2,12 +2,13 @@
 import React, { useState } from 'react';
 import { X, Star, MessageSquare, Send, CheckCircle2 } from 'lucide-react';
 
-export const RatingModal = ({ isOpen, onClose, expediente }) => {
+export const RatingModal = ({ isOpen, onClose, expediente, usuario, onSaved }) => {
   const [rating, setRating] = useState(0);
   const [hoveredRating, setHoveredRating] = useState(0);
   const [comentario, setComentario] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isSuccess, setIsSuccess] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
 
   if (!isOpen) return null;
 
@@ -15,9 +16,25 @@ export const RatingModal = ({ isOpen, onClose, expediente }) => {
     if (rating === 0) return;
     
     setIsSubmitting(true);
-    // Simulación de envío al backend
-    setTimeout(() => {
-      setIsSubmitting(false);
+    setErrorMessage("");
+    try {
+      const response = await fetch('http://localhost:8000/api/v1/analysis-feedback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          numero_expediente: expediente || "-",
+          usuario: usuario?.username || usuario?.nombre || "Usuario SIGEJA",
+          rating,
+          comentario,
+          metadata: {
+            modulo: "analisis_ia",
+            origen: "rating_modal"
+          }
+        })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || "No se pudo registrar el feedback.");
+      if (onSaved) onSaved(`Calificó el análisis IA con ${rating}/5${comentario.trim() ? `: "${comentario.trim()}"` : ""}`);
       setIsSuccess(true);
       
       // Limpiar y cerrar después de 2 segundos
@@ -27,7 +44,11 @@ export const RatingModal = ({ isOpen, onClose, expediente }) => {
         setComentario("");
         onClose();
       }, 2000);
-    }, 1000);
+    } catch (error) {
+      setErrorMessage(error.message || "No se pudo enviar la calificación.");
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -96,6 +117,12 @@ export const RatingModal = ({ isOpen, onClose, expediente }) => {
                   className="w-full border border-slate-200 rounded-xl p-3 text-xs text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 resize-none min-h-[80px]"
                 ></textarea>
               </div>
+
+              {errorMessage && (
+                <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs font-bold text-red-600">
+                  {errorMessage}
+                </div>
+              )}
 
               {/* Botón de Envío */}
               <button

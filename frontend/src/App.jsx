@@ -14,7 +14,7 @@ import { useNavigate } from 'react-router-dom';
 const DashboardLayout = ({ children }) => (
   <div className="flex h-screen w-screen overflow-hidden bg-[#f8fafc]">
     <Sidebar />
-    <div className="flex-1 flex flex-col h-full overflow-hidden">
+    <div className="flex-1 min-w-0 flex flex-col h-full overflow-hidden">
       {children}
     </div>
   </div>

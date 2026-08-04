@@ -1,8 +1,9 @@
 // Archivo: src/services/api.js
 import axios from 'axios';
+import { API_BASE_URL } from '../config/apiBase';
 
 // Tu URL base de FastAPI (usualmente corre en el puerto 8000 en local)
-const API_URL = 'http://localhost:8000/api/v1'; 
+const API_URL = API_BASE_URL; 
 
 axios.interceptors.request.use((config) => {
   const token = localStorage.getItem('access_token');

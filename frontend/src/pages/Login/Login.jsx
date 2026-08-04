@@ -1,8 +1,9 @@
 import React, { useState } from 'react';
-import { User, Lock, AlertCircle } from 'lucide-react'; // Añadido AlertCircle para errores
+import { User, Lock, AlertCircle, KeyRound } from 'lucide-react'; // Añadido AlertCircle para errores
 import { Link, useNavigate } from 'react-router-dom';
 import { Input } from '../../components/common/Input';
 import { Button } from '../../components/common/Button';
+import { clearAnalysisDraftCache } from '../Analysis/Analysis';
 
 const Login = () => {
   const navigate = useNavigate();
@@ -12,6 +13,13 @@ const Login = () => {
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(''); // Estado para capturar mensajes de error de la API
+  const [showRecovery, setShowRecovery] = useState(false);
+  const [recoveryUser, setRecoveryUser] = useState('');
+  const [resetUser, setResetUser] = useState('');
+  const [resetToken, setResetToken] = useState('');
+  const [newPassword, setNewPassword] = useState('');
+  const [recoveryMessage, setRecoveryMessage] = useState('');
+  const [recoveryLoading, setRecoveryLoading] = useState(false);
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -31,10 +39,11 @@ const Login = () => {
         })
       });
 
-      const responseData = await res.json();
+      const responseData = await res.json().catch(() => ({}));
 
       if (res.ok && responseData.status === 'success') {
         // 3. ÉXITO: Guardamos la sesión en localStorage para consumirla en Dashboard y Análisis
+        clearAnalysisDraftCache();
         localStorage.setItem('usuario', JSON.stringify(responseData.data));
         if (responseData.access_token) {
           localStorage.setItem('access_token', responseData.access_token);
@@ -52,6 +61,57 @@ const Login = () => {
       setError('No se pudo conectar con el servidor de autenticación.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleRecoveryRequest = async () => {
+    setRecoveryLoading(true);
+    setError('');
+    setRecoveryMessage('');
+    try {
+      const res = await fetch('http://localhost:8000/api/v1/auth/password-recovery', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username_or_email: recoveryUser })
+      });
+      const data = await res.json().catch(() => ({}));
+      setRecoveryMessage(data.message || 'Solicitud registrada.');
+      if (data.dev_reset_token) {
+        setResetUser(data.dev_username || recoveryUser);
+        setResetToken(data.dev_reset_token);
+      }
+    } catch (err) {
+      setError('No se pudo registrar la solicitud de recuperacion.');
+    } finally {
+      setRecoveryLoading(false);
+    }
+  };
+
+  const handlePasswordReset = async () => {
+    setRecoveryLoading(true);
+    setError('');
+    try {
+      const res = await fetch('http://localhost:8000/api/v1/auth/password-reset', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: resetUser,
+          reset_token: resetToken,
+          password_nueva: newPassword
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        setRecoveryMessage(data.message || 'Contrasena restablecida correctamente.');
+        setShowRecovery(false);
+        setPassword('');
+      } else {
+        setError(data.detail || 'No se pudo restablecer la contrasena.');
+      }
+    } catch (err) {
+      setError('No se pudo conectar con el servidor de recuperacion.');
+    } finally {
+      setRecoveryLoading(false);
     }
   };
 
@@ -112,6 +172,68 @@ const Login = () => {
         >
             ¿No tienes cuenta? Regístrate
         </Link>
+        <button
+          type="button"
+          onClick={() => setShowRecovery(prev => !prev)}
+          className="block mx-auto mt-3 text-xs text-slate-500 font-semibold hover:text-[#2546b0] hover:underline"
+        >
+          Olvide mi contrasena
+        </button>
+
+        {showRecovery && (
+          <div className="mt-5 border border-slate-200 rounded-lg p-4 text-left bg-slate-50">
+            <div className="flex items-center gap-2 mb-3 text-[#1a3059]">
+              <KeyRound size={16} />
+              <h3 className="text-sm font-bold">Recuperar contrasena</h3>
+            </div>
+            <input
+              value={recoveryUser}
+              onChange={(e) => setRecoveryUser(e.target.value)}
+              placeholder="Usuario institucional"
+              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-xs mb-2 focus:outline-none focus:border-[#2546b0]"
+            />
+            <button
+              type="button"
+              onClick={handleRecoveryRequest}
+              disabled={recoveryLoading || !recoveryUser.trim()}
+              className="w-full bg-[#2546b0] text-white rounded-lg py-2 text-xs font-bold disabled:opacity-50"
+            >
+              Solicitar codigo temporal
+            </button>
+            {recoveryMessage && (
+              <p className="text-[11px] text-emerald-700 font-semibold mt-3">{recoveryMessage}</p>
+            )}
+            <div className="grid grid-cols-1 gap-2 mt-4">
+              <input
+                value={resetUser}
+                onChange={(e) => setResetUser(e.target.value)}
+                placeholder="Usuario"
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#2546b0]"
+              />
+              <input
+                value={resetToken}
+                onChange={(e) => setResetToken(e.target.value)}
+                placeholder="Codigo temporal"
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#2546b0]"
+              />
+              <input
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                type="password"
+                placeholder="Nueva contrasena"
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-xs focus:outline-none focus:border-[#2546b0]"
+              />
+              <button
+                type="button"
+                onClick={handlePasswordReset}
+                disabled={recoveryLoading || !resetUser.trim() || !resetToken.trim() || !newPassword.trim()}
+                className="w-full bg-slate-800 text-white rounded-lg py-2 text-xs font-bold disabled:opacity-50"
+              >
+                Restablecer contrasena
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

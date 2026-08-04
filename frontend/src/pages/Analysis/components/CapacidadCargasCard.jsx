@@ -1,7 +1,7 @@
 import React from 'react';
-import { Briefcase, BrainCircuit } from 'lucide-react';
+import { Briefcase, BrainCircuit, ExternalLink, HeartPulse, Users } from 'lucide-react';
 
-export const CapacidadCargasCard = ({ data, onOpenDetalle }) => {
+export const CapacidadCargasCard = ({ data, onOpenDetalle, onJumpToSource }) => {
   // Seguro de renderizado: Esperamos a que la IA devuelva los datos
   if (!data || !data.ingresos) {
     return (
@@ -17,6 +17,25 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle }) => {
   };
   const claseNivel = String(data.carga_nivel || "").toLowerCase();
   const esNivelCritico = claseNivel.includes("alta") || claseNivel.includes("crítica") || claseNivel.includes("critica");
+  const contextoSocial = data.contexto_social || {};
+  const empleador = contextoSocial.empleador || {};
+  const condicionesFamiliares = Array.isArray(contextoSocial.condiciones_familiares) ? contextoSocial.condiciones_familiares : [];
+  const vulnerabilidades = Array.isArray(contextoSocial.vulnerabilidades) ? contextoSocial.vulnerabilidades : [];
+  const tieneEmpleador = empleador.nombre && empleador.nombre !== "No detectado";
+  const tieneContextoSocial = tieneEmpleador || condicionesFamiliares.length > 0 || vulnerabilidades.length > 0;
+  const SourceButton = ({ value, label }) => {
+    if (!value || !onJumpToSource) return null;
+    return (
+      <button
+        type="button"
+        onClick={() => onJumpToSource(value, { label })}
+        title="Ver fuente en PDF"
+        className="text-slate-400 hover:text-blue-600 hover:bg-blue-50 p-1 rounded transition-colors"
+      >
+        <ExternalLink size={12} />
+      </button>
+    );
+  };
 
   return (
     <div className="mb-8">
@@ -52,9 +71,10 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle }) => {
                         {ingreso.estado || "Detectado"}
                       </span>
                     </div>
-                    <p className="text-xs font-bold text-slate-600 font-mono">
+                    <p className="text-xs font-bold text-slate-600 font-mono flex items-center gap-1">
                       {/* FIX 1: Uso de safeFormat */}
                       S/. {safeFormat(ingreso.monto)}
+                      <SourceButton value={ingreso.detalle || ingreso.fuente || `S/. ${safeFormat(ingreso.monto)}`} label={`Ingreso: ${ingreso.tipo || "detectado"}`} />
                     </p>
                   </div>
                 ))
@@ -98,9 +118,10 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle }) => {
                     </div>
                     <div className="text-right">
                       {dep.monto_carga > 0 ? (
-                        <p className="text-xs font-bold text-slate-600 font-mono">
+                        <p className="text-xs font-bold text-slate-600 font-mono flex items-center gap-1">
                           {/* FIX 3: Uso de safeFormat */}
                           S/. {safeFormat(dep.monto_carga)}
+                          <SourceButton value={dep.detalle || `S/. ${safeFormat(dep.monto_carga)}`} label={`Carga: ${dep.tipo || "dependiente"}`} />
                         </p>
                       ) : (
                         <span className="text-[9px] font-bold bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded">Dependiente Directo</span>
@@ -114,6 +135,60 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle }) => {
             </div>
           </div>
         </div>
+
+        {tieneContextoSocial && (
+          <div className="border-t border-slate-100 p-4 bg-white">
+            <h5 className="text-[10px] font-bold text-[#1a3059] uppercase tracking-widest mb-3 flex items-center gap-2">
+              <HeartPulse size={13} className="text-rose-400" />
+              Contexto social y familiar
+            </h5>
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 text-xs">
+              <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 min-w-0">
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-1">Empleador</p>
+                <div className="flex items-start gap-1">
+                  <p className="font-bold text-slate-700 break-words flex-1">{tieneEmpleador ? empleador.nombre : "No detectado"}</p>
+                  {tieneEmpleador && <SourceButton value={empleador.evidencia || empleador.nombre} label="Empleador" />}
+                </div>
+              </div>
+              <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 min-w-0">
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-2 flex items-center gap-1">
+                  <Users size={11} /> Condiciones familiares
+                </p>
+                {condicionesFamiliares.length > 0 ? (
+                  <div className="space-y-2">
+                    {condicionesFamiliares.slice(0, 3).map((item, index) => (
+                      <div key={index} className="flex items-start gap-1">
+                        <p className="text-slate-600 leading-relaxed flex-1">
+                          <span className="font-bold">{item.tipo}:</span> {item.detalle}
+                        </p>
+                        <SourceButton value={item.evidencia || item.detalle} label={`Condicion familiar: ${item.tipo}`} />
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-slate-400 italic">No detectadas</p>
+                )}
+              </div>
+              <div className="rounded-lg border border-slate-100 bg-slate-50 p-3 min-w-0">
+                <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-2">Vulnerabilidad</p>
+                {vulnerabilidades.length > 0 ? (
+                  <div className="space-y-2">
+                    {vulnerabilidades.slice(0, 3).map((item, index) => (
+                      <div key={index} className="flex items-start gap-1">
+                        <p className="text-slate-600 leading-relaxed flex-1">
+                          <span className="font-bold">{item.tipo}:</span> {item.detalle}
+                        </p>
+                        <SourceButton value={item.evidencia || item.detalle} label={`Vulnerabilidad: ${item.tipo}`} />
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-slate-400 italic">No detectada</p>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* FOOTER: Ratio de Disponibilidad */}
         <div className={`p-4 border-t flex justify-between items-center ${

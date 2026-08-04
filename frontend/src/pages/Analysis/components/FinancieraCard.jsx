@@ -6,10 +6,11 @@ import {
   Wallet,
   CheckCircle2,
   Info,
-  FileCheck
+  FileCheck,
+  ExternalLink
 } from 'lucide-react';
 
-export const FinancieraCard = ({ data }) => {
+export const FinancieraCard = ({ data, calculadora, onJumpToSource }) => {
   // 1. GESTIÓN DE ERRORES: Si no hay data, no rompemos el renderizado
   if (!data) return null;
 
@@ -27,6 +28,20 @@ export const FinancieraCard = ({ data }) => {
   const controles = Array.isArray(trazabilidad.controles) ? trazabilidad.controles : [];
   const montosDetectados = Array.isArray(trazabilidad.montos_detectados) ? trazabilidad.montos_detectados : [];
   const sinGastosMonetizadosPeroConPruebas = sumaGastos === 0 && mediosProbatoriosSinMonto.length > 0;
+  const calc = calculadora || data.calculadora_economica || {};
+  const SourceButton = ({ value, label = "Evidencia financiera" }) => {
+    if (!value || !onJumpToSource) return null;
+    return (
+      <button
+        type="button"
+        onClick={() => onJumpToSource(value, { label })}
+        title="Ver fuente en PDF"
+        className="text-slate-400 hover:text-blue-600 hover:bg-blue-50 p-1 rounded transition-colors"
+      >
+        <ExternalLink size={12} />
+      </button>
+    );
+  };
 
   return (
     <div className="mb-8">
@@ -67,13 +82,45 @@ export const FinancieraCard = ({ data }) => {
           <div className="grid grid-cols-2 gap-4">
             <div className="bg-white/80 backdrop-blur-sm p-3 rounded-lg border border-slate-200">
               <span className="text-[9px] font-bold text-slate-400 uppercase block mb-1">Petitorio (Pa)</span>
-              <p className="text-sm font-bold text-slate-700">S/. {petitorio.toFixed(2)}</p>
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-bold text-slate-700">S/. {petitorio.toFixed(2)}</p>
+                <SourceButton value={petitorioTrace.evidencia || `S/. ${petitorio.toFixed(2)}`} label="Petitorio" />
+              </div>
             </div>
             <div className="bg-white/80 backdrop-blur-sm p-3 rounded-lg border border-slate-200">
               <span className="text-[9px] font-bold text-slate-400 uppercase block mb-1">Gastos Probados (Σ Gn)</span>
-              <p className="text-sm font-bold text-emerald-600">S/. {sumaGastos.toFixed(2)}</p>
+              <div className="flex items-center gap-2">
+                <p className="text-sm font-bold text-emerald-600">S/. {sumaGastos.toFixed(2)}</p>
+                <SourceButton value={`S/. ${sumaGastos.toFixed(2)}`} label="Gastos probados" />
+              </div>
             </div>
           </div>
+
+          {Number(calc.monto_estimado_referencial || 0) > 0 && (
+            <div className="bg-blue-50 border border-blue-100 rounded-lg p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <span className="text-[9px] font-bold text-blue-500 uppercase block mb-1">
+                    Calculadora economica referencial
+                  </span>
+                  <p className="text-lg font-black text-blue-800 font-mono">
+                    S/. {Number(calc.monto_estimado_referencial || 0).toFixed(2)}
+                  </p>
+                  <p className="text-[10px] text-blue-700 font-semibold mt-1">
+                    {calc.mensaje}
+                  </p>
+                </div>
+                <div className="text-right shrink-0">
+                  <span className="bg-white border border-blue-100 rounded-md px-2 py-1 text-[10px] font-bold text-blue-700">
+                    {Number(calc.porcentaje_sobre_ingreso || 0).toFixed(1)}% ingreso
+                  </span>
+                </div>
+              </div>
+              <p className="text-[9px] text-blue-600 mt-2">
+                {calc.formula}. {calc.advertencia}
+              </p>
+            </div>
+          )}
 
           {/* Sección: Desglose Semántico de Gastos */}
           <div>
@@ -87,9 +134,12 @@ export const FinancieraCard = ({ data }) => {
                   <div key={i} className="px-3 py-2.5 hover:bg-slate-50 transition-colors">
                     <div className="flex justify-between items-center gap-3">
                       <span className="text-[10px] text-slate-600 font-semibold capitalize">{g.concepto || "Gasto identificado"}</span>
-                      <span className="text-[10px] font-mono font-bold text-slate-800 bg-slate-100 px-2 py-0.5 rounded">
-                        S/. {Number(g.monto || 0).toFixed(2)}
-                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-mono font-bold text-slate-800 bg-slate-100 px-2 py-0.5 rounded">
+                          S/. {Number(g.monto || 0).toFixed(2)}
+                        </span>
+                        <SourceButton value={g.observacion || g.fuente_validacion || g.concepto || `S/. ${Number(g.monto || 0).toFixed(2)}`} label={`Gasto: ${g.concepto || "identificado"}`} />
+                      </div>
                     </div>
                     {(g.observacion || g.fuente_validacion || g.tipo_documento) && (
                       <details className="mt-1.5 group">
@@ -127,7 +177,10 @@ export const FinancieraCard = ({ data }) => {
               <div className="bg-white rounded-lg border border-slate-200 divide-y divide-slate-50 overflow-hidden shadow-sm">
                 {mediosProbatoriosSinMonto.map((mp, i) => (
                   <div key={i} className="px-3 py-2">
-                    <span className="text-[10px] text-slate-700 font-semibold">{mp.documento || mp.descripcion}</span>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] text-slate-700 font-semibold">{mp.documento || mp.descripcion}</span>
+                      <SourceButton value={mp.descripcion || mp.documento} label="Medio probatorio" />
+                    </div>
                     {mp.descripcion && mp.descripcion !== mp.documento && (
                       <details className="mt-1 group">
                         <summary className="cursor-pointer list-none text-[9px] font-bold uppercase tracking-wide text-slate-400 hover:text-slate-600">
@@ -161,7 +214,10 @@ export const FinancieraCard = ({ data }) => {
                   )}
                 </div>
                 {petitorioTrace.evidencia && (
-                  <p className="border-l-2 border-slate-200 pl-2 italic leading-snug text-slate-500">"{petitorioTrace.evidencia}"</p>
+                  <p className="border-l-2 border-slate-200 pl-2 italic leading-snug text-slate-500 flex items-start gap-2">
+                    <span>"{petitorioTrace.evidencia}"</span>
+                    <SourceButton value={petitorioTrace.evidencia} label="Evidencia del petitorio" />
+                  </p>
                 )}
                 {trazabilidad.formula && (
                   <p><span className="font-bold text-slate-700">Fórmula:</span> {trazabilidad.formula}</p>
@@ -178,6 +234,7 @@ export const FinancieraCard = ({ data }) => {
                 {montosDetectados.length > 0 && (
                   <p className="text-slate-500">
                     <span className="font-bold text-slate-700">Montos S/ detectados:</span> {montosDetectados.map(m => Number(m).toFixed(2)).join(", ")}
+                    <SourceButton value={`S/. ${Number(montosDetectados[0]).toFixed(2)}`} label="Monto detectado" />
                   </p>
                 )}
               </div>

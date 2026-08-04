@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Bell, ChevronDown, AlertCircle, Clock, FolderOpen, CheckCircle2, Search, Loader2, Users, ShieldAlert, FolderPlus, Edit, Trash2
+  Bell, ChevronDown, AlertCircle, Clock, FolderOpen, CheckCircle2, Search, Loader2, Users, ShieldAlert, FolderPlus, Edit, Trash2, ArrowUpDown, Hash
 } from 'lucide-react';
 import Pagination from '../../components/common/Pagination';
+import LiveNotifications from '../../components/common/LiveNotifications';
 
 const ITEMS_POR_PAGINA = 8;
 
@@ -34,7 +35,66 @@ const Dashboard = () => {
 
   // ESTADO DE PAGINACIÓN DE LA BANDEJA
   const [paginaActual, setPaginaActual] = useState(1);
-  const expedientesPaginados = expedientes.slice(
+  const [filtroBandeja, setFiltroBandeja] = useState('');
+  const [filtroEstado, setFiltroEstado] = useState('todos');
+  const [filtroAlerta, setFiltroAlerta] = useState('todos');
+  const [ordenBandeja, setOrdenBandeja] = useState({ campo: 'numero_expediente', dir: 'asc' });
+
+  const tieneAlertaExpediente = (exp) => {
+    const auditoria = String(exp.estado_auditoria || '').toUpperCase();
+    const riesgo = String(exp.riesgo_capacidad || '').toUpperCase();
+    return auditoria.includes('BRECHA') || riesgo.includes('ALTO');
+  };
+
+  const estaPorAsignar = (exp) => [
+    exp.asignado_juez,
+    exp.asignado_secretario,
+    exp.asignado_asistente,
+    exp.asignado_mesapartes,
+    exp.asignado_liquidador
+  ].some(valor => !valor);
+
+  const expedientesFiltrados = useMemo(() => {
+    const busqueda = filtroBandeja.trim().toLowerCase();
+    return [...expedientes]
+      .filter(exp => {
+        const coincideTexto = !busqueda || [
+          exp.numero_expediente,
+          exp.codigo_seguimiento,
+          exp.caratula,
+          exp.tipo,
+          exp.estado_auditoria,
+          exp.riesgo_capacidad
+        ].some(valor => String(valor || '').toLowerCase().includes(busqueda));
+        const coincideEstado = filtroEstado === 'todos' || exp.estado === filtroEstado;
+        const coincideAlerta = filtroAlerta === 'todos' ||
+          (filtroAlerta === 'alertas' && tieneAlertaExpediente(exp)) ||
+          (filtroAlerta === 'sin_alertas' && !tieneAlertaExpediente(exp));
+        return coincideTexto && coincideEstado && coincideAlerta;
+      })
+      .sort((a, b) => {
+        const dir = ordenBandeja.dir === 'asc' ? 1 : -1;
+        const av = String(a[ordenBandeja.campo] || '').toLowerCase();
+        const bv = String(b[ordenBandeja.campo] || '').toLowerCase();
+        return av.localeCompare(bv, 'es') * dir;
+      });
+  }, [expedientes, filtroBandeja, filtroEstado, filtroAlerta, ordenBandeja]);
+
+  const metricasBandeja = useMemo(() => ({
+    urgentes: expedientes.filter(tieneAlertaExpediente).length,
+    completados: expedientes.filter(exp => exp.estado === 'Completado').length,
+    porAsignar: expedientes.filter(estaPorAsignar).length,
+    total: expedientes.length
+  }), [expedientes]);
+
+  const cambiarOrden = (campo) => {
+    setOrdenBandeja(prev => ({
+      campo,
+      dir: prev.campo === campo && prev.dir === 'asc' ? 'desc' : 'asc'
+    }));
+  };
+
+  const expedientesPaginados = expedientesFiltrados.slice(
     (paginaActual - 1) * ITEMS_POR_PAGINA,
     paginaActual * ITEMS_POR_PAGINA
   );
@@ -76,11 +136,15 @@ const Dashboard = () => {
 
   // Si la lista se reduce (ej. al eliminar) y la página actual queda vacía, retrocedemos
   useEffect(() => {
-    const totalPaginasActual = Math.max(1, Math.ceil(expedientes.length / ITEMS_POR_PAGINA));
+    const totalPaginasActual = Math.max(1, Math.ceil(expedientesFiltrados.length / ITEMS_POR_PAGINA));
     if (paginaActual > totalPaginasActual) {
       setPaginaActual(totalPaginasActual);
     }
-  }, [expedientes]);
+  }, [expedientesFiltrados.length, paginaActual]);
+
+  useEffect(() => {
+    setPaginaActual(1);
+  }, [filtroBandeja, filtroEstado, filtroAlerta, ordenBandeja]);
 
   const cargarDashboard = async () => {
     setIsLoading(true);
@@ -235,28 +299,21 @@ const Dashboard = () => {
     <div className="flex-1 bg-[#f8fafc] min-h-screen flex flex-col relative">
       
       {/* Header Superior Dinámico */}
-      <header className="bg-white border-b border-slate-200 w-full h-[93px] px-8 sticky top-0 z-10 flex items-center">
+      <header className="bg-white border-b border-slate-200 w-full h-[76px] xl:h-[93px] px-4 xl:px-8 sticky top-0 z-10 flex items-center">
         <div className="flex justify-between items-center w-full">
           <h2 className="text-xl font-bold text-slate-800 tracking-tight">
             {isAdmin ? "Panel de Administración de Módulo" : "Página Principal"}
           </h2>
           
-          <div className="flex items-center gap-4">
-            <div className="flex items-center bg-slate-100 border border-slate-200 rounded-lg px-4 py-1.5 gap-3 cursor-pointer hover:bg-slate-200 transition-all">
-              <Bell className="w-5 h-5 text-slate-600" />
-              <div className="text-[10px] leading-tight text-left hidden md:block">
-                <span className="font-bold block text-slate-700">Notificaciones</span>
-                <span className="text-slate-500">Buzón del sistema</span>
-              </div>
-              <ChevronDown className="w-4 h-4 ml-1 text-slate-400" />
-            </div>
+          <div className="flex items-center gap-2 xl:gap-4">
+            <LiveNotifications usuarioActivo={usuarioActivo} />
 
-            <div onClick={() => navigate('/profile')} className="flex items-center bg-[#2546b0] text-white rounded-lg px-4 py-1.5 gap-3 shadow-sm cursor-pointer hover:bg-blue-800 transition-all">
+            <div onClick={() => navigate('/profile')} className="flex items-center bg-[#2546b0] text-white rounded-lg px-3 xl:px-4 py-1.5 gap-2 xl:gap-3 shadow-sm cursor-pointer hover:bg-blue-800 transition-all max-w-[220px] xl:max-w-none">
               <div className="w-8 h-8 bg-blue-400 rounded flex items-center justify-center font-bold text-xs shadow-inner">
                 {usuarioActivo.nombre?.split(' ').map(n => n[0]).join('') || "AD"}
               </div>
-              <div className="text-[10px] leading-tight text-left">
-                <span className="font-bold block tracking-wide">{usuarioActivo.nombre}</span>
+              <div className="text-[10px] leading-tight text-left min-w-0">
+                <span className="font-bold block tracking-wide truncate max-w-[130px] xl:max-w-none">{usuarioActivo.nombre}</span>
                 <span className="opacity-80 font-medium">{usuarioActivo.cargo}</span>
               </div>
             </div>
@@ -265,21 +322,21 @@ const Dashboard = () => {
       </header>
 
       {/* Contenido */}
-      <main className="p-8 w-full max-w-[1600px] mx-auto flex-1 overflow-y-auto custom-scrollbar">
+      <main className="p-4 xl:p-8 w-full max-w-[1600px] mx-auto flex-1 overflow-y-auto custom-scrollbar">
         
         {/* VISTA DE TARJETAS DE CONTROL */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-          <StatCard label="Urgentes" value="0" subtext="Atención inmediata requerida" icon={AlertCircle} color="text-red-500" iconColor="text-red-500" />
-          <StatCard label="En Tramitación" value="0" subtext="Expedientes en despacho" icon={Clock} color="text-blue-500" iconColor="text-blue-500" />
-          <StatCard label="Por Asignar" value="0" subtext="Pendientes de asignación" icon={FolderOpen} color="text-amber-500" iconColor="text-amber-500" />
-          <StatCard label="Total Carga" value={expedientes.length} subtext="Expedientes registrados" icon={CheckCircle2} color="text-green-500" iconColor="text-green-500" />
+          <StatCard label="Alertas" value={metricasBandeja.urgentes} subtext="Brechas o riesgo alto" icon={AlertCircle} color="text-red-500" iconColor="text-red-500" />
+          <StatCard label="Completados" value={metricasBandeja.completados} subtext="Con análisis IA aprobado" icon={Clock} color="text-blue-500" iconColor="text-blue-500" />
+          <StatCard label="Por Asignar" value={metricasBandeja.porAsignar} subtext="Con algún rol pendiente" icon={FolderOpen} color="text-amber-500" iconColor="text-amber-500" />
+          <StatCard label="Total Carga" value={metricasBandeja.total} subtext="Expedientes registrados" icon={CheckCircle2} color="text-green-500" iconColor="text-green-500" />
         </div>
 
         {/* Tabla Principal */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-md overflow-hidden">
           <div className="p-5 border-b border-slate-100 bg-slate-50/30 flex justify-between items-center">
             <h4 className="font-bold text-slate-700 text-sm">
-              {isAdmin ? "Bandeja Global de Carga Judicial" : "Mis Expedientes Asignados"} ({expedientes.length})
+              {isAdmin ? "Bandeja Global de Carga Judicial" : "Mis Expedientes Asignados"} ({expedientesFiltrados.length})
             </h4>
           
             {isAdmin && (
@@ -291,30 +348,72 @@ const Dashboard = () => {
               </button>
             )}
           </div>
+          <div className="px-5 py-4 border-b border-slate-100 bg-white grid grid-cols-1 md:grid-cols-[1fr_180px_180px] gap-3">
+            <div className="relative">
+              <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                value={filtroBandeja}
+                onChange={(e) => setFiltroBandeja(e.target.value)}
+                placeholder="Buscar expediente, carátula, auditoría o riesgo..."
+                className="w-full pl-9 pr-3 py-2 border border-slate-200 rounded-lg text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-[#2546b0] focus:border-[#2546b0]"
+              />
+            </div>
+            <select
+              value={filtroEstado}
+              onChange={(e) => setFiltroEstado(e.target.value)}
+              className="border border-slate-200 rounded-lg px-3 py-2 text-xs font-bold text-slate-600 bg-white focus:outline-none focus:ring-1 focus:ring-[#2546b0]"
+            >
+              <option value="todos">Todos los estados</option>
+              <option value="Completado">Completados</option>
+              <option value="Pendiente">Pendientes</option>
+            </select>
+            <select
+              value={filtroAlerta}
+              onChange={(e) => setFiltroAlerta(e.target.value)}
+              className="border border-slate-200 rounded-lg px-3 py-2 text-xs font-bold text-slate-600 bg-white focus:outline-none focus:ring-1 focus:ring-[#2546b0]"
+            >
+              <option value="todos">Todas las alertas</option>
+              <option value="alertas">Solo con alerta</option>
+              <option value="sin_alertas">Sin alerta</option>
+            </select>
+          </div>
           <div className="overflow-x-auto">
             <table className="w-full text-left border-collapse">
               <thead>
                 <tr className="bg-slate-50 text-slate-400 font-bold text-[10px] uppercase tracking-widest border-b border-slate-100">
-                  <th className="px-6 py-4">Expediente</th>
-                  <th className="px-6 py-4">Carátula</th>
+                  <th className="px-6 py-4">
+                    <button type="button" onClick={() => cambiarOrden('numero_expediente')} className="flex items-center gap-1 hover:text-[#2546b0]">
+                      Expediente <ArrowUpDown size={12} />
+                    </button>
+                  </th>
+                  <th className="px-6 py-4">
+                    <button type="button" onClick={() => cambiarOrden('caratula')} className="flex items-center gap-1 hover:text-[#2546b0]">
+                      Carátula <ArrowUpDown size={12} />
+                    </button>
+                  </th>
                   <th className="px-6 py-4">Materia</th>
-                  <th className="px-6 py-4">Estado Análisis</th>
+                  <th className="px-6 py-4">
+                    <button type="button" onClick={() => cambiarOrden('estado')} className="flex items-center gap-1 hover:text-[#2546b0]">
+                      Estado Análisis <ArrowUpDown size={12} />
+                    </button>
+                  </th>
+                  <th className="px-6 py-4">Alerta</th>
                   <th className="px-6 py-4 text-center">Acciones del Módulo</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
                 {isLoading && (
                   <tr>
-                    <td colSpan="5" className="py-12 text-center">
+                    <td colSpan="6" className="py-12 text-center">
                       <Loader2 className="w-8 h-8 text-blue-500 animate-spin mx-auto mb-2" />
                       <p className="text-slate-500 text-xs font-bold uppercase tracking-wider">Cargando Registros de Carga</p>
                     </td>
                   </tr>
                 )}
 
-                {!isLoading && expedientes.length === 0 && (
+                {!isLoading && expedientesFiltrados.length === 0 && (
                   <tr>
-                    <td colSpan="5" className="py-12 text-center text-slate-400 text-xs font-bold uppercase tracking-wider">
+                    <td colSpan="6" className="py-12 text-center text-slate-400 text-xs font-bold uppercase tracking-wider">
                       No hay expedientes registrados
                     </td>
                   </tr>
@@ -322,7 +421,12 @@ const Dashboard = () => {
 
                 {!isLoading && expedientesPaginados.map((exp, index) => (
                   <tr key={exp.id || index} className="hover:bg-blue-50/30 transition-colors group">
-                    <td className="px-6 py-5 font-bold text-slate-700 text-xs">{exp.numero_expediente}</td>
+                    <td className="px-6 py-5">
+                      <p className="font-bold text-slate-700 text-xs">{exp.numero_expediente}</p>
+                      <span className="mt-1 inline-flex items-center gap-1 rounded-md border border-blue-100 bg-blue-50 px-2 py-0.5 text-[9px] font-black uppercase tracking-wide text-[#2546b0]">
+                        <Hash size={10} /> {exp.codigo_seguimiento || 'SIGEJA-S/C'}
+                      </span>
+                    </td>
                     <td className="px-6 py-5 text-[11px] text-slate-600 leading-relaxed max-w-xs truncate uppercase">{exp.caratula}</td>
                     <td className="px-6 py-5 text-[11px] text-slate-500 font-medium">{exp.tipo}</td>
                     <td className="px-6 py-5">
@@ -331,6 +435,17 @@ const Dashboard = () => {
                       }`}>
                         {exp.estado}
                       </span>
+                    </td>
+                    <td className="px-6 py-5">
+                      {tieneAlertaExpediente(exp) ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-red-50 text-red-600 border border-red-200">
+                          <ShieldAlert size={12} /> Revisar
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-slate-50 text-slate-400 border border-slate-200">
+                          Sin alerta
+                        </span>
+                      )}
                     </td>
                     <td className="px-6 py-5 text-center">
                       {isAdmin ? (
@@ -380,7 +495,7 @@ const Dashboard = () => {
           {!isLoading && (
             <Pagination
               currentPage={paginaActual}
-              totalItems={expedientes.length}
+              totalItems={expedientesFiltrados.length}
               itemsPerPage={ITEMS_POR_PAGINA}
               onPageChange={setPaginaActual}
               itemLabel="expedientes"

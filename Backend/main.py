@@ -13,7 +13,8 @@ import json
 import base64
 import hmac
 import hashlib
-from pydantic import BaseModel
+import secrets
+from pydantic import BaseModel, Field
 import re
 from datetime import datetime, timedelta, date
 import sqlite3
@@ -58,6 +59,66 @@ DB_URL = "postgresql://postgres:123@localhost:5433/sigeja_db"
 JWT_SECRET = os.getenv("SIGEJA_JWT_SECRET", "sigeja-dev-secret-change-me")
 JWT_ALGORITHM = "HS256"
 JWT_EXP_MINUTES = int(os.getenv("SIGEJA_JWT_EXP_MINUTES", "480"))
+PASSWORD_RESET_MINUTES = int(os.getenv("SIGEJA_PASSWORD_RESET_MINUTES", "15"))
+LOGIN_MAX_FAILED_ATTEMPTS = int(os.getenv("SIGEJA_LOGIN_MAX_FAILED_ATTEMPTS", "5"))
+LOGIN_LOCK_MINUTES = int(os.getenv("SIGEJA_LOGIN_LOCK_MINUTES", "10"))
+MAX_UPLOAD_FILE_MB = int(os.getenv("SIGEJA_MAX_UPLOAD_FILE_MB", "50"))
+MAX_UPLOAD_FILE_BYTES = MAX_UPLOAD_FILE_MB * 1024 * 1024
+
+
+def formatear_tamano_archivo(bytes_count: int) -> str:
+    mb = (bytes_count or 0) / (1024 * 1024)
+    return f"{mb:.1f} MB"
+
+
+def validar_nombre_y_tamano_pdf(upload_file: UploadFile, size_bytes: int = None):
+    nombre = upload_file.filename or "archivo_sin_nombre"
+    if not nombre.lower().endswith('.pdf'):
+        raise HTTPException(status_code=400, detail=f"Solo se admiten PDFs. El archivo '{nombre}' no es valido.")
+    size_attr = size_bytes if size_bytes is not None else getattr(upload_file, "size", None)
+    if size_attr is not None and size_attr > MAX_UPLOAD_FILE_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"El archivo '{nombre}' pesa {formatear_tamano_archivo(size_attr)}. "
+                f"El limite permitido es {MAX_UPLOAD_FILE_MB} MB por PDF."
+            )
+        )
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_hex(16)
+    digest = hashlib.pbkdf2_hmac("sha256", (password or "").encode("utf-8"), salt.encode("utf-8"), 120000)
+    return f"pbkdf2_sha256$120000${salt}${digest.hex()}"
+
+
+def verificar_password(password: str, almacenado: str) -> bool:
+    almacenado = almacenado or ""
+    if almacenado.startswith("pbkdf2_sha256$"):
+        try:
+            _, iterations, salt, digest = almacenado.split("$", 3)
+            candidate = hashlib.pbkdf2_hmac(
+                "sha256",
+                (password or "").encode("utf-8"),
+                salt.encode("utf-8"),
+                int(iterations)
+            ).hex()
+            return hmac.compare_digest(candidate, digest)
+        except Exception:
+            return False
+    return hmac.compare_digest(almacenado, password or "")
+
+
+def validar_password_segura(password: str):
+    password = password or ""
+    if len(password) < 8:
+        raise HTTPException(status_code=400, detail="La nueva contrasena debe tener al menos 8 caracteres.")
+    if not re.search(r"[A-Za-z]", password) or not re.search(r"\d", password):
+        raise HTTPException(status_code=400, detail="La nueva contrasena debe incluir letras y numeros.")
+
+
+def hash_token_seguridad(token: str) -> str:
+    return hmac.new(JWT_SECRET.encode("utf-8"), token.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -214,17 +275,174 @@ def registrar_log_seguridad(conn, usuario: str, accion: str, expediente: str, ip
     ''', (timestamp_actual, usuario, accion, expediente, ip_origen))
 
 
+def obtener_usuario_opcional(request: Request) -> dict:
+    try:
+        return obtener_usuario_desde_token(request)
+    except Exception:
+        return {}
+
+
+def nombre_usuario_auditoria(request: Request, fallback: str = "Invitado") -> str:
+    usuario = obtener_usuario_opcional(request)
+    return usuario.get("username") or usuario.get("sub") or fallback
+
+
+def registrar_evento_auditoria(conn, request: Request, tipo: str, usuario: str = None, expediente: str = "-", detalle: str = "", severidad: str = "INFO"):
+    usuario_final = usuario or nombre_usuario_auditoria(request)
+    accion = f"{severidad.upper()} | {tipo.upper()}"
+    if detalle:
+        accion = f"{accion}: {detalle}"
+    registrar_log_seguridad(conn, usuario_final, accion, expediente or "-", obtener_ip_origen(request))
+
+
+def normalizar_notificacion_log(row: dict) -> dict:
+    accion = str(row.get("accion_registrada") or "")
+    accion_upper = accion.upper()
+    severidad = "critico" if "CRITICO" in accion_upper else "advertencia" if "ADVERTENCIA" in accion_upper else "info"
+    tipo = "GENERAL"
+    if "|" in accion:
+        partes = [p.strip() for p in accion.split("|")]
+        if len(partes) > 1:
+            tipo = partes[1].split(":")[0].strip()
+    detalle = accion.split(":", 1)[1].strip() if ":" in accion else accion
+    titulos = {
+        "RECHAZO_ROL": "Acceso rechazado por rol",
+        "LOGIN_RECHAZADO": "Intento de login rechazado",
+        "LOGIN_BLOQUEADO": "Cuenta bloqueada temporalmente",
+        "SUBIDA_DOCUMENTO": "Documento subido",
+        "ANONIMIZACION": "Validacion de anonimizacion",
+        "DUPLICADO": "Posible duplicado detectado",
+        "DUPLICADO_CONFIRMADO": "Duplicado confirmado",
+        "ARCHIVO_GRANDE": "Archivo rechazado por tamano",
+        "ANOMALIA": "Anomalia detectada",
+        "EXPORTACION": "Exportacion registrada",
+        "GUARDADO_ANALISIS": "Analisis guardado",
+    }
+    timestamp = row.get("timestamp")
+    if isinstance(timestamp, datetime):
+        timestamp = timestamp.strftime("%Y-%m-%d %H:%M:%S")
+    return {
+        "id": row.get("id"),
+        "timestamp": timestamp,
+        "usuario": row.get("usuario") or "Sistema",
+        "expediente": row.get("expediente") or "-",
+        "ip_origen": row.get("ip_origen") or "-",
+        "accion": accion,
+        "tipo": tipo,
+        "titulo": titulos.get(tipo.upper(), tipo.replace("_", " ").title()),
+        "detalle": detalle,
+        "severidad": severidad,
+    }
+
+
+def usuario_tiene_acceso_expediente(usuario: dict, fila: dict) -> bool:
+    if not usuario:
+        return False
+    rol = (usuario.get("rol") or "").lower()
+    username = usuario.get("username") or usuario.get("sub")
+    if rol == "admin":
+        return True
+    columnas_roles = {
+        "juez": "asignado_juez",
+        "secretario": "asignado_secretario",
+        "asistente": "asignado_asistente",
+        "mesapartes": "asignado_mesapartes",
+        "liquidador": "asignado_liquidador"
+    }
+    columna = columnas_roles.get(rol)
+    return bool(columna and username and fila.get(columna) == username)
+
+
+def verificar_acceso_expediente_o_rechazar(conn, request: Request, numero: str, contexto: str = "detalle de expediente"):
+    fila = conn.execute("SELECT * FROM registro_expedientes WHERE numero_expediente = %s", (numero,)).fetchone()
+    if not fila:
+        raise HTTPException(status_code=404, detail="Expediente no encontrado")
+
+    usuario_token = obtener_usuario_opcional(request)
+    if not usuario_tiene_acceso_expediente(usuario_token, fila):
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "RECHAZO_ROL",
+            usuario=usuario_token.get("username") or "Invitado",
+            expediente=numero,
+            detalle=f"acceso denegado a {contexto}; rol={usuario_token.get('rol', 'sin_token')}",
+            severidad="CRITICO"
+        )
+        conn.commit()
+        raise HTTPException(status_code=403, detail="Acceso rechazado por rol o asignacion del expediente.")
+
+    return fila
+
+
 def get_db_connection():
     # RealDictCursor hace que Postgres devuelva diccionarios en lugar de tuplas,
     # así no se rompe tu código actual que espera fila["columna"]
     conn = psycopg2.connect(DB_URL, cursor_factory=RealDictCursor)
     return PostgresConnectionCompat(conn)
 
+
+def asegurar_columnas_seguridad_usuarios():
+    conn = get_db_connection()
+    try:
+        columnas = [
+            "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS failed_login_attempts INTEGER DEFAULT 0",
+            "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS locked_until TIMESTAMP NULL",
+            "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS last_failed_login TIMESTAMP NULL",
+            "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMP NULL",
+            "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS reset_token_hash TEXT NULL",
+            "ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS reset_token_expires_at TIMESTAMP NULL"
+        ]
+        for sql in columnas:
+            conn.execute(sql)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Error preparando columnas de seguridad de usuarios: {e}")
+    finally:
+        conn.close()
+
+
+def asegurar_tabla_feedback_analisis():
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS feedback_analisis (
+                id SERIAL PRIMARY KEY,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                numero_expediente TEXT,
+                usuario TEXT,
+                tipo TEXT,
+                rating INTEGER,
+                comentario TEXT,
+                metadata JSONB
+            )
+        """)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Error preparando tabla feedback_analisis: {e}")
+    finally:
+        conn.close()
+
+
 def extraer_numero_expediente(texto_plano):
     # Busca formatos como: 00245-2026-0-1801-JP-FC-01 o variaciones
     patron = r'(\d{4,5}\s*-\s*\d{4}\s*-\s*\d{1,4}\s*-\s*\d{4}\s*-\s*[A-Z]{2}\s*-\s*[A-Z]{2}\s*-\s*\d{1,2})'
     match = re.search(patron, texto_plano)
     return match.group(1).replace(" ", "") if match else None
+
+
+def generar_codigo_seguimiento(numero_expediente: str) -> str:
+    """
+    Código corto y estable para seguimiento operativo.
+    No reemplaza el número oficial del expediente.
+    """
+    numero = (numero_expediente or "SIN-EXPEDIENTE").strip().upper()
+    anio_match = re.search(r'-(\d{4})-', numero)
+    anio_corto = anio_match.group(1)[-2:] if anio_match else datetime.now().strftime("%y")
+    digest = hashlib.sha1(numero.encode("utf-8")).hexdigest().upper()[:8]
+    return f"SIGEJA-{anio_corto}-{digest}"
 
 # def init_db():
 #     conn = get_db_connection()
@@ -361,6 +579,8 @@ def crear_usuarios_prueba():
 # manualmente una sola vez desde tu herramienta SQL.
 simular_asignaciones_admin() 
 crear_usuarios_prueba()
+asegurar_columnas_seguridad_usuarios()
+asegurar_tabla_feedback_analisis()
 
 class EditarExpedienteRequest(BaseModel):
     demandante: str
@@ -369,11 +589,22 @@ class EditarExpedienteRequest(BaseModel):
 
 class JurisprudenciaRequest(BaseModel):
     texto_expediente: str
+    numero_expediente: str = ""
 
 class RegenerarRequest(BaseModel):
     texto_expediente: str       
     entidades_previas: dict     
     correcciones_usuario: str
+    numero_expediente: str = ""
+    usuario: str = "Desconocido"
+
+
+class AnalysisFeedbackRequest(BaseModel):
+    numero_expediente: str
+    usuario: str = "Desconocido"
+    rating: int
+    comentario: str = ""
+    metadata: dict = Field(default_factory=dict)
 
 class MensajeChat(BaseModel):
     rol: str  # "user" o "assistant"
@@ -382,8 +613,12 @@ class MensajeChat(BaseModel):
 class ChatRequest(BaseModel):
     query: str
     texto_expediente: str
-    historial: list[MensajeChat] = []  # Usamos list nativo de Python
-    datos_extraidos: dict = {}
+    historial: list[MensajeChat] = Field(default_factory=list)
+    datos_extraidos: dict = Field(default_factory=dict)
+    numero_expediente: str = ""
+    documento_activo: str = ""
+    pagina_activa: int = 1
+    resumen_por_pdf: list = Field(default_factory=list)
 
 class SaveAnalysisRequest(BaseModel):
     numero_expediente: str
@@ -391,9 +626,31 @@ class SaveAnalysisRequest(BaseModel):
     paginas_ocr: int
     resultados_json: dict
 
+class SensitiveValidationRequest(BaseModel):
+    numero_expediente: str
+    usuario: str = "Desconocido"
+    decision: str = "cancelado"
+    hallazgos_count: int = 0
+
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class ChangePasswordRequest(BaseModel):
+    password_actual: str
+    password_nueva: str
+
+
+class PasswordRecoveryRequest(BaseModel):
+    username_or_email: str
+
+
+class PasswordResetConfirmRequest(BaseModel):
+    username: str
+    reset_token: str
+    password_nueva: str
+
 
 class RegisterRequest(BaseModel):
     dni: str
@@ -1070,6 +1327,81 @@ Responde ÚNICAMENTE con este JSON (sin texto adicional):
         return entidades
 
 
+def _limpiar_domicilio_extraido(valor: str) -> str:
+    valor = re.sub(r'\s+', ' ', valor or '').strip(" ,;:-")
+    valor = re.sub(
+        r'\b(?:DNI|D\.N\.I\.|DOCUMENTO|CELULAR|TELEFONO|CORREO|EMAIL|CASILLA|ANEXO|PETITORIO|'
+        r'DEMANDANTE|DEMANDADO|MATERIA|JUEZ|ESPECIALISTA)\b.*$',
+        '',
+        valor,
+        flags=re.IGNORECASE
+    ).strip(" ,;:-")
+    valor = re.sub(r'\b(?:con\s+)?DNI\s*N?[°º]?\s*\d{8}.*$', '', valor, flags=re.IGNORECASE).strip(" ,;:-")
+    if len(valor) > 180:
+        valor = valor[:180].rsplit(' ', 1)[0].strip(" ,;:-")
+    return valor
+
+
+def _rol_contextual_domicilio(texto: str, inicio: int, tipo: str) -> str:
+    ctx = texto[max(0, inicio - 450):inicio + 120].lower()
+    senales_demandante = len(re.findall(r'\bdemandante\b|parte\s+actora|accionante|madre|solicitante', ctx))
+    senales_demandado = len(re.findall(r'\bdemandad[oa]\b|obligado|emplazad[oa]|padre|generales\s+de\s+ley', ctx))
+    if senales_demandado > senales_demandante:
+        return "demandado"
+    if senales_demandante > 0:
+        return "demandante"
+    if tipo == "laboral":
+        return "demandado"
+    return "otros"
+
+
+def extraer_domicilios_judiciales(texto_plano: str) -> dict:
+    """
+    Extrae domicilios reales, procesales y laborales con patrones contextuales.
+    Mantiene evidencia textual para trazabilidad hacia el PDF.
+    """
+    resultado = {
+        "demandante": {"real": "No detectado", "procesal": "No detectado", "laboral": "No detectado"},
+        "demandado": {"real": "No detectado", "procesal": "No detectado", "laboral": "No detectado"},
+        "otros": []
+    }
+    if not texto_plano:
+        return resultado
+
+    patrones = [
+        ("procesal", r'(?:domicilio\s+procesal|casilla\s+electronica|casilla\s+judicial|se[nñ]al[oa]\s+domicilio\s+procesal)\s*(?:en|:|N[°º])?\s*([^\n\r]{8,180})'),
+        ("laboral", r'(?:domicilio\s+laboral|centro\s+laboral|lugar\s+de\s+trabajo|labora\s+en|trabaja\s+en|empleador(?:a)?|empresa\s+donde\s+labora)\s*(?:en|:|es)?\s*([^\n\r]{8,180})'),
+        ("real", r'(?:domicilio\s+real|domicilio\s+actual|domiciliad[oa]\s+en|con\s+domicilio\s+en|reside\s+en|ubicad[oa]\s+en)\s*([^\n\r]{8,180})')
+    ]
+
+    vistos = set()
+    for tipo, patron in patrones:
+        for match in re.finditer(patron, texto_plano, re.IGNORECASE):
+            domicilio = _limpiar_domicilio_extraido(match.group(1))
+            if len(domicilio) < 8 or re.fullmatch(r'\d+', domicilio):
+                continue
+            clave = (tipo, domicilio.upper())
+            if clave in vistos:
+                continue
+            vistos.add(clave)
+            rol = _rol_contextual_domicilio(texto_plano, match.start(), tipo)
+            item = {
+                "tipo": tipo,
+                "valor": domicilio,
+                "evidencia": texto_plano[max(0, match.start() - 80): min(len(texto_plano), match.end() + 80)].replace("\n", " ").strip()
+            }
+            if rol in ("demandante", "demandado"):
+                actual = resultado[rol].get(tipo)
+                if actual in ("No detectado", "", None):
+                    resultado[rol][tipo] = domicilio
+                else:
+                    resultado["otros"].append({**item, "rol_sugerido": rol})
+            else:
+                resultado["otros"].append(item)
+
+    return resultado
+
+
 def modulo_ner_spacy(texto_plano: str) -> dict:
     """
     Versión 7.0: Anclaje Narrativo y Filtro Anti-OCR.
@@ -1460,7 +1792,248 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
         print(f"⚠ DNI duplicado {entidades['demandante']['dni']} — se limpia demandante")
         entidades["demandante"]["dni"] = "No detectado"
 
+    entidades["domicilios"] = extraer_domicilios_judiciales(texto_plano)
+
     return entidades
+
+def _parse_fecha_texto(dia: int, mes: int, anio: int):
+    try:
+        return datetime(int(anio), int(mes), int(dia))
+    except (TypeError, ValueError):
+        return None
+
+
+def _fecha_pascua(anio: int) -> date:
+    a = anio % 19
+    b = anio // 100
+    c = anio % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    mes = (h + l - 7 * m + 114) // 31
+    dia = ((h + l - 7 * m + 114) % 31) + 1
+    return date(anio, mes, dia)
+
+
+def _feriados_judiciales_peru(anios: list[int]) -> dict:
+    """
+    Calendario base de dias no habiles para plazos judiciales.
+    Se puede ampliar con SIGEJA_FERIADOS_JUDICIALES="YYYY-MM-DD,YYYY-MM-DD".
+    """
+    feriados_fijos = {
+        (1, 1, "Año Nuevo"),
+        (5, 1, "Dia del Trabajo"),
+        (6, 7, "Batalla de Arica y Dia de la Bandera"),
+        (6, 29, "San Pedro y San Pablo"),
+        (7, 23, "Dia de la Fuerza Aerea del Peru"),
+        (7, 28, "Fiestas Patrias"),
+        (7, 29, "Fiestas Patrias"),
+        (8, 6, "Batalla de Junin"),
+        (8, 30, "Santa Rosa de Lima"),
+        (10, 8, "Combate de Angamos"),
+        (11, 1, "Todos los Santos"),
+        (12, 8, "Inmaculada Concepcion"),
+        (12, 9, "Batalla de Ayacucho"),
+        (12, 25, "Navidad"),
+    }
+    feriados = {}
+    for anio in anios:
+        for mes, dia, nombre in feriados_fijos:
+            feriados[date(anio, mes, dia)] = nombre
+        pascua = _fecha_pascua(anio)
+        feriados[pascua - timedelta(days=3)] = "Jueves Santo"
+        feriados[pascua - timedelta(days=2)] = "Viernes Santo"
+
+    for raw in os.getenv("SIGEJA_FERIADOS_JUDICIALES", "").split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            fecha = datetime.strptime(raw, "%Y-%m-%d").date()
+            feriados[fecha] = "Feriado judicial configurable"
+        except ValueError:
+            print(f"Feriado judicial ignorado por formato invalido: {raw}")
+
+    return feriados
+
+
+def _calcular_dias_habiles_judiciales(inicio: datetime, fin: datetime) -> dict:
+    """
+    Cuenta dias habiles excluyendo sabados, domingos y feriados judiciales.
+    Replica la semantica de np.busday_count: incluye inicio y excluye fin.
+    """
+    if not inicio or not fin:
+        return {"dias_habiles": 0, "dias_no_habiles": [], "calendario": "judicial"}
+
+    inicio_date = inicio.date()
+    fin_date = fin.date()
+    if fin_date < inicio_date:
+        inicio_date, fin_date = fin_date, inicio_date
+
+    anios = list(range(inicio_date.year, fin_date.year + 1))
+    feriados = _feriados_judiciales_peru(anios)
+    dias_habiles = 0
+    dias_no_habiles = []
+    actual = inicio_date
+    while actual < fin_date:
+        motivo = None
+        if actual.weekday() == 5:
+            motivo = "Sabado"
+        elif actual.weekday() == 6:
+            motivo = "Domingo"
+        elif actual in feriados:
+            motivo = feriados[actual]
+
+        if motivo:
+            dias_no_habiles.append({
+                "fecha": actual.strftime("%d/%m/%Y"),
+                "motivo": motivo
+            })
+        else:
+            dias_habiles += 1
+        actual += timedelta(days=1)
+
+    return {
+        "dias_habiles": dias_habiles,
+        "dias_no_habiles": dias_no_habiles,
+        "calendario": "judicial_peru",
+        "feriados_configurables": bool(os.getenv("SIGEJA_FERIADOS_JUDICIALES", "").strip())
+    }
+
+
+def _auditar_fechas_temporales(texto_plano: str) -> dict:
+    """
+    Detecta fechas imposibles, futuras y contradicciones temporales basicas.
+    No reemplaza el calculo de plazos: lo complementa para CP030.
+    """
+    hoy = datetime.now().date()
+    meses = {
+        "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+        "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
+        "noviembre": 11, "diciembre": 12
+    }
+    hallazgos = []
+    eventos = []
+    vistos = set()
+
+    def tipo_evento(contexto: str) -> str:
+        ctx = (contexto or "").lower()
+        if re.search(r'notificaci[oó]n|notifica|cedula|sinoe', ctx):
+            return "notificacion"
+        if re.search(r'presentaci[oó]n|presentado|interpone|demanda|ingreso', ctx):
+            return "presentacion"
+        if re.search(r'audiencia', ctx):
+            return "audiencia"
+        if re.search(r'sentencia|fallo', ctx):
+            return "sentencia"
+        if re.search(r'resoluci[oó]n|resuelve|auto', ctx):
+            return "resolucion"
+        return "fecha"
+
+    def agregar_hallazgo(tipo: str, fecha_literal: str, detalle: str, contexto: str, severidad: str = "ADVERTENCIA"):
+        clave = (tipo, fecha_literal, detalle)
+        if clave in vistos:
+            return
+        vistos.add(clave)
+        hallazgos.append({
+            "tipo": tipo,
+            "fecha": fecha_literal,
+            "detalle": detalle,
+            "contexto": re.sub(r'\s+', ' ', contexto or '').strip()[:220],
+            "severidad": severidad
+        })
+
+    def procesar_fecha(match, dia, mes, anio, literal):
+        contexto = texto_plano[max(0, match.start() - 140): min(len(texto_plano), match.end() + 140)]
+        fecha_obj = _parse_fecha_texto(dia, mes, anio)
+        if not fecha_obj:
+            agregar_hallazgo(
+                "FECHA_IMPOSIBLE",
+                literal,
+                "La fecha no existe en calendario.",
+                contexto,
+                "CRITICO"
+            )
+            return
+        if fecha_obj.date() > hoy:
+            agregar_hallazgo(
+                "FECHA_FUTURA",
+                literal,
+                "La fecha es posterior a la fecha actual del sistema.",
+                contexto,
+                "ADVERTENCIA"
+            )
+        if fecha_obj.year < 1990 or fecha_obj.year > hoy.year + 5:
+            agregar_hallazgo(
+                "FECHA_ATIPICA",
+                literal,
+                "El anio de la fecha queda fuera del rango esperado.",
+                contexto,
+                "ADVERTENCIA"
+            )
+        eventos.append({
+            "tipo": tipo_evento(contexto),
+            "fecha": fecha_obj,
+            "literal": literal,
+            "contexto": re.sub(r'\s+', ' ', contexto or '').strip()[:220]
+        })
+
+    for match in re.finditer(r'(?<!\d)(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?!\d)', texto_plano or ""):
+        dia, mes, anio = match.groups()
+        procesar_fecha(match, int(dia), int(mes), int(anio), match.group(0))
+
+    patron_largo = r'(?<!\d)(\d{1,2})\s+de\s+([a-zA-ZáéíóúñÁÉÍÓÚÑ]+)\s+d(?:e|el)\s+(\d{4})(?!\d)'
+    for match in re.finditer(patron_largo, texto_plano or "", re.IGNORECASE):
+        dia, mes_txt, anio = match.groups()
+        mes = meses.get(_normalizar_texto_busqueda_pdf(mes_txt))
+        if not mes:
+            agregar_hallazgo(
+                "FECHA_IMPOSIBLE",
+                match.group(0),
+                "El mes escrito no fue reconocido.",
+                texto_plano[max(0, match.start() - 140): min(len(texto_plano), match.end() + 140)],
+                "CRITICO"
+            )
+            continue
+        procesar_fecha(match, int(dia), mes, int(anio), match.group(0))
+
+    precedencias = {
+        ("notificacion", "audiencia"),
+        ("notificacion", "resolucion"),
+        ("notificacion", "sentencia"),
+        ("audiencia", "sentencia"),
+        ("resolucion", "sentencia")
+    }
+    eventos_relevantes = [e for e in eventos if e["tipo"] in {"notificacion", "audiencia", "resolucion", "sentencia"}]
+    for anterior in eventos_relevantes:
+        for posterior in eventos_relevantes:
+            if anterior is posterior or (anterior["tipo"], posterior["tipo"]) not in precedencias:
+                continue
+            if anterior["fecha"] > posterior["fecha"]:
+                agregar_hallazgo(
+                    "CONTRADICCION_TEMPORAL",
+                    f"{anterior['literal']} / {posterior['literal']}",
+                    f"{anterior['tipo']} aparece despues de {posterior['tipo']}.",
+                    f"{anterior['contexto']} {posterior['contexto']}",
+                    "CRITICO"
+                )
+
+    return {
+        "estado": "revisar" if hallazgos else "ok",
+        "hallazgos": hallazgos,
+        "total_hallazgos": len(hallazgos),
+        "fechas_detectadas": [
+            {"tipo": e["tipo"], "fecha": e["fecha"].strftime("%d/%m/%Y"), "literal": e["literal"]}
+            for e in eventos[:30]
+        ]
+    }
+
 
 def modulo_extraccion_plazos(texto_plano: str) -> dict:
     """
@@ -1468,6 +2041,7 @@ def modulo_extraccion_plazos(texto_plano: str) -> dict:
     Utiliza expresiones regulares adaptadas a la redacción jurídica peruana.
     """
     # Diccionario de meses para convertir texto a número
+    auditoria_temporal = _auditar_fechas_temporales(texto_plano)
     meses = {
         "enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
         "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
@@ -1497,8 +2071,12 @@ def modulo_extraccion_plazos(texto_plano: str) -> dict:
         fechas_cortas = re.findall(r'(\d{2})[-/](\d{2})[-/](\d{4})', texto_plano)
         if fechas_cortas:
             dia, mes, anio = fechas_cortas[-1]
-            fecha_presentacion_obj = datetime(int(anio), int(mes), int(dia))
-            fecha_presentacion_str = fecha_presentacion_obj.strftime("%d/%m/%Y")
+            fecha_corta = _parse_fecha_texto(int(dia), int(mes), int(anio))
+            if fecha_corta:
+                fecha_presentacion_obj = fecha_corta
+                fecha_presentacion_str = fecha_presentacion_obj.strftime("%d/%m/%Y")
+            else:
+                fecha_presentacion_str = datetime.now().strftime("%d/%m/%Y")
         else:
             fecha_presentacion_str = datetime.now().strftime("%d/%m/%Y") # Asume hoy como presentación
 
@@ -1509,11 +2087,10 @@ def modulo_extraccion_plazos(texto_plano: str) -> dict:
 
     # 3. Cálculo matemático de Días Hábiles usando NumPy
     # Convertimos a formato fecha nativo de numpy (YYYY-MM-DD)
-    inicio_np = np.datetime64(fecha_notificacion_obj.strftime('%Y-%m-%d'))
-    fin_np = np.datetime64(fecha_presentacion_obj.strftime('%Y-%m-%d'))
+    calendario_judicial = _calcular_dias_habiles_judiciales(fecha_notificacion_obj, fecha_presentacion_obj)
+    dias_habiles = calendario_judicial["dias_habiles"]
     
     # busday_count excluye sábados y domingos automáticamente
-    dias_habiles = int(np.busday_count(inicio_np, fin_np))
 
     # 4. Lógica Procesal (Proceso Único de Familia: 5 días para contestar)
     estado = "Dentro del Plazo"
@@ -1528,7 +2105,9 @@ def modulo_extraccion_plazos(texto_plano: str) -> dict:
         "fecha_presentacion": fecha_presentacion_str,
         "dias_transcurridos": dias_habiles,
         "estado": estado,
-        "observacion": observacion
+        "observacion": observacion,
+        "calendario_judicial": calendario_judicial,
+        "auditoria_temporal": auditoria_temporal
     }
 
 def modulo_verificacion_admisibilidad(texto_plano: str) -> list:
@@ -2177,6 +2756,94 @@ def _extraer_cargas_familiares_nativas(texto_plano: str, montos_reales: list) ->
             })
     return cargas
 
+def _extraer_empleador_contextual(texto_plano: str, ingresos: list) -> dict:
+    if not texto_plano:
+        return {"nombre": "No detectado", "evidencia": ""}
+
+    universo = " ".join(
+        [texto_plano[:12000]] +
+        [str(i.get("evidencia", "")) for i in ingresos if isinstance(i, dict)]
+    )
+    patrones = [
+        r'(?:empleador(?:a)?|empresa\s+donde\s+labora|centro\s+laboral)\s*(?:es|:|,)?\s*([A-Z0-9ÁÉÍÓÚÑ&.,\s-]{4,90})',
+        r'(?:labora|trabaja|presta\s+servicios)\s+(?:en|para)\s+([A-Z0-9ÁÉÍÓÚÑ&.,\s-]{4,90})',
+        r'(?:oficio\s+(?:al|a\s+la)\s+empleador(?:a)?|retenci[oó]n\s+(?:al|a\s+la)\s+empleador(?:a)?)\s*[:,-]?\s*([A-Z0-9ÁÉÍÓÚÑ&.,\s-]{4,90})'
+    ]
+    cortes = r'\b(?:con\s+domicilio|domicilio|ruc|dni|remuneraci[oó]n|sueldo|ingreso|se\s+ordena|para\s+que|oficio|correo|tel[eé]fono)\b'
+
+    for patron in patrones:
+        match = re.search(patron, universo, re.IGNORECASE)
+        if not match:
+            continue
+        nombre = re.split(cortes, match.group(1), flags=re.IGNORECASE)[0]
+        nombre = re.sub(r'\s+', ' ', nombre).strip(" ,.;:-").upper()
+        if len(nombre) >= 4 and not re.fullmatch(r'\d+', nombre):
+            evidencia = re.sub(r'\s+', ' ', universo[max(0, match.start() - 80):match.end() + 120]).strip()
+            return {"nombre": nombre[:90], "evidencia": evidencia[:220]}
+
+    return {"nombre": "No detectado", "evidencia": ""}
+
+
+def _extraer_contexto_social_hu14(texto_plano: str, ingresos: list, dependientes: list, carga_especie: dict, ratio: float, carga_nivel: str) -> dict:
+    condiciones = []
+    vulnerabilidades = []
+    vistos = set()
+
+    def agregar(lista, tipo, detalle, evidencia=""):
+        clave = (tipo, detalle[:90].lower())
+        if clave in vistos:
+            return
+        vistos.add(clave)
+        lista.append({
+            "tipo": tipo,
+            "detalle": re.sub(r'\s+', ' ', detalle).strip()[:180],
+            "evidencia": re.sub(r'\s+', ' ', evidencia or detalle).strip()[:220]
+        })
+
+    texto = texto_plano or ""
+    reglas_vulnerabilidad = [
+        ("Salud", r'([^.]{0,120}(?:enfermedad|discapacidad|tratamiento|terapia|medicina|salud|diagn[oó]stico)[^.]{0,180})'),
+        ("Educacion", r'([^.]{0,120}(?:colegio|matr[ií]cula|pensi[oó]n\s+escolar|educaci[oó]n|estudios)[^.]{0,180})'),
+        ("Primera infancia", r'([^.]{0,120}(?:menor\s+de\s+\d+\s+a[nñ]os|lactante|primera\s+infancia|ni[nñ]o|ni[nñ]a)[^.]{0,180})'),
+        ("Precariedad economica", r'([^.]{0,120}(?:escasos\s+recursos|no\s+cuenta\s+con|sin\s+trabajo|desemplead[oa]|pobreza|vulnerabilidad)[^.]{0,180})')
+    ]
+    for tipo, patron in reglas_vulnerabilidad:
+        for match in re.finditer(patron, texto, re.IGNORECASE):
+            agregar(vulnerabilidades, tipo, match.group(1), match.group(1))
+            if len(vulnerabilidades) >= 6:
+                break
+        if len(vulnerabilidades) >= 6:
+            break
+
+    for dep in dependientes or []:
+        detalle = str(dep.get("detalle", "")).strip()
+        if detalle:
+            agregar(condiciones, "Dependiente familiar", detalle, dep.get("evidencia", ""))
+
+    if carga_especie and carga_especie.get("estado") in ("probada", "alegada"):
+        agregar(
+            condiciones,
+            "Carga en especie",
+            f"Carga en especie {carga_especie.get('estado')} por S/ {float(carga_especie.get('monto_reportado') or 0):.2f}",
+            carga_especie.get("evidencia", "")
+        )
+
+    if str(carga_nivel).lower().find("cr") >= 0 or ratio < 60:
+        agregar(
+            vulnerabilidades,
+            "Riesgo economico",
+            f"Ratio de disponibilidad bajo ({ratio:.1f}%) y nivel {carga_nivel}.",
+            ""
+        )
+
+    empleador = _extraer_empleador_contextual(texto_plano, ingresos)
+    return {
+        "empleador": empleador,
+        "condiciones_familiares": condiciones[:8],
+        "vulnerabilidades": vulnerabilidades[:8],
+        "resumen": "Contexto social con hallazgos relevantes." if (condiciones or vulnerabilidades or empleador.get("nombre") != "No detectado") else "No se detecto contexto social adicional."
+    }
+
 def _extraer_medios_probatorios_sin_monto(texto_plano: str) -> list:
     """
     Detecta medios probatorios admitidos en audiencia (patrón "se admite: ...")
@@ -2440,6 +3107,50 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
             monto_fallback = 0.0
         return {"petitorio": monto_fallback, "suma_gastos_sustentados": 0, "brecha_valor": monto_fallback, "porcentaje_brecha": 100 if monto_fallback > 0 else 0, "detalles_gastos": [], "medios_probatorios_sin_monto": [], "alerta": True}
 
+def modulo_calculadora_economica(financiera: dict, capacidad: dict) -> dict:
+    """Calcula una estimacion referencial cruzando necesidad, pretension y capacidad."""
+    financiera = financiera or {}
+    capacidad = capacidad or {}
+    petitorio = float(financiera.get("petitorio") or financiera.get("monto_petitorio") or 0)
+    gastos = float(financiera.get("suma_gastos_sustentados") or financiera.get("suma_gastos") or 0)
+    margen = float(capacidad.get("margen_libre") or 0)
+    tope_legal = float(capacidad.get("tope_legal_60") or 0)
+    ingresos = float(capacidad.get("total_ingresos") or 0)
+    pension_ordenada = capacidad.get("pension_ordenada") or {"tipo": "no_detectado", "valor": 0.0, "evidencia": ""}
+    monto_ordenado = float(capacidad.get("monto_pension_ordenada_estimado") or 0)
+
+    if pension_ordenada.get("tipo") != "no_detectado" and monto_ordenado > 0:
+        monto_estimado = monto_ordenado
+        criterio = "pension_ordenada"
+        mensaje = "El expediente ya contiene una pension ordenada; se muestra ese monto como referencia vigente."
+    else:
+        base_necesidad = gastos if gastos > 0 else petitorio
+        candidatos = [v for v in (base_necesidad, petitorio, margen) if v and v > 0]
+        monto_estimado = min(candidatos) if candidatos else 0.0
+        criterio = "necesidad_vs_capacidad"
+        if monto_estimado <= 0:
+            mensaje = "No hay montos suficientes para estimar una pension referencial."
+        elif margen > 0 and monto_estimado == margen and petitorio > margen:
+            mensaje = "La pretension supera el margen legal disponible; la estimacion se limita por capacidad."
+        elif gastos > 0 and monto_estimado == gastos and petitorio > gastos:
+            mensaje = "La pretension supera los gastos monetizados; la estimacion toma los gastos probados como referencia."
+        else:
+            mensaje = "La pretension se encuentra dentro de los montos y margen detectados."
+
+    porcentaje_ingreso = round((monto_estimado / ingresos) * 100, 1) if ingresos > 0 and monto_estimado > 0 else 0
+    return {
+        "petitorio": round(petitorio, 2),
+        "gastos_sustentados": round(gastos, 2),
+        "tope_legal_60": round(tope_legal, 2),
+        "margen_disponible": round(margen, 2),
+        "monto_estimado_referencial": round(monto_estimado, 2),
+        "porcentaje_sobre_ingreso": porcentaje_ingreso,
+        "criterio": criterio,
+        "mensaje": mensaje,
+        "formula": "estimacion = min(necesidad monetizada, petitorio, margen legal disponible)",
+        "advertencia": "Estimacion orientativa para revision judicial; no reemplaza la valoracion del juez."
+    }
+
 def _extraer_pension_ordenada_sentencia(texto_plano: str) -> dict:
     """
     Busca en el FALLO/RESUELVE/ORDENO de la sentencia lo que el juez YA ordenó
@@ -2511,7 +3222,13 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
             "carga_nivel": "Desconocida", "mensaje": "Sin datos",
             "carga_especie_reportada": 0, "carga_especie_acreditada": 0,
             "carga_especie_estado": "no detectada", "carga_especie_evidencia": "",
-            "ingreso_disponible_neto": 0, "alerta_revision_hu14": False
+            "ingreso_disponible_neto": 0, "alerta_revision_hu14": False,
+            "contexto_social": {
+                "empleador": {"nombre": "No detectado", "evidencia": ""},
+                "condiciones_familiares": [],
+                "vulnerabilidades": [],
+                "resumen": "Sin datos"
+            }
         }
 
     NUM_PREDICT_CARGAS = 1500
@@ -2726,6 +3443,15 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
             else:
                 mensaje_ratio = f"Ratio HU14 de {ratio:.1f}%. Cargas familiares monetarias aplicadas: S/ {cargas_monetarias_dependientes:.2f}."
 
+        contexto_social = _extraer_contexto_social_hu14(
+            texto_plano,
+            ingresos,
+            dependientes,
+            carga_especie,
+            ratio,
+            carga_nivel
+        )
+
         # --- 4. Ensamblaje del JSON Final ---
         return {
             "ingresos": ingresos,
@@ -2747,6 +3473,7 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
             "carga_nivel": carga_nivel,
             "mensaje": mensaje_ratio,
             "alerta_revision_hu14": alerta_revision_hu14,
+            "contexto_social": contexto_social,
             "validaciones_dependientes": {
                 "n_detectados_patron_nombre_edad": len(dependientes_nativos),
                 "n_cargas_familiares_monetarias": len(cargas_familiares_nativas),
@@ -2772,7 +3499,13 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
             "carga_especie_reportada": 0, "carga_especie_acreditada": 0,
             "carga_especie_aplicada": 0,
             "carga_especie_estado": "no detectada", "carga_especie_evidencia": "",
-            "ingreso_disponible_neto": 0, "alerta_revision_hu14": True
+            "ingreso_disponible_neto": 0, "alerta_revision_hu14": True,
+            "contexto_social": {
+                "empleador": {"nombre": "No detectado", "evidencia": ""},
+                "condiciones_familiares": [],
+                "vulnerabilidades": [],
+                "resumen": "Error de analisis"
+            }
         }
 
 def _dimensionar_llm_dinamico(chars_texto: int, num_predict: int, overhead_chars: int = 2000,
@@ -2908,6 +3641,78 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
             "postura": {"estandar": "Error.", "tecnico": "Fallo de conexión."}, 
             "puntos_controvertidos": []
         }
+
+
+def clasificar_documento_judicial(filename: str, texto: str) -> dict:
+    nombre = _normalizar_texto_busqueda_pdf(filename)
+    contenido = _normalizar_texto_busqueda_pdf((texto or "")[:9000])
+    universo = f"{nombre} {contenido}"
+    reglas = [
+        {
+            "tipo": "Demanda",
+            "categoria": "Escrito principal",
+            "patrones": [r"\bdemanda\b", r"interpongo demanda", r"petitorio", r"fundamentos de hecho", r"medios probatorios", r"demando alimentos"]
+        },
+        {
+            "tipo": "Auto admisorio",
+            "categoria": "Resolucion judicial",
+            "patrones": [r"admisorio", r"admision", r"se resuelve admitir", r"admitir a tramite", r"auto admisorio", r"corrase traslado"]
+        },
+        {
+            "tipo": "Contestacion",
+            "categoria": "Escrito principal",
+            "patrones": [r"contestacion", r"contesta demanda", r"absuelve traslado", r"contradice la demanda", r"deduce excepcion"]
+        },
+        {
+            "tipo": "Notificacion",
+            "categoria": "Acto de comunicacion",
+            "patrones": [r"notificacion", r"cedula de notificacion", r"constancia de notificacion", r"casilla electronica", r"sernot", r"se notifica"]
+        },
+        {
+            "tipo": "Resolucion",
+            "categoria": "Resolucion judicial",
+            "patrones": [r"resolucion", r"se resuelve", r"resuelve", r"auto final", r"sentencia", r"fallo", r"juzgado"]
+        },
+        {
+            "tipo": "Acta de audiencia",
+            "categoria": "Actuacion judicial",
+            "patrones": [r"acta", r"audiencia unica", r"audiencia", r"conciliacion", r"saneamiento procesal", r"puntos controvertidos"]
+        },
+        {
+            "tipo": "Oficio",
+            "categoria": "Comunicacion oficial",
+            "patrones": [r"oficio", r"tengo el agrado de dirigirme", r"remito", r"solicito se sirva", r"empleador", r"retencion"]
+        },
+        {
+            "tipo": "Anexo",
+            "categoria": "Medio probatorio",
+            "patrones": [r"anexo", r"voucher", r"boleta", r"recibo", r"constancia", r"acta de nacimiento", r"dni", r"medio probatorio"]
+        }
+    ]
+    resultados = []
+    for regla in reglas:
+        senales = []
+        score = 0
+        for patron in regla["patrones"]:
+            if re.search(patron, universo, re.IGNORECASE):
+                senales.append(patron.replace(r"\b", "").replace("\\", ""))
+                score += 2 if re.search(patron, nombre, re.IGNORECASE) else 1
+        if senales:
+            resultados.append({**regla, "score": score, "senales": senales[:4]})
+
+    if not resultados:
+        return {"tipo": "Documento no clasificado", "categoria": "Otros", "confianza": 0.25, "senales": []}
+
+    mejor = sorted(resultados, key=lambda r: r["score"], reverse=True)[0]
+    confianza = min(0.95, 0.45 + (mejor["score"] * 0.08))
+    return {
+        "tipo": mejor["tipo"],
+        "categoria": mejor["categoria"],
+        "confianza": round(confianza, 2),
+        "senales": mejor["senales"]
+    }
+
+
 def resumir_pdf_individual(filename: str, texto: str) -> dict:
     """
     Genera un resumen de extracción para un PDF individual.
@@ -2916,10 +3721,15 @@ def resumir_pdf_individual(filename: str, texto: str) -> dict:
     es_vacio = not texto.strip() or texto.strip() == "[TEXTO NO DETECTADO - REQUIERE OCR PROFUNDO]"
     chars = len(texto)
     paginas_est = max(1, chars // 1500)
+    clasificacion = clasificar_documento_judicial(filename, texto)
 
     if es_vacio:
         return {
             "archivo": filename,
+            "tipo_documental": clasificacion["tipo"],
+            "categoria_documental": clasificacion["categoria"],
+            "confianza_clasificacion": clasificacion["confianza"],
+            "senales_clasificacion": clasificacion["senales"],
             "paginas_estimadas": 0,
             "caracteres_extraidos": 0,
             "calidad_extraccion": "Sin texto",
@@ -2956,6 +3766,10 @@ def resumir_pdf_individual(filename: str, texto: str) -> dict:
 
     return {
         "archivo": filename,
+        "tipo_documental": clasificacion["tipo"],
+        "categoria_documental": clasificacion["categoria"],
+        "confianza_clasificacion": clasificacion["confianza"],
+        "senales_clasificacion": clasificacion["senales"],
         "paginas_estimadas": paginas_est,
         "caracteres_extraidos": chars,
         "calidad_extraccion": calidad,
@@ -2983,7 +3797,196 @@ def preparar_texto_para_vector(resultados_json: dict) -> str:
         f"Nivel de Carga: {cargas.get('carga_nivel', 'Desconocido')}. "
         f"Hechos y Resolución: {sintesis}"
     )
+    texto_semantico += (
+        f" Postura defensiva: {resultados_json.get('postura_defensa', {}).get('tecnico', '')}. "
+        f"Puntos controvertidos: {json.dumps(resultados_json.get('puntos_controvertidos', []), ensure_ascii=False)[:800]}. "
+        f"Plazos: {json.dumps(resultados_json.get('plazos', {}), ensure_ascii=False)[:500]}. "
+        f"Admisibilidad: {json.dumps(resultados_json.get('admisibilidad', []), ensure_ascii=False)[:500]}."
+    )
     return texto_semantico
+
+def _texto_corto(valor: str, limite: int = 180) -> str:
+    valor = re.sub(r'\s+', ' ', str(valor or '')).strip()
+    if len(valor) <= limite:
+        return valor
+    return valor[:limite].rsplit(' ', 1)[0].strip() + "..."
+
+
+def _float_seguro(valor, default=0.0) -> float:
+    try:
+        if valor in (None, "", "No detectado", "Desconocido"):
+            return default
+        return float(str(valor).replace("S/.", "").replace("S/", "").replace(",", "").strip())
+    except Exception:
+        return default
+
+
+def _perfil_jurisprudencia_json(obj_json: dict, fila: dict = None) -> dict:
+    fila = fila or {}
+    sujetos = obj_json.get("sujetos_procesales", {}) if isinstance(obj_json, dict) else {}
+    financiera = obj_json.get("revision_financiera", {}) if isinstance(obj_json, dict) else {}
+    cargas = obj_json.get("capacidad_cargas", {}) if isinstance(obj_json, dict) else {}
+    sintesis = obj_json.get("sintesis_rag", {}) if isinstance(obj_json, dict) else {}
+    postura = obj_json.get("postura_defensa", {}) if isinstance(obj_json, dict) else {}
+    puntos = obj_json.get("puntos_controvertidos", []) if isinstance(obj_json, dict) else []
+    petitorio = _float_seguro(financiera.get("petitorio", financiera.get("monto_petitorio", fila.get("monto_petitorio"))))
+    ingresos = _float_seguro(cargas.get("total_ingresos", financiera.get("ingreso_demandado", 0)))
+    riesgo = str(fila.get("riesgo_capacidad") or financiera.get("riesgo_capacidad") or cargas.get("riesgo_capacidad") or cargas.get("carga_nivel") or "No detectado")
+    return {
+        "materia": "Alimentos",
+        "petitorio": petitorio,
+        "ingresos": ingresos,
+        "riesgo": riesgo,
+        "demandante": str(fila.get("demandante") or sujetos.get("demandante", {}).get("nombre", "No detectado")),
+        "demandado": str(fila.get("demandado") or sujetos.get("demandado", {}).get("nombre", "No detectado")),
+        "resumen": str(sintesis.get("tecnico") or sintesis.get("estandar") or ""),
+        "postura": str(postura.get("tecnico") or postura.get("estandar") or ""),
+        "puntos": puntos if isinstance(puntos, list) else []
+    }
+
+
+def _perfil_jurisprudencia_texto(texto: str) -> dict:
+    texto = texto or ""
+    montos = []
+    for match in re.findall(r'(?:S/\.?|soles?)\s*([0-9][0-9.,]*)', texto, re.IGNORECASE):
+        valor = _float_seguro(match)
+        if valor > 0:
+            montos.append(valor)
+    texto_norm = _normalizar_texto_busqueda_pdf(texto)
+    riesgo = "No detectado"
+    if re.search(r'\b(desemple|sin trabajo|eventual|informal|carga familiar|hijos?|enfermedad|discapacidad)\b', texto_norm):
+        riesgo = "Contexto socioeconomico/carga familiar"
+    if re.search(r'\b(planilla|boleta|empleador|empresa|remuneracion|ingreso)\b', texto_norm):
+        riesgo = "Ingresos o empleador detectado"
+    return {
+        "materia": "Alimentos" if "alimento" in texto_norm else "No detectado",
+        "petitorio": max(montos) if montos else 0.0,
+        "ingresos": 0.0,
+        "riesgo": riesgo,
+        "resumen": _texto_corto(texto, 700),
+        "postura": "",
+        "puntos": []
+    }
+
+
+def _explicar_similitud_jurisprudencia(perfil_consulta: dict, perfil_caso: dict, similitud: float) -> tuple[list, str, str]:
+    factores = []
+    if perfil_consulta.get("materia") == perfil_caso.get("materia") == "Alimentos":
+        factores.append("misma materia: alimentos")
+    petitorio_consulta = _float_seguro(perfil_consulta.get("petitorio"))
+    petitorio_caso = _float_seguro(perfil_caso.get("petitorio"))
+    if petitorio_consulta > 0 and petitorio_caso > 0:
+        diferencia = abs(petitorio_consulta - petitorio_caso)
+        base = max(petitorio_consulta, petitorio_caso)
+        if base and diferencia / base <= 0.35:
+            factores.append(f"petitorio economico comparable ({formato_monto(petitorio_caso)})")
+    riesgo_caso = str(perfil_caso.get("riesgo") or "")
+    if riesgo_caso and riesgo_caso.lower() not in ("no detectado", "desconocido", "none"):
+        factores.append(f"criterio de capacidad economica: {riesgo_caso}")
+    if perfil_caso.get("puntos"):
+        factores.append("puntos controvertidos registrados")
+    if perfil_caso.get("postura"):
+        factores.append("postura o decision comparable disponible")
+    if similitud >= 75:
+        nivel = "Alta relevancia"
+    elif similitud >= 60:
+        nivel = "Relevancia media"
+    else:
+        nivel = "Referencia debil"
+    if not factores:
+        factores.append("coincidencia semantica general por embeddings")
+    explicacion = f"{nivel}: el caso fue ordenado por similitud vectorial pgvector y coincide en " + "; ".join(factores[:4]) + "."
+    return factores[:5], explicacion, nivel
+
+def _mascarar_dato_sensible(valor: str) -> str:
+    valor = (valor or "").strip()
+    solo_digitos = re.sub(r'\D', '', valor)
+    if len(solo_digitos) >= 6:
+        return f"{'*' * (len(solo_digitos) - 2)}{solo_digitos[-2:]}"
+    partes = valor.split()
+    if len(partes) >= 2:
+        return " ".join(f"{p[:2]}{'*' * max(3, min(len(p) - 2, 8))}" for p in partes[:4])
+    if len(valor) > 8:
+        return f"{valor[:2]}{'*' * min(max(3, len(valor) - 5), 12)}{valor[-3:]}"
+    return valor
+
+def _normalizar_posible_nombre_menor(nombre: str) -> str:
+    nombre = re.sub(r'[^A-ZÁÉÍÓÚÑÜ\s]', ' ', (nombre or '').upper())
+    palabras_ruido = {
+        "QUE", "CON", "DEL", "LOS", "LAS", "PARA", "POR", "UNA", "UNO", "SUS", "ESTE", "ESTA",
+        "RESOLUCION", "CONCLUSION", "JUZGADO", "ARTICULO", "CODIGO", "PROCESO", "PRESENTE",
+        "SANEAMIENTO", "PARTE", "CORRIENTE", "AUTOS", "DEMANDA", "ADMITE", "NOTIFICACION"
+    }
+    partes = [p for p in nombre.split() if len(p) >= 3 and p not in palabras_ruido]
+    if not (2 <= len(partes) <= 4):
+        return ""
+    if any(p.endswith(("CION", "MENTO", "ADOS", "ENTE")) for p in partes):
+        return ""
+    return " ".join(partes)
+
+def detectar_datos_sensibles_menor(texto: str, limite: int = 12) -> list:
+    """Detecta indicios de datos sensibles asociados a menores antes del analisis."""
+    if not texto:
+        return []
+
+    texto_limpio = re.sub(r'\s+', ' ', texto)
+    patrones_menor = (
+        r'\bmenor(?:es)?\b|\bhij[oa]s?\b|\balimentista(?:s)?\b|'
+        r'\bni(?:n|ñ|Ã±)[oa]s?\b|\badolescente(?:s)?\b|\biniciales\b|'
+        r'\bCUI\b|\bcodigo unico de identificacion\b|c[oóÃ³]digo [uúÃº]nico'
+    )
+    hallazgos = []
+    vistos = set()
+
+    def agregar(tipo: str, valor: str, contexto: str):
+        clave = (tipo, re.sub(r'\s+', ' ', (valor or '').upper()).strip())
+        if not clave[1] or clave in vistos or len(hallazgos) >= limite:
+            return
+        vistos.add(clave)
+        hallazgos.append({
+            "tipo": tipo,
+            "valor": _mascarar_dato_sensible(valor),
+            "contexto": re.sub(r'\s+', ' ', contexto or '').strip()[:140]
+        })
+
+    for match in re.finditer(patrones_menor, texto_limpio, re.IGNORECASE):
+        inicio = max(0, match.start() - 180)
+        fin = min(len(texto_limpio), match.end() + 220)
+        contexto = texto_limpio[inicio:fin]
+        hallazgos_antes_contexto = len(hallazgos)
+
+        for dni in re.findall(r'\b(?:DNI|CUI|CU[IÍ]|documento|identificaci[oóÃ³]n)?\s*[:.-]?\s*(\d{8})\b', contexto, re.IGNORECASE):
+            agregar("DNI/CUI de posible menor", dni, contexto)
+
+        for fecha in re.findall(r'\b(?:naci[oóÃ³]|nacimiento|nac\.?)\w*\s*[:.-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{4})', contexto, re.IGNORECASE):
+            agregar("Fecha de nacimiento", fecha, contexto)
+
+        for iniciales in re.findall(r'\biniciales?\s+([A-Z](?:\.[A-Z]){1,5}\.?)', contexto, re.IGNORECASE):
+            agregar("Iniciales de menor", iniciales.upper(), contexto)
+
+        patron_nombre = (
+            r'(?:menor(?:es)?|hij[oa]|alimentista|ni(?:n|ñ|Ã±)[oa]|adolescente)'
+            r'(?:\s+(?:de\s+nombre|llamad[oa]|identificad[oa]\s+como|a\s+favor\s+de|representad[oa]\s+por))?'
+            r'\s*[:,-]?\s+([A-ZÁÉÍÓÚÑ]{3,}(?:\s+[A-ZÁÉÍÓÚÑ]{3,}){1,3})'
+        )
+        for nombre in re.findall(patron_nombre, contexto, re.IGNORECASE):
+            nombre_limpio = _normalizar_posible_nombre_menor(nombre)
+            conector_nombre = re.search(
+                r'\b(?:de\s+nombre|llamad[oa]|identificad[oa]\s+como|representad[oa]\s+por)\b',
+                contexto,
+                re.IGNORECASE
+            )
+            if nombre_limpio and conector_nombre:
+                agregar("Nombre de posible menor", nombre_limpio, contexto)
+
+        if len(hallazgos) == hallazgos_antes_contexto and re.search(
+            r'\b(?:menor(?:es)?|hij[oa]s?|alimentista(?:s)?|actas?\s+de\s+nacimiento|inter[eÃ©]s\s+superior\s+del\s+ni(?:n|Ã±|ÃƒÂ±)o)\b',
+            contexto,
+            re.IGNORECASE
+        ):
+            agregar("Indicio de datos de menor", "Revisar", contexto)
+
+    return hallazgos
 
 def generar_embedding(texto: str) -> list:
     """Envía el texto limpio a Ollama para obtener su representación vectorial (768 dimensiones)."""
@@ -3012,15 +4015,16 @@ async def analizar_expediente(
     forzar_ocr: bool = Form(False),
     numero_expediente: str = Form(...),
     usuario_auditoria: str = Form("Desconocido"),
-    inconsistencia_nombre: bool = Form(False)
+    inconsistencia_nombre: bool = Form(False),
+    confirmacion_datos_sensibles: bool = Form(False),
+    confirmacion_duplicados: bool = Form(False)
 ):
     """
     Endpoint principal multi-PDF. Recibe uno o más PDFs de un mismo expediente,
     concatena los textos extraídos y ejecuta el pipeline cognitivo sobre el texto unificado.
     """
     for f in files:
-        if not f.filename.endswith('.pdf'):
-            raise HTTPException(status_code=400, detail=f"Solo se admiten PDFs. El archivo '{f.filename}' no es válido.")
+        validar_nombre_y_tamano_pdf(f)
 
     conn = get_db_connection()
     inicio_timer = time.time()
@@ -3036,7 +4040,7 @@ async def analizar_expediente(
             ''', (
                 timestamp_actual,
                 usuario_auditoria,
-                f"ALERTA: Subida de {len(files)} documento(s) con posible inconsistencia",
+                f"ADVERTENCIA | ANOMALIA: subida de {len(files)} documento(s) con posible inconsistencia",
                 numero_expediente,
                 ip_origen
             ))
@@ -3046,31 +4050,31 @@ async def analizar_expediente(
         # 2. INGESTA Y EXTRACCIÓN DE TEXTO - Multi-PDF
         nombre_seguro = re.sub(r'[^a-zA-Z0-9-]', '_', numero_expediente)
         carpeta_expediente = f"pdfs_guardados/{nombre_seguro}"
-        os.makedirs(carpeta_expediente, exist_ok=True)
-        carpeta_abs = os.path.abspath(carpeta_expediente)
-        base_abs = os.path.abspath("pdfs_guardados")
-        if carpeta_abs.startswith(base_abs):
-            for archivo_existente in os.listdir(carpeta_expediente):
-                if archivo_existente.lower().endswith(".pdf"):
-                    os.remove(os.path.join(carpeta_expediente, archivo_existente))
-
+        archivos_preparados = []
         textos_por_doc = []
         resumenes_por_pdf = []
         ocr_precisions_doc = []
         texto_total = ""
         for i, upload_file in enumerate(files):
             contenido = await upload_file.read()
+            try:
+                validar_nombre_y_tamano_pdf(upload_file, len(contenido))
+            except HTTPException as limite_error:
+                registrar_log_seguridad(
+                    conn,
+                    usuario_auditoria,
+                    f"ADVERTENCIA | ARCHIVO_GRANDE: carga rechazada ({upload_file.filename}, {formatear_tamano_archivo(len(contenido))})",
+                    numero_expediente,
+                    ip_origen
+                )
+                conn.commit()
+                raise limite_error
             nombre_archivo = re.sub(r'[^a-zA-Z0-9._-]', '_', upload_file.filename)
-            with open(f"{carpeta_expediente}/{nombre_archivo}", "wb") as f_out:
-                f_out.write(contenido)
-            registrar_log_seguridad(
-                conn,
-                usuario_auditoria,
-                f"Subida de documento {i + 1}: {upload_file.filename}",
-                numero_expediente,
-                ip_origen
-            )
-            conn.commit()
+            archivos_preparados.append({
+                "contenido": contenido,
+                "nombre_archivo": nombre_archivo,
+                "filename": upload_file.filename
+            })
 
             if forzar_ocr:
                 print(f"🚀 OCR Profundo: {upload_file.filename}")
@@ -3095,7 +4099,134 @@ async def analizar_expediente(
             resumenes_por_pdf.append(resumir_pdf_individual(nombre_archivo, texto_doc))
 
         texto_extraido = texto_total.strip()
-            
+
+        hallazgos_duplicados = []
+        expediente_existente = conn.execute('''
+            SELECT id, json_resultados
+            FROM registro_expedientes
+            WHERE numero_expediente = %s
+        ''', (numero_expediente,)).fetchone()
+        carpeta_existia = os.path.exists(carpeta_expediente)
+        pdfs_existentes = []
+        hashes_existentes = {}
+        if carpeta_existia:
+            pdfs_existentes = sorted([f for f in os.listdir(carpeta_expediente) if f.lower().endswith(".pdf")])
+            for pdf_existente in pdfs_existentes:
+                ruta_existente = os.path.join(carpeta_expediente, pdf_existente)
+                try:
+                    with open(ruta_existente, "rb") as f_existente:
+                        hashes_existentes[hashlib.sha256(f_existente.read()).hexdigest()] = pdf_existente
+                except Exception as e:
+                    print(f"No se pudo calcular hash de {ruta_existente}: {e}")
+
+        if expediente_existente and (expediente_existente.get("json_resultados") is not None or pdfs_existentes):
+            hallazgos_duplicados.append({
+                "tipo": "Expediente duplicado",
+                "detalle": f"El expediente {numero_expediente} ya tiene informacion registrada.",
+                "coincidencia": numero_expediente
+            })
+
+        hashes_lote = {}
+        for archivo in archivos_preparados:
+            hash_archivo = hashlib.sha256(archivo["contenido"]).hexdigest()
+            archivo["sha256"] = hash_archivo
+            if hash_archivo in hashes_lote:
+                hallazgos_duplicados.append({
+                    "tipo": "Documento duplicado en la misma carga",
+                    "detalle": f"{archivo['filename']} coincide con {hashes_lote[hash_archivo]}",
+                    "coincidencia": archivo["filename"]
+                })
+            else:
+                hashes_lote[hash_archivo] = archivo["filename"]
+            if hash_archivo in hashes_existentes:
+                hallazgos_duplicados.append({
+                    "tipo": "Documento duplicado",
+                    "detalle": f"{archivo['filename']} ya fue subido como {hashes_existentes[hash_archivo]}",
+                    "coincidencia": archivo["filename"]
+                })
+            elif archivo["nombre_archivo"] in pdfs_existentes:
+                hallazgos_duplicados.append({
+                    "tipo": "Nombre de documento duplicado",
+                    "detalle": f"Ya existe un documento llamado {archivo['nombre_archivo']} en este expediente.",
+                    "coincidencia": archivo["filename"]
+                })
+
+        if hallazgos_duplicados and not confirmacion_duplicados:
+            registrar_log_seguridad(
+                conn,
+                usuario_auditoria,
+                f"ADVERTENCIA | DUPLICADO: carga detenida por {len(hallazgos_duplicados)} coincidencia(s)",
+                numero_expediente,
+                ip_origen
+            )
+            conn.commit()
+            return {
+                "status": "requires_duplicate_confirmation",
+                "requires_confirmation": True,
+                "detail": "Se detectaron expediente o documentos duplicados. El usuario debe confirmar si desea reemplazar/reprocesar.",
+                "duplicados": hallazgos_duplicados
+            }
+
+        if hallazgos_duplicados and confirmacion_duplicados:
+            registrar_log_seguridad(
+                conn,
+                usuario_auditoria,
+                f"INFO | DUPLICADO_CONFIRMADO: usuario confirmo reemplazo/reproceso ({len(hallazgos_duplicados)} coincidencia(s))",
+                numero_expediente,
+                ip_origen
+            )
+            conn.commit()
+
+        hallazgos_sensibles = detectar_datos_sensibles_menor(texto_extraido)
+        if hallazgos_sensibles and not confirmacion_datos_sensibles:
+            registrar_log_seguridad(
+                conn,
+                usuario_auditoria,
+                f"INFO | ANONIMIZACION: validacion pendiente ({len(hallazgos_sensibles)} posible(s) dato(s) sensible(s))",
+                numero_expediente,
+                ip_origen
+            )
+            conn.commit()
+            return {
+                "status": "requires_sensitive_confirmation",
+                "requires_confirmation": True,
+                "detail": "Se detectaron posibles datos sensibles asociados a menores. El usuario debe confirmar la anonimizacion antes de continuar.",
+                "hallazgos_sensibles": hallazgos_sensibles
+            }
+
+        if hallazgos_sensibles and confirmacion_datos_sensibles:
+            registrar_log_seguridad(
+                conn,
+                usuario_auditoria,
+                f"INFO | ANONIMIZACION: confirmacion de documentos anonimizados ({len(hallazgos_sensibles)} hallazgo(s))",
+                numero_expediente,
+                ip_origen
+            )
+            conn.commit()
+
+        os.makedirs(carpeta_expediente, exist_ok=True)
+        carpeta_abs = os.path.abspath(carpeta_expediente)
+        base_abs = os.path.abspath("pdfs_guardados")
+        if carpeta_abs.startswith(base_abs):
+            for archivo_existente in os.listdir(carpeta_expediente):
+                if archivo_existente.lower().endswith(".pdf"):
+                    os.remove(os.path.join(carpeta_expediente, archivo_existente))
+
+        for i, archivo in enumerate(archivos_preparados):
+            with open(os.path.join(carpeta_expediente, archivo["nombre_archivo"]), "wb") as f_out:
+                f_out.write(archivo["contenido"])
+            tipo_documental = "Documento no clasificado"
+            if i < len(resumenes_por_pdf):
+                tipo_documental = resumenes_por_pdf[i].get("tipo_documental") or tipo_documental
+            registrar_log_seguridad(
+                conn,
+                usuario_auditoria,
+                f"INFO | SUBIDA_DOCUMENTO: documento {i + 1}: {archivo['filename']} ({tipo_documental})",
+                numero_expediente,
+                ip_origen
+            )
+        conn.commit()
+
         # 3. 🛡️ FILTRO DE INTEGRIDAD INTERNA - Multi-PDF
         str_esperado = re.sub(r'(?i)^(expediente|exp_?|exp\.\s*)', '', numero_expediente)
         clean_esperado = re.sub(r'[^a-zA-Z0-9]', '', str_esperado).lower()
@@ -3110,7 +4241,7 @@ async def analizar_expediente(
                     conn.execute('''
                         INSERT INTO log_seguridad (timestamp, usuario, accion_registrada, expediente, ip_origen)
                         VALUES (%s, %s, %s, %s, %s)
-                    ''', (timestamp_actual, usuario_auditoria, f"RECHAZO: '{upload_file.filename}' pertenecía a {num_interno}", numero_expediente, ip_origen))
+                    ''', (timestamp_actual, usuario_auditoria, f"CRITICO | ANOMALIA | RECHAZO_DOCUMENTO: '{upload_file.filename}' pertenecia a {num_interno}", numero_expediente, ip_origen))
                     conn.commit()
                     raise HTTPException(
                         status_code=400,
@@ -3139,6 +4270,7 @@ async def analizar_expediente(
         analisis_admisibilidad = modulo_verificacion_admisibilidad(texto_extraido)
         analisis_financiero = modulo_auditoria_financiera(texto_extraido, monto_p)
         analisis_cargas = modulo_capacidad_cargas(texto_extraido)
+        calculadora_economica = modulo_calculadora_economica(analisis_financiero, analisis_cargas)
 
         # Fuente única de verdad para el petitorio: si el módulo financiero (con
         # jerarquía regex/IA/validación anti-alucinación) validó un monto, ese
@@ -3170,6 +4302,7 @@ async def analizar_expediente(
             "admisibilidad": analisis_admisibilidad,
             "revision_financiera": analisis_financiero,
             "capacidad_cargas": analisis_cargas,
+            "calculadora_economica": calculadora_economica,
             "resumen_por_pdf": resumenes_por_pdf,
 
             "historial": [
@@ -3233,8 +4366,164 @@ async def analizar_expediente(
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         conn.close()
+
+@app.post("/api/v1/audit/sensitive-validation")
+async def registrar_validacion_sensible(request: Request, payload: SensitiveValidationRequest):
+    conn = get_db_connection()
+    try:
+        accion = "ADVERTENCIA | ANONIMIZACION: analisis detenido por datos sensibles"
+        if payload.decision.lower() == "confirmado":
+            accion = "INFO | ANONIMIZACION: documentos anonimizados revisados"
+        if payload.hallazgos_count:
+            accion = f"{accion} ({payload.hallazgos_count} hallazgo(s))"
+        registrar_log_seguridad(
+            conn,
+            payload.usuario,
+            accion,
+            payload.numero_expediente,
+            obtener_ip_origen(request)
+        )
+        conn.commit()
+        return {"status": "success"}
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        conn.close()
         
-@app.post("/api/v1/chat")
+def _normalizar_texto_chat(texto: str) -> str:
+    texto = unicodedata.normalize("NFD", str(texto or ""))
+    texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
+    return re.sub(r"\s+", " ", texto).strip().lower()
+
+
+def _tokens_chat(texto: str) -> set:
+    stopwords = {
+        "sobre", "para", "como", "cual", "cuales", "donde", "cuando", "porque",
+        "este", "esta", "estos", "estas", "tiene", "hay", "del", "las", "los",
+        "una", "unos", "unas", "que", "con", "por", "expediente", "documento",
+        "pdf", "dice", "indica", "menciona", "segun"
+    }
+    return {
+        token for token in re.split(r"[^a-z0-9]+", _normalizar_texto_chat(texto))
+        if len(token) >= 3 and token not in stopwords
+    }
+
+
+def _documentos_chat(texto_expediente: str) -> list:
+    texto = texto_expediente or ""
+    partes = re.split(r"--- \[DOCUMENTO \d+:\s*([^\]]+)\] ---", texto)
+    documentos = []
+    if len(partes) > 1:
+        prefacio = partes[0].strip()
+        for i in range(1, len(partes), 2):
+            nombre = partes[i].strip()
+            contenido = (partes[i + 1] if i + 1 < len(partes) else "").strip()
+            if contenido:
+                documentos.append({"nombre": nombre, "texto": contenido})
+        if prefacio and not documentos:
+            documentos.append({"nombre": "Expediente completo", "texto": prefacio})
+    else:
+        documentos.append({"nombre": "Expediente completo", "texto": texto.strip()})
+    return [doc for doc in documentos if doc["texto"]]
+
+
+def _fragmentos_chat(documentos: list, query: str, documento_activo: str = "", max_chars: int = 7200) -> str:
+    query_tokens = _tokens_chat(query)
+    activo_norm = _normalizar_texto_chat(documento_activo)
+    fragmentos = []
+
+    for doc in documentos:
+        nombre = doc["nombre"]
+        texto = re.sub(r"\s+", " ", doc["texto"]).strip()
+        oraciones = re.split(r"(?<=[.;:!?])\s+", texto)
+        if len(oraciones) <= 1:
+            oraciones = [texto[i:i + 700] for i in range(0, len(texto), 700)]
+
+        for idx in range(0, len(oraciones), 3):
+            bloque = " ".join(oraciones[idx:idx + 5]).strip()
+            if len(bloque) < 80:
+                continue
+            bloque_norm = _normalizar_texto_chat(bloque)
+            bloque_tokens = _tokens_chat(bloque_norm)
+            score = len(query_tokens & bloque_tokens) * 3
+            if activo_norm and activo_norm == _normalizar_texto_chat(nombre):
+                score += 4
+            if any(t in bloque_norm for t in ("demandante", "demandado", "pension", "alimentos", "audiencia", "resuelve")):
+                score += 1
+            fragmentos.append((score, nombre, bloque[:950]))
+
+    fragmentos.sort(key=lambda item: item[0], reverse=True)
+    seleccionados = []
+    total = 0
+    vistos = set()
+    for score, nombre, bloque in fragmentos:
+        clave = _normalizar_texto_chat(bloque[:180])
+        if clave in vistos:
+            continue
+        vistos.add(clave)
+        texto_bloque = f"[{nombre}]\n{bloque}"
+        if total + len(texto_bloque) > max_chars and seleccionados:
+            break
+        seleccionados.append(texto_bloque)
+        total += len(texto_bloque)
+        if len(seleccionados) >= 8:
+            break
+
+    if not seleccionados and documentos:
+        doc = documentos[0]
+        seleccionados.append(f"[{doc['nombre']}]\n{doc['texto'][:max_chars]}")
+
+    return "\n\n".join(seleccionados)
+
+
+def _resumen_datos_chat(datos: dict, resumen_por_pdf: list) -> str:
+    if not isinstance(datos, dict):
+        datos = {}
+    sujetos = datos.get("sujetos_procesales", datos)
+    financiera = datos.get("revision_financiera", {})
+    plazos = datos.get("plazos", {})
+    capacidad = datos.get("capacidad_cargas", {})
+    sintesis = datos.get("sintesis_rag", {})
+
+    lineas = []
+    if isinstance(sujetos, dict):
+        dem = sujetos.get("demandante", {})
+        ddo = sujetos.get("demandado", {})
+        lineas.append(f"Demandante: {dem.get('nombre', 'No detectado')} DNI {dem.get('dni', 'No detectado')}")
+        lineas.append(f"Demandado: {ddo.get('nombre', 'No detectado')} DNI {ddo.get('dni', 'No detectado')}")
+        domicilios = sujetos.get("domicilios", {})
+        if isinstance(domicilios, dict):
+            for rol in ("demandante", "demandado"):
+                datos_dom = domicilios.get(rol, {})
+                if isinstance(datos_dom, dict):
+                    encontrados = [
+                        f"{tipo}: {valor}"
+                        for tipo, valor in datos_dom.items()
+                        if valor not in ("No detectado", "No encontrado", "", None)
+                    ]
+                    if encontrados:
+                        lineas.append(f"Domicilios {rol}: " + "; ".join(encontrados))
+    if isinstance(financiera, dict):
+        lineas.append(f"Petitorio economico: {financiera.get('petitorio', financiera.get('monto_solicitado', 'No detectado'))}")
+        lineas.append(f"Suma de gastos sustentados: {financiera.get('suma_gastos_sustentados', 'No detectado')}")
+    if isinstance(plazos, dict):
+        lineas.append(f"Plazos/fechas relevantes: {json.dumps(plazos, ensure_ascii=False)[:700]}")
+    if isinstance(capacidad, dict):
+        lineas.append(f"Capacidad/cargas: {json.dumps(capacidad, ensure_ascii=False)[:700]}")
+    if isinstance(sintesis, dict):
+        lineas.append(f"Sintesis tecnica: {sintesis.get('tecnico', '')[:900]}")
+    if isinstance(resumen_por_pdf, list) and resumen_por_pdf:
+        docs = []
+        for item in resumen_por_pdf[:8]:
+            if isinstance(item, dict):
+                docs.append(f"{item.get('archivo', 'PDF')}: {item.get('caracteres_extraidos', 0)} chars, calidad {item.get('calidad_extraccion', 'N/D')}")
+        if docs:
+            lineas.append("Documentos analizados: " + " | ".join(docs))
+    return "\n".join(linea for linea in lineas if linea.strip())
+
+
+@app.post("/api/v1/chat-legacy")
 async def chat_expediente(request: ChatRequest):
     if not request.texto_expediente:
         raise HTTPException(status_code=400, detail="El texto del expediente es requerido.")
@@ -3303,8 +4592,101 @@ async def chat_expediente(request: ChatRequest):
         print(f"Error en Chat IA: {e}")
         raise HTTPException(status_code=500, detail="Error de comunicación con LLM.")
 
+@app.post("/api/v1/chat")
+async def chat_expediente_contextual(request: ChatRequest):
+    if not request.texto_expediente:
+        raise HTTPException(status_code=400, detail="El texto del expediente es requerido.")
+
+    prompt_conversacion = ""
+    for msg in request.historial[-6:]:
+        contenido = (msg.contenido or "").strip()
+        if not contenido:
+            continue
+        prefijo = "Usuario: " if msg.rol == "user" else "SIGEJA-Chat: "
+        prompt_conversacion += f"{prefijo}{contenido[:700]}\n"
+
+    documentos = _documentos_chat(request.texto_expediente)
+    contexto_relevante = _fragmentos_chat(documentos, request.query, request.documento_activo)
+    datos_resumidos = _resumen_datos_chat(request.datos_extraidos, request.resumen_por_pdf)
+
+    sujetos = request.datos_extraidos.get("sujetos_procesales", request.datos_extraidos)
+    dem_nombre = "Desconocido"
+    demdo_nombre = "Desconocido"
+    if isinstance(sujetos, dict):
+        dem_nombre = sujetos.get("demandante", {}).get("nombre", "Desconocido")
+        demdo_nombre = sujetos.get("demandado", {}).get("nombre", "Desconocido")
+
+    prompt_sistema = f"""
+Eres 'SIGEJA-Chat', asistente legal contextual especializado en procesos de alimentos para Juzgados de Familia.
+
+IDENTIDAD DEL CASO:
+- Expediente: {request.numero_expediente or "No especificado"}
+- Documento/PDF activo en pantalla: {request.documento_activo or "No especificado"}
+- Pagina visible o solicitada: {request.pagina_activa or 1}
+- Demandante: {dem_nombre}
+- Demandado: {demdo_nombre}
+
+DATOS ESTRUCTURADOS YA EXTRAIDOS POR SIGEJA:
+{datos_resumidos}
+
+FRAGMENTOS RELEVANTES DEL EXPEDIENTE:
+{contexto_relevante}
+
+REGLAS OBLIGATORIAS:
+- Responde solo con informacion contenida en DATOS ESTRUCTURADOS o FRAGMENTOS RELEVANTES.
+- Si el dato no aparece, responde: "No hay informacion sobre esto en el expediente."
+- No inventes fechas, montos, nombres, obligaciones ni conclusiones juridicas.
+- Si usas un dato, menciona brevemente de que documento o fragmento proviene cuando sea posible.
+- Si la pregunta es ambigua, responde con lo verificable y pide precisar el punto faltante.
+- Manten el contexto de la conversacion, pero no contradigas el expediente.
+
+ESTILO:
+- Responde en espanol claro, formal y util para personal judicial.
+- Extension normal: 60 a 140 palabras.
+- Si el usuario pide lista, usa vinetas breves.
+
+HISTORIAL RECIENTE:
+{prompt_conversacion}
+
+Usuario: {request.query}
+SIGEJA-Chat:
+"""
+
+    try:
+        url = "http://localhost:11434/api/generate"
+        payload = {
+            "model": "mistral",
+            "prompt": prompt_sistema,
+            "stream": False,
+            "options": {
+                "temperature": 0.15,
+                "num_predict": 700,
+                "top_p": 0.85,
+                "top_k": 40,
+                "num_ctx": 9000
+            }
+        }
+
+        response = requests.post(url, json=payload, timeout=120)
+        response.raise_for_status()
+
+        data = response.json()
+        return {
+            "respuesta": data.get("response", "").strip(),
+            "contexto_usado": {
+                "expediente": request.numero_expediente,
+                "documento_activo": request.documento_activo,
+                "fragmentos": contexto_relevante.count("["),
+                "chars_contexto": len(contexto_relevante)
+            }
+        }
+
+    except Exception as e:
+        print(f"Error en Chat IA contextual: {e}")
+        raise HTTPException(status_code=500, detail="Error de comunicacion con LLM.")
+
 @app.post("/api/v1/regenerate-summary")
-async def regenerar_resumen_con_feedback(req: RegenerarRequest):
+async def regenerar_resumen_con_feedback(req: RegenerarRequest, request: Request):
     """
     Recibe la corrección del usuario y vuelve a generar el análisis,
     aplicando estrictas reglas anti-alucinación e incluyendo a ambas partes por igual.
@@ -3372,6 +4754,39 @@ async def regenerar_resumen_con_feedback(req: RegenerarRequest):
         response.raise_for_status()
         
         nuevo_analisis = cargar_json_llm(response.json().get("response", "{}"), {})
+        conn_feedback = get_db_connection()
+        try:
+            metadata_json = json.dumps({
+                "origen": "regenerate-summary",
+                "campos_afectados": ["sintesis_rag", "postura_defensa", "puntos_controvertidos"]
+            }, ensure_ascii=False)
+            conn_feedback.execute("""
+                INSERT INTO feedback_analisis
+                    (numero_expediente, usuario, tipo, rating, comentario, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+            """, (
+                req.numero_expediente or "-",
+                req.usuario or nombre_usuario_auditoria(request),
+                "CORRECCION",
+                None,
+                req.correcciones_usuario.strip(),
+                metadata_json
+            ))
+            registrar_evento_auditoria(
+                conn_feedback,
+                request,
+                "CORRECCION_IA",
+                usuario=req.usuario or None,
+                expediente=req.numero_expediente or "-",
+                detalle=f"regeneracion por correccion del usuario: {req.correcciones_usuario.strip()[:120]}",
+                severidad="ADVERTENCIA"
+            )
+            conn_feedback.commit()
+        except Exception as audit_error:
+            conn_feedback.rollback()
+            print(f"Error registrando correccion IA: {audit_error}")
+        finally:
+            conn_feedback.close()
         
         return {
             "status": "success",
@@ -3382,37 +4797,109 @@ async def regenerar_resumen_con_feedback(req: RegenerarRequest):
         print(f"Error al regenerar: {e}")
         raise HTTPException(status_code=500, detail=f"Error al regenerar: {str(e)}")
 
+
+@app.post("/api/v1/analysis-feedback")
+async def guardar_feedback_analisis(payload: AnalysisFeedbackRequest, request: Request):
+    if payload.rating < 1 or payload.rating > 5:
+        raise HTTPException(status_code=400, detail="La calificacion debe estar entre 1 y 5.")
+
+    conn = get_db_connection()
+    try:
+        metadata_json = json.dumps(payload.metadata or {}, ensure_ascii=False)
+        conn.execute("""
+            INSERT INTO feedback_analisis
+                (numero_expediente, usuario, tipo, rating, comentario, metadata)
+            VALUES (%s, %s, %s, %s, %s, %s::jsonb)
+        """, (
+            payload.numero_expediente,
+            payload.usuario,
+            "CALIFICACION",
+            payload.rating,
+            payload.comentario.strip(),
+            metadata_json
+        ))
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "FEEDBACK_IA",
+            usuario=payload.usuario,
+            expediente=payload.numero_expediente,
+            detalle=f"calificacion={payload.rating}/5; comentario={'si' if payload.comentario.strip() else 'no'}",
+            severidad="INFO"
+        )
+        conn.commit()
+        return {"status": "success", "message": "Feedback registrado correctamente."}
+    except Exception as e:
+        conn.rollback()
+        print(f"Error guardando feedback IA: {e}")
+        raise HTTPException(status_code=500, detail="No se pudo registrar el feedback.")
+    finally:
+        conn.close()
+
+
 @app.post("/api/v1/save-analysis")
-async def guardar_analisis_aprobado(req: SaveAnalysisRequest):
+async def guardar_analisis_aprobado(req: SaveAnalysisRequest, request: Request):
     """
     Guarda o actualiza el análisis definitivo en la base de datos
     después de que el Especialista/Juez lo ha revisado y aprobado.
     """
     try:
+        resultados_guardar = dict(req.resultados_json or {})
+        historial_guardado = (
+            resultados_guardar.get("trazabilidad_cambios")
+            or resultados_guardar.get("historial")
+            or []
+        )
+        config_ia = dict(resultados_guardar.get("configuracion_ia") or {})
+        version_analisis = (
+            resultados_guardar.get("version_analisis")
+            or config_ia.get("version_analisis")
+            or f"v{max(len(historial_guardado), 1)}"
+        )
+        config_ia.setdefault("version_analisis", version_analisis)
+        config_ia.setdefault("pipeline_version", "SIGEJA-RAG-2026.08")
+        config_ia.setdefault("modelo_principal", "mistral")
+        config_ia.setdefault("proveedor_modelo", "Ollama local")
+        config_ia.setdefault("endpoint_modelo", "localhost:11434")
+        config_ia.setdefault("tono_visualizacion", "tecnico")
+        config_ia.setdefault("parametros", {
+            "temperature_resumen": 0.1,
+            "temperature_chat": 0.15,
+            "temperature_feedback": 0.1,
+            "top_p": 0.85,
+            "modelo_embeddings": "nomic-embed-text",
+            "vector_db": "PostgreSQL + pgvector"
+        })
+        config_ia.setdefault("fecha_persistencia", datetime.now().isoformat())
+        resultados_guardar["version_analisis"] = version_analisis
+        resultados_guardar["configuracion_ia"] = config_ia
+        resultados_guardar["trazabilidad_cambios"] = historial_guardado
+        resultados_guardar["historial"] = historial_guardado
+
         # Extraemos los datos críticos del JSON que nos envía React
-        entidades = req.resultados_json.get("sujetos_procesales", {})
+        entidades = resultados_guardar.get("sujetos_procesales", {})
         demandante = entidades.get("demandante", {}).get("nombre", "No detectado")
         demandado = entidades.get("demandado", {}).get("nombre", "No detectado")
         monto_p = monto_seguro(entidades.get("monto_solicitado"))
         
-        financiero = req.resultados_json.get("revision_financiera", {})
+        financiero = resultados_guardar.get("revision_financiera", {})
         estado_auditoria = "BRECHA DETECTADA" if financiero.get("alerta") else "RAZONABLE"
         
-        cargas = req.resultados_json.get("capacidad_cargas", {})
+        cargas = resultados_guardar.get("capacidad_cargas", {})
         riesgo_capacidad = cargas.get("carga_nivel", "Desconocida")
 
-        json_texto = json.dumps(req.resultados_json)
+        json_texto = json.dumps(resultados_guardar, ensure_ascii=False)
 
         # Calcular métricas de calidad reales desde los resultados del análisis
-        entidades_json = req.resultados_json.get("sujetos_procesales", {})
+        entidades_json = resultados_guardar.get("sujetos_procesales", {})
         m_f1_ner = calcular_f1_ner(entidades_json)
-        resumen_json = req.resultados_json.get("sintesis_rag", {})
+        resumen_json = resultados_guardar.get("sintesis_rag", {})
         resumen_texto = ""
         if isinstance(resumen_json, dict):
             resumen_texto = resumen_json.get("tecnico", "") + " " + resumen_json.get("estandar", "")
         elif isinstance(resumen_json, str):
             resumen_texto = resumen_json
-        postura_json = req.resultados_json.get("postura_defensa", {})
+        postura_json = resultados_guardar.get("postura_defensa", {})
         postura_texto = ""
         if isinstance(postura_json, dict):
             postura_texto = postura_json.get("tecnico", "") + " " + postura_json.get("estandar", "")
@@ -3425,7 +4912,7 @@ async def guardar_analisis_aprobado(req: SaveAnalysisRequest):
         # OCR precision: estimada desde la calidad del texto del resumen generado
         m_ocr_precision = calcular_ocr_precision(combined_resumen) if combined_resumen.strip() else 0.0
 
-        texto_vectorial = preparar_texto_para_vector(req.resultados_json)
+        texto_vectorial = preparar_texto_para_vector(resultados_guardar)
         embedding_generado = generar_embedding(texto_vectorial)
         embedding_pg = str(embedding_generado) if embedding_generado else None
         
@@ -3460,6 +4947,23 @@ async def guardar_analisis_aprobado(req: SaveAnalysisRequest):
                   monto_p, estado_auditoria, riesgo_capacidad, req.tiempo_procesamiento_seg, 
                   req.paginas_ocr, m_bert_score, m_f1_ner, m_ocr_precision, json_texto, embedding_pg))
         
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "APROBACION_ANALISIS",
+            expediente=req.numero_expediente,
+            detalle=f"version={version_analisis}; modelo={config_ia.get('modelo_principal')}; tono={config_ia.get('tono_visualizacion')}; estado_auditoria={estado_auditoria}; riesgo_capacidad={riesgo_capacidad}",
+            severidad="INFO"
+        )
+        if financiero.get("alerta") or estado_auditoria == "BRECHA DETECTADA":
+            registrar_evento_auditoria(
+                conn,
+                request,
+                "ANOMALIA",
+                expediente=req.numero_expediente,
+                detalle="brecha financiera detectada al aprobar analisis",
+                severidad="ADVERTENCIA"
+            )
         conn.commit()
         conn.close()
         
@@ -3469,8 +4973,148 @@ async def guardar_analisis_aprobado(req: SaveAnalysisRequest):
         print(f"Error guardando expediente definitivo: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+def _pdf_escape(texto: str) -> str:
+    texto = unicodedata.normalize("NFKD", str(texto or ""))
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = texto.encode("latin-1", "replace").decode("latin-1")
+    return texto.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def _wrap_pdf_text(texto: str, max_chars: int = 92) -> list:
+    palabras = re.sub(r'\s+', ' ', str(texto or '')).strip().split()
+    lineas = []
+    actual = ""
+    for palabra in palabras:
+        candidato = f"{actual} {palabra}".strip()
+        if len(candidato) > max_chars and actual:
+            lineas.append(actual)
+            actual = palabra
+        else:
+            actual = candidato
+    if actual:
+        lineas.append(actual)
+    return lineas or [""]
+
+
+def generar_pdf_admisibilidad_bytes(payload: dict) -> bytes:
+    expediente = payload.get("numero_expediente") or payload.get("expediente") or "Expediente"
+    usuario = payload.get("usuario") or "Sistema SIGEJA"
+    items = payload.get("admisibilidad") or payload.get("checklist") or []
+    sujetos = payload.get("sujetos_procesales") or {}
+    financiera = payload.get("revision_financiera") or {}
+    total = len(items)
+    conformes = sum(1 for item in items if str(item.get("estado", "")).lower() == "encontrado")
+    faltantes = max(0, total - conformes)
+    conclusion = "ADMISIBLE" if faltantes == 0 and total > 0 else "REQUIERE SUBSANACION"
+
+    lineas = [
+        ("B", 16, "SIGEJA - Checklist de Admisibilidad"),
+        ("", 10, f"Expediente: {expediente}"),
+        ("", 10, f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}"),
+        ("", 10, f"Usuario: {usuario}"),
+        ("", 10, ""),
+        ("B", 12, "Resumen"),
+        ("", 10, f"Resultado sugerido: {conclusion}"),
+        ("", 10, f"Requisitos conformes: {conformes}/{total}"),
+        ("", 10, f"Requisitos faltantes: {faltantes}"),
+        ("", 10, f"Petitorio economico: {formato_monto(financiera.get('petitorio', financiera.get('monto_petitorio')))}"),
+        ("", 10, ""),
+        ("B", 12, "Sujetos procesales"),
+    ]
+
+    for rol in ("demandante", "demandado"):
+        persona = sujetos.get(rol, {}) if isinstance(sujetos, dict) else {}
+        lineas.append(("", 10, f"{rol.title()}: {persona.get('nombre', 'No detectado')} | DNI: {persona.get('dni', 'No detectado')}"))
+
+    lineas.extend([("", 10, ""), ("B", 12, "Checklist de admisibilidad")])
+    if items:
+        for idx, item in enumerate(items, 1):
+            estado = "CONFORME" if str(item.get("estado", "")).lower() == "encontrado" else "FALTA"
+            anexo = item.get("anexo") or item.get("requisito") or f"Requisito {idx}"
+            lineas.append(("B", 10, f"{idx}. [{estado}] {anexo}"))
+            detalle = item.get("observacion") or item.get("detalle") or item.get("evidencia") or ""
+            for sub in _wrap_pdf_text(detalle, 86)[:3]:
+                if sub:
+                    lineas.append(("", 9, f"   {sub}"))
+    else:
+        lineas.append(("", 10, "No hay checklist de admisibilidad disponible en el analisis."))
+
+    lineas.extend([
+        ("", 10, ""),
+        ("B", 12, "Nota"),
+        ("", 9, "Documento generado automaticamente a partir del analisis IA. Debe ser revisado por el usuario responsable antes de incorporarse al expediente."),
+    ])
+
+    commands = ["BT", "/F1 10 Tf", "50 800 Td"]
+    y = 800
+    for weight, size, texto in lineas:
+        if y < 60:
+            commands.append("ET")
+            commands.extend(["BT", "/F1 10 Tf", "50 800 Td"])
+            y = 800
+        font = "F2" if weight == "B" else "F1"
+        commands.append(f"/{font} {size} Tf")
+        for linea in _wrap_pdf_text(texto, 92):
+            commands.append(f"({_pdf_escape(linea)}) Tj")
+            commands.append("0 -15 Td")
+            y -= 15
+    commands.append("ET")
+    stream = "\n".join(commands).encode("latin-1", "replace")
+
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
+    ]
+    pdf = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for i, obj in enumerate(objects, 1):
+        offsets.append(len(pdf))
+        pdf.extend(f"{i} 0 obj\n".encode("ascii"))
+        pdf.extend(obj)
+        pdf.extend(b"\nendobj\n")
+    xref = len(pdf)
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    pdf.extend(b"0000000000 65535 f \n")
+    for offset in offsets[1:]:
+        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
+    pdf.extend(f"trailer << /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode("ascii"))
+    return bytes(pdf)
+
+
+@app.post("/api/v1/export-admisibilidad-pdf")
+async def export_admisibilidad_pdf(request: Request, data: dict = Body(...)):
+    numero = data.get("numero_expediente") or data.get("expediente") or "-"
+    conn = get_db_connection()
+    try:
+        if numero and numero != "-":
+            verificar_acceso_expediente_o_rechazar(conn, request, numero, "exportacion PDF de admisibilidad")
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "EXPORTACION",
+            expediente=numero,
+            detalle="descarga PDF de checklist de admisibilidad",
+            severidad="ADVERTENCIA"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    pdf_bytes = generar_pdf_admisibilidad_bytes(data)
+    filename = re.sub(r'[^a-zA-Z0-9._-]', '_', f"Admisibilidad_{numero}.pdf")
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
 @app.post("/api/v1/export-word")
-async def export_word(data: dict = Body(...)):
+async def export_word(request: Request, data: dict = Body(...)):
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
     from docx.enum.text import WD_LINE_SPACING
@@ -3607,12 +5251,51 @@ async def export_word(data: dict = Body(...)):
         end.set(qn('w:fldCharType'), 'end')
         run._r.append(end)
 
+    def valor_texto(valor, defecto="No detectado"):
+        if valor is None:
+            return defecto
+        if isinstance(valor, str):
+            limpio = valor.strip()
+            if not limpio or limpio.lower() in ("none", "null", "nan", "no detectado"):
+                return defecto
+            return limpio
+        return str(valor)
+
+    def valor_bool_estado(valor):
+        if isinstance(valor, bool):
+            return "CONFORME" if valor else "FALTA"
+        texto = valor_texto(valor, "No evaluado")
+        return "CONFORME" if texto.lower() in ("encontrado", "conforme", "cumple", "si", "true") else texto
+
+    def compactar_lista(items, limite=8):
+        if not isinstance(items, list):
+            return []
+        return [item for item in items[:limite] if isinstance(item, dict)]
+
+    def texto_monto_dict(dic, *keys, defecto="S/. 0.00"):
+        if not isinstance(dic, dict):
+            return defecto
+        for key in keys:
+            if dic.get(key) not in (None, "", "None"):
+                return formato_monto(dic.get(key), defecto)
+        return defecto
+
     # ══════════════════════════════════════════════════════════
     # DOCUMENTO
     # ══════════════════════════════════════════════════════════
     doc        = Document()
     expediente = data.get('expediente', 'N/A')
     fecha_hoy  = datetime.now().strftime("%d de %B de %Y")
+    usuario_export = valor_texto(data.get('usuario'), "Usuario SIGEJA")
+    fin = data.get('financiera', {}) if isinstance(data.get('financiera'), dict) else {}
+    cap = data.get('capacidad', {}) if isinstance(data.get('capacidad'), dict) else {}
+    calc = data.get('calculadora_economica', {}) if isinstance(data.get('calculadora_economica'), dict) else {}
+    plazos = data.get('plazos', {}) if isinstance(data.get('plazos'), dict) else {}
+    metricas = data.get('metricas', {}) if isinstance(data.get('metricas'), dict) else {}
+    configuracion_ia = data.get('configuracion_ia', {}) if isinstance(data.get('configuracion_ia'), dict) else {}
+    parametros_ia = configuracion_ia.get('parametros', {}) if isinstance(configuracion_ia.get('parametros'), dict) else {}
+    admisibilidad = data.get('admisibilidad', []) if isinstance(data.get('admisibilidad'), list) else []
+    resumen_por_pdf = data.get('resumen_por_pdf', []) if isinstance(data.get('resumen_por_pdf'), list) else []
 
     # Márgenes APA: 1 pulgada (2.54 cm) en todos los lados
     for sec in doc.sections:
@@ -3639,6 +5322,7 @@ async def export_word(data: dict = Body(...)):
     apa_p("Elaborado por:",                                 align=C)
     apa_p("SIGEJA — Módulo de Análisis con Inteligencia Artificial",
           bold=True, align=C)
+    apa_p(f"Usuario solicitante: {usuario_export}",          align=C)
     apa_p(fecha_hoy,                                        align=C, space_before=12)
     doc.add_page_break()
 
@@ -3665,9 +5349,10 @@ async def export_word(data: dict = Body(...)):
     sujetos = data.get('sujetos', {})
     if sujetos:
         rows = [[rol.capitalize(),
-                 (d.get('nombre', 'No detectado') if isinstance(d, dict) else str(d))]
+                 (d.get('nombre', 'No detectado') if isinstance(d, dict) else str(d)),
+                 (d.get('dni', 'No detectado') if isinstance(d, dict) else 'No detectado')]
                 for rol, d in sujetos.items()]
-        apa_table(["Rol Procesal", "Nombre Completo"], rows)
+        apa_table(["Rol Procesal", "Nombre Completo", "DNI"], rows)
         figura_caption(fig,
                        "Identificación de los Sujetos Procesales del Expediente",
                        f"Expediente N.° {expediente}. Datos extraídos automáticamente por SIGEJA.")
@@ -3691,7 +5376,7 @@ async def export_word(data: dict = Body(...)):
     # 5. Auditoría Financiera
     apa_heading("5. Auditoría Financiera")
     fin    = data.get('financiera', {})
-    estado = fin.get('estado', 'No evaluado')
+    estado = valor_texto(fin.get('estado'), 'No evaluado')
     apa_table(["Concepto", "Monto / Estado"], [
         ["Monto Petitorio",         formato_monto(fin.get('monto_petitorio', fin.get('petitorio')))],
         ["Gastos Sustentados",      formato_monto(fin.get('suma_gastos', fin.get('suma_gastos_sustentados')), "S/. 0.00")],
@@ -3708,8 +5393,16 @@ async def export_word(data: dict = Body(...)):
     apa_heading("6. Puntos Controvertidos Sugeridos")
     puntos = data.get('puntos_controvertidos', [])
     if puntos:
-        apa_table(["Tema", "Sugerencia"],
-                  [[pt.get('tema', ''), pt.get('sugerencia', '')] for pt in puntos])
+        rows_puntos = []
+        for idx, pt in enumerate(puntos, 1):
+            if isinstance(pt, dict):
+                rows_puntos.append([
+                    valor_texto(pt.get('tema') or pt.get('punto') or f"Punto {idx}", f"Punto {idx}"),
+                    valor_texto(pt.get('sugerencia') or pt.get('detalle') or pt.get('fundamento'), "Sin sugerencia")
+                ])
+            else:
+                rows_puntos.append([f"Punto {idx}", valor_texto(pt, "Sin sugerencia")])
+        apa_table(["Tema", "Sugerencia"], rows_puntos)
         figura_caption(fig,
                        "Listado de Puntos Controvertidos Identificados por SIGEJA",
                        "Propuesta de análisis. No reemplaza el criterio jurisdiccional.")
@@ -3718,9 +5411,131 @@ async def export_word(data: dict = Body(...)):
         apa_p("No hay puntos controvertidos registrados.")
 
     # ── DESCARGA ─────────────────────────────────────────────
+    # 7. Detalle documental por PDF
+    apa_heading("7. Detalle Documental por PDF")
+    if resumen_por_pdf:
+        rows = []
+        for idx, doc_pdf in enumerate(compactar_lista(resumen_por_pdf, 20), 1):
+            nombre_pdf = valor_texto(
+                doc_pdf.get('nombre') or doc_pdf.get('archivo') or doc_pdf.get('filename') or doc_pdf.get('pdf'),
+                f"Documento {idx}"
+            )
+            tipo_pdf = valor_texto(
+                doc_pdf.get('tipo_documental') or doc_pdf.get('tipo') or doc_pdf.get('categoria'),
+                "No clasificado"
+            )
+            calidad_pdf = valor_texto(
+                doc_pdf.get('precision_ocr') or doc_pdf.get('calidad_ocr') or doc_pdf.get('ocr_precision'),
+                "No evaluado"
+            )
+            resumen_pdf = valor_texto(doc_pdf.get('resumen') or doc_pdf.get('descripcion'), "Sin resumen disponible")
+            rows.append([idx, nombre_pdf, tipo_pdf, calidad_pdf, resumen_pdf[:220]])
+        apa_table(["Nro.", "Documento", "Tipo", "Calidad OCR", "Resumen"], rows)
+        figura_caption(fig, "Detalle de documentos analizados", "Cada fila corresponde a un PDF incorporado al expediente.")
+        fig += 1
+    else:
+        apa_p("No se recibio detalle individual por PDF para esta exportacion.")
+
+    # 8. Checklist de Admisibilidad
+    apa_heading("8. Checklist de Admisibilidad")
+    if admisibilidad:
+        rows = []
+        for idx, item in enumerate(compactar_lista(admisibilidad, 30), 1):
+            requisito = valor_texto(item.get('anexo') or item.get('requisito') or item.get('nombre'), f"Requisito {idx}")
+            estado_item = valor_bool_estado(item.get('estado') if 'estado' in item else item.get('encontrado'))
+            observacion = valor_texto(item.get('observacion') or item.get('detalle') or item.get('evidencia'), "Sin observacion")
+            rows.append([idx, requisito, estado_item, observacion[:240]])
+        apa_table(["Nro.", "Requisito", "Estado", "Observacion"], rows)
+        figura_caption(fig, "Checklist de admisibilidad del expediente", "La evaluacion es referencial y debe ser revisada por el usuario responsable.")
+        fig += 1
+    else:
+        apa_p("No hay checklist de admisibilidad disponible.")
+
+    # 9. Control de Plazos
+    apa_heading("9. Control de Plazos y Calendario Judicial")
+    if plazos:
+        calendario = plazos.get('calendario_judicial', {}) if isinstance(plazos.get('calendario_judicial'), dict) else {}
+        apa_table(["Indicador", "Valor"], [
+            ["Fecha de notificacion", valor_texto(plazos.get('fecha_notificacion') or plazos.get('notificacion'))],
+            ["Fecha de presentacion", valor_texto(plazos.get('fecha_presentacion') or plazos.get('presentacion'))],
+            ["Dias calendario", valor_texto(plazos.get('dias_transcurridos') or plazos.get('dias_calendario'), "No calculado")],
+            ["Dias habiles judiciales", valor_texto(calendario.get('dias_habiles') or plazos.get('dias_habiles_judiciales'), "No calculado")],
+            ["Dias no habiles descontados", valor_texto(calendario.get('dias_no_habiles'), "0")],
+            ["Estado", valor_texto(plazos.get('estado') or plazos.get('resultado'), "No evaluado")],
+        ])
+        no_habiles = calendario.get('no_habiles_detalle') or calendario.get('detalle_no_habiles') or []
+        if isinstance(no_habiles, list) and no_habiles:
+            apa_p("Dias no habiles considerados:", bold=True, space_before=6)
+            for item in no_habiles[:10]:
+                apa_p(f"- {valor_texto(item)}", size=11)
+        figura_caption(fig, "Calculo de plazos con calendario judicial", "Incluye feriados y dias no habiles cuando el analisis los detecta.")
+        fig += 1
+    else:
+        apa_p("No hay informacion de plazos disponible.")
+
+    # 10. Calculadora Economica
+    apa_heading("10. Calculadora Economica Referencial")
+    if calc:
+        apa_table(["Concepto", "Valor"], [
+            ["Monto estimado referencial", texto_monto_dict(calc, 'monto_estimado_referencial', 'monto_estimado')],
+            ["Porcentaje sobre ingresos", valor_texto(calc.get('porcentaje_ingreso') or calc.get('porcentaje_sobre_ingresos'), "No calculado")],
+            ["Criterio utilizado", valor_texto(calc.get('criterio') or calc.get('base_calculo'), "No especificado")],
+            ["Formula aplicada", valor_texto(calc.get('formula'), "No disponible")],
+            ["Advertencia", valor_texto(calc.get('advertencia'), "Resultado referencial, no vinculante")],
+        ])
+        figura_caption(fig, "Estimacion economica referencial", "El calculo no reemplaza el criterio judicial ni la valoracion probatoria.")
+        fig += 1
+    else:
+        apa_p("No hay calculadora economica disponible para este expediente.")
+
+    # 11. Metricas de Calidad
+    apa_heading("11. Metricas de Calidad del Analisis")
+    apa_table(["Metrica", "Valor"], [
+        ["BERTScore RAG", valor_texto(metricas.get('bert_score'), "No registrado")],
+        ["F1 NER", valor_texto(metricas.get('f1_ner'), "No registrado")],
+        ["Precision OCR", valor_texto(metricas.get('ocr_precision'), "No registrado")],
+    ])
+    figura_caption(fig, "Metricas de monitoreo del informe", "Valores generados durante el procesamiento del expediente.")
+    fig += 1
+
+    # 12. Configuracion IA y Versionado
+    apa_heading("12. Configuracion IA y Versionado")
+    apa_table(["Campo", "Valor"], [
+        ["Version de analisis", valor_texto(data.get('version_analisis') or configuracion_ia.get('version_analisis'), "v1")],
+        ["Pipeline", valor_texto(configuracion_ia.get('pipeline_version'), "SIGEJA-RAG")],
+        ["Modelo principal", valor_texto(configuracion_ia.get('modelo_principal'), "mistral")],
+        ["Proveedor", valor_texto(configuracion_ia.get('proveedor_modelo'), "Ollama local")],
+        ["Tono", valor_texto(configuracion_ia.get('tono_visualizacion'), "tecnico")],
+        ["Temperatura resumen", valor_texto(parametros_ia.get('temperature_resumen'), "0.1")],
+        ["Base vectorial", valor_texto(parametros_ia.get('vector_db'), "PostgreSQL + pgvector")],
+    ])
+    figura_caption(fig, "Trazabilidad tecnica del analisis IA", "Version, parametros y modelo utilizados para generar el informe.")
+    fig += 1
+
+    # 13. Conclusion
+    apa_heading("13. Conclusion Final")
+    apa_p(
+        "El presente informe consolida la informacion extraida del expediente, los documentos procesados, "
+        "la evaluacion de admisibilidad, los plazos, la revision economica y las metricas de calidad. "
+        "Su uso es asistivo y requiere validacion final del usuario responsable."
+    )
+
     stream = io.BytesIO()
     doc.save(stream)
     stream.seek(0)
+    conn_audit = get_db_connection()
+    try:
+        registrar_evento_auditoria(
+            conn_audit,
+            request,
+            "EXPORTACION",
+            expediente=expediente,
+            detalle="descarga de informe Word",
+            severidad="INFO"
+        )
+        conn_audit.commit()
+    finally:
+        conn_audit.close()
 
     return StreamingResponse(
         stream,
@@ -3735,6 +5550,23 @@ async def get_dashboard_metrics():
     """
     conn = get_db_connection()
     try:
+        def contar_documentos_resultado(json_resultados):
+            if not json_resultados:
+                return 0
+            try:
+                datos = json.loads(json_resultados) if isinstance(json_resultados, str) else json_resultados
+            except Exception:
+                return 1
+            if not isinstance(datos, dict):
+                return 1
+            resumen_pdf = datos.get("resumen_por_pdf")
+            if isinstance(resumen_pdf, list) and resumen_pdf:
+                return len(resumen_pdf)
+            documentos_pdf = datos.get("documentos") or datos.get("pdfs")
+            if isinstance(documentos_pdf, list) and documentos_pdf:
+                return len(documentos_pdf)
+            return 1
+
         # 1. Obtener el total y la suma de páginas procesadas por Tesseract
         stats = conn.execute('''
             SELECT 
@@ -3752,9 +5584,17 @@ async def get_dashboard_metrics():
                     "ahorro_promedio_min": 0, 
                     "tiempo_sistema_seg": 0, 
                     "tasa_automatizacion_pct": 0, 
-                    "volumen_ocr_pags": "0"
+                    "volumen_ocr_pags": "0",
+                    "documentos_procesados": 0,
+                    "ahorro_total_horas": 0,
+                    "expedientes_procesados": 0
                 }, 
-                "exportaciones_recientes": []
+                "exportaciones_recientes": [],
+                "por_estado": [],
+                "por_usuario": [],
+                "por_expediente": [],
+                "productividad_semanal": [],
+                "alertas": []
             }
 
         # 2. Cálculo real de la Tasa de Automatización
@@ -3770,6 +5610,64 @@ async def get_dashboard_metrics():
         tiempo_promedio_seg = stats["avg_tiempo"] or 0
         # Basado en el parámetro de 45 minutos manuales vs el procesamiento de la IA
         ahorro_min = int((2700 - tiempo_promedio_seg) / 60) if tiempo_promedio_seg < 2700 else 0
+        ahorro_total_horas = round((ahorro_min * total_expedientes) / 60, 1)
+
+        documentos_raw = conn.execute('''
+            SELECT json_resultados
+            FROM registro_expedientes
+            WHERE json_resultados IS NOT NULL
+        ''').fetchall()
+        documentos_procesados = sum(contar_documentos_resultado(r["json_resultados"]) for r in documentos_raw)
+
+        productividad_raw = conn.execute('''
+            SELECT fecha_analisis, tiempo_procesamiento_seg, paginas_ocr, json_resultados
+            FROM registro_expedientes
+            WHERE fecha_analisis IS NOT NULL
+            ORDER BY fecha_analisis ASC
+        ''').fetchall()
+        semanas = {}
+        for r in productividad_raw:
+            fecha_raw = r["fecha_analisis"]
+            if isinstance(fecha_raw, datetime):
+                fecha_dt = fecha_raw
+            else:
+                try:
+                    fecha_dt = datetime.fromisoformat(str(fecha_raw).replace("Z", "").split(".")[0])
+                except Exception:
+                    continue
+            inicio_semana = (fecha_dt.date() - timedelta(days=fecha_dt.weekday()))
+            clave = inicio_semana.isoformat()
+            if clave not in semanas:
+                semanas[clave] = {
+                    "semana": clave,
+                    "label": inicio_semana.strftime("%d/%m"),
+                    "expedientes": 0,
+                    "documentos": 0,
+                    "paginas": 0,
+                    "tiempo_total_seg": 0.0,
+                    "ahorro_min": 0
+                }
+            tiempo_seg = float(r["tiempo_procesamiento_seg"] or 0)
+            ahorro_item = int((2700 - tiempo_seg) / 60) if tiempo_seg < 2700 else 0
+            semanas[clave]["expedientes"] += 1
+            semanas[clave]["documentos"] += contar_documentos_resultado(r["json_resultados"])
+            semanas[clave]["paginas"] += int(r["paginas_ocr"] or 0)
+            semanas[clave]["tiempo_total_seg"] += tiempo_seg
+            semanas[clave]["ahorro_min"] += ahorro_item
+
+        productividad_semanal = []
+        for item in sorted(semanas.values(), key=lambda x: x["semana"])[-8:]:
+            expedientes_semana = item["expedientes"] or 1
+            productividad_semanal.append({
+                "semana": item["semana"],
+                "label": item["label"],
+                "expedientes": item["expedientes"],
+                "documentos": item["documentos"],
+                "paginas": item["paginas"],
+                "tiempo_promedio_seg": round(item["tiempo_total_seg"] / expedientes_semana, 1),
+                "ahorro_min": item["ahorro_min"],
+                "ahorro_horas": round(item["ahorro_min"] / 60, 1)
+            })
         
         # 4. Historial de procesamiento para la tabla
         ultimos = conn.execute('''
@@ -3788,24 +5686,139 @@ async def get_dashboard_metrics():
                 "tamano": f"{reg['paginas_ocr']} págs"
             })
 
+        por_estado_raw = conn.execute('''
+            SELECT
+                CASE
+                    WHEN json_resultados IS NULL THEN 'Pendiente'
+                    WHEN UPPER(COALESCE(estado_auditoria, '')) LIKE '%BRECHA%' THEN 'Con alerta financiera'
+                    WHEN UPPER(COALESCE(riesgo_capacidad, '')) LIKE '%ALTO%' THEN 'Riesgo alto'
+                    ELSE 'Completado'
+                END AS estado,
+                COUNT(*) AS total,
+                AVG(tiempo_procesamiento_seg) AS tiempo_promedio,
+                AVG(ocr_precision) AS ocr_promedio
+            FROM registro_expedientes
+            GROUP BY 1
+            ORDER BY total DESC
+        ''').fetchall()
+        por_estado = [{
+            "estado": r["estado"],
+            "total": r["total"] or 0,
+            "tiempo_promedio": round(float(r["tiempo_promedio"] or 0), 1),
+            "ocr_promedio": round(float(r["ocr_promedio"] or 0), 1)
+        } for r in por_estado_raw]
+
+        por_usuario_raw = conn.execute('''
+            SELECT usuario, rol, COUNT(*) AS total
+            FROM (
+                SELECT asignado_juez AS usuario, 'Juez' AS rol FROM registro_expedientes WHERE asignado_juez IS NOT NULL AND asignado_juez <> ''
+                UNION ALL
+                SELECT asignado_secretario AS usuario, 'Secretario' AS rol FROM registro_expedientes WHERE asignado_secretario IS NOT NULL AND asignado_secretario <> ''
+                UNION ALL
+                SELECT asignado_asistente AS usuario, 'Asistente' AS rol FROM registro_expedientes WHERE asignado_asistente IS NOT NULL AND asignado_asistente <> ''
+                UNION ALL
+                SELECT asignado_mesapartes AS usuario, 'Mesa de Partes' AS rol FROM registro_expedientes WHERE asignado_mesapartes IS NOT NULL AND asignado_mesapartes <> ''
+                UNION ALL
+                SELECT asignado_liquidador AS usuario, 'Liquidador' AS rol FROM registro_expedientes WHERE asignado_liquidador IS NOT NULL AND asignado_liquidador <> ''
+            ) asignaciones
+            GROUP BY usuario, rol
+            ORDER BY total DESC, usuario ASC
+            LIMIT 20
+        ''').fetchall()
+        por_usuario = [{
+            "usuario": r["usuario"],
+            "rol": r["rol"],
+            "total": r["total"] or 0
+        } for r in por_usuario_raw]
+
+        por_expediente_raw = conn.execute('''
+            SELECT
+                id, numero_expediente, fecha_analisis, demandante, demandado,
+                monto_petitorio, estado_auditoria, riesgo_capacidad,
+                tiempo_procesamiento_seg, paginas_ocr, bert_score, f1_ner,
+                ocr_precision, json_resultados,
+                CASE WHEN json_resultados IS NULL THEN 'Pendiente' ELSE 'Completado' END AS estado
+            FROM registro_expedientes
+            ORDER BY id DESC
+            LIMIT 100
+        ''').fetchall()
+        por_expediente = []
+        alertas = []
+        for r in por_expediente_raw:
+            estado_aud = r["estado_auditoria"] or "No evaluado"
+            riesgo = r["riesgo_capacidad"] or "No evaluado"
+            ocr = r["ocr_precision"]
+            bert = r["bert_score"]
+            alerta = None
+            if "BRECHA" in str(estado_aud).upper():
+                alerta = "Brecha financiera"
+            elif "ALTO" in str(riesgo).upper():
+                alerta = "Riesgo de capacidad alto"
+            elif ocr is not None and float(ocr) < 85:
+                alerta = "OCR bajo"
+            elif bert is not None and float(bert) < 0.70:
+                alerta = "BERTScore bajo"
+
+            item = {
+                "id": r["id"],
+                "numero_expediente": r["numero_expediente"],
+                "fecha": r["fecha_analisis"],
+                "caratula": f"{r['demandante']} c/ {r['demandado']}",
+                "estado": r["estado"],
+                "estado_auditoria": estado_aud,
+                "riesgo_capacidad": riesgo,
+                "monto_petitorio": monto_seguro(r["monto_petitorio"]),
+                "tiempo_seg": round(r["tiempo_procesamiento_seg"] or 0, 1),
+                "paginas_ocr": r["paginas_ocr"] or 0,
+                "documentos_procesados": contar_documentos_resultado(r["json_resultados"]),
+                "bert_score": round(float(bert), 2) if bert is not None else None,
+                "f1_ner": round(float(r["f1_ner"]), 2) if r["f1_ner"] is not None else None,
+                "ocr_precision": round(float(ocr), 1) if ocr is not None else None,
+                "alerta": alerta
+            }
+            por_expediente.append(item)
+            if alerta and len(alertas) < 8:
+                alertas.append({
+                    "expediente": r["numero_expediente"],
+                    "tipo": alerta,
+                    "detalle": f"{estado_aud}; {riesgo}"
+                })
+
         return {
             "kpis": {
                 "ahorro_promedio_min": ahorro_min,
                 "tiempo_sistema_seg": round(tiempo_promedio_seg, 1),
                 "tasa_automatizacion_pct": tasa_auto,
-                "volumen_ocr_pags": f"{stats['total_pags']}"
+                "volumen_ocr_pags": f"{stats['total_pags'] or 0}",
+                "documentos_procesados": documentos_procesados,
+                "ahorro_total_horas": ahorro_total_horas,
+                "expedientes_procesados": total_expedientes
             },
-            "exportaciones_recientes": exportaciones
+            "exportaciones_recientes": exportaciones,
+            "por_estado": por_estado,
+            "por_usuario": por_usuario,
+            "por_expediente": por_expediente,
+            "productividad_semanal": productividad_semanal,
+            "alertas": alertas
         }
     finally:
         conn.close()
 
 @app.get("/api/v1/reports/export-csv")
-async def export_metadata_csv():
+async def export_metadata_csv(request: Request):
     """
     Genera un archivo CSV exportando todos los registros reales de la BD.
     """
     conn = get_db_connection()
+    registrar_evento_auditoria(
+        conn,
+        request,
+        "EXPORTACION",
+        expediente="-",
+        detalle="descarga CSV de reportes de gestion",
+        severidad="INFO"
+    )
+    conn.commit()
     registros = conn.execute("SELECT * FROM registro_expedientes").fetchall()
     conn.close()
     
@@ -3852,13 +5865,22 @@ async def get_security_metrics():
         logs_raw = conn.execute("SELECT * FROM log_seguridad ORDER BY id DESC LIMIT 100").fetchall()
         
         # Fuga de Datos: Contamos incidentes críticos en los logs
-        incidentes = conn.execute("SELECT COUNT(*) FROM log_seguridad WHERE accion_registrada LIKE '%bloqueada%'").fetchone()[0]
+        incidentes = conn.execute("""
+            SELECT COUNT(*) FROM log_seguridad
+            WHERE accion_registrada ILIKE '%CRITICO%'
+               OR accion_registrada ILIKE '%RECHAZO_ROL%'
+               OR accion_registrada ILIKE '%ANOMALIA%'
+               OR accion_registrada ILIKE '%LOGIN_RECHAZADO%'
+        """).fetchone()[0]
 
         logs = []
         for row in logs_raw:
             item = dict(row)
             item["accion"] = item.get("accion_registrada")
             item["ip"] = item.get("ip_origen")
+            accion_upper = str(item.get("accion_registrada") or "").upper()
+            item["severidad"] = "CRITICO" if "CRITICO" in accion_upper else "ADVERTENCIA" if "ADVERTENCIA" in accion_upper else "INFO"
+            item["tipo_evento"] = accion_upper.split("|")[1].strip().split(":")[0] if "|" in accion_upper else "GENERAL"
             logs.append(item)
 
         return {
@@ -3873,6 +5895,92 @@ async def get_security_metrics():
                 "primera_fecha":      stats["primera_fecha"] or None
             },
             "logs": logs
+        }
+    finally:
+        conn.close()
+
+@app.get("/api/v1/notifications/live")
+async def get_live_notifications(username: str = "", rol: str = "", since_id: int = 0, limit: int = 8):
+    conn = get_db_connection()
+    try:
+        username = (username or "").strip()
+        rol_norm = (rol or "").strip().lower()
+        limit = max(1, min(int(limit or 8), 25))
+
+        columnas_roles = {
+            "juez": "asignado_juez",
+            "secretario": "asignado_secretario",
+            "asistente": "asignado_asistente",
+            "mesapartes": "asignado_mesapartes",
+            "liquidador": "asignado_liquidador"
+        }
+
+        where_sql = "1=1"
+        params = []
+        if rol_norm != "admin":
+            columna = columnas_roles.get(rol_norm)
+            if columna and username:
+                where_sql = f"""
+                    (
+                        l.usuario = %s
+                        OR l.expediente = '-'
+                        OR l.accion_registrada ILIKE '%%CRITICO%%'
+                        OR l.accion_registrada ILIKE '%%RECHAZO_ROL%%'
+                        OR EXISTS (
+                            SELECT 1
+                            FROM registro_expedientes r
+                            WHERE r.numero_expediente = l.expediente
+                              AND r.{columna} = %s
+                        )
+                    )
+                """
+                params = [username, username]
+            elif username:
+                where_sql = """
+                    (
+                        l.usuario = %s
+                        OR l.accion_registrada ILIKE '%%CRITICO%%'
+                        OR l.accion_registrada ILIKE '%%RECHAZO_ROL%%'
+                    )
+                """
+                params = [username]
+            else:
+                where_sql = """
+                    (
+                        l.accion_registrada ILIKE '%%CRITICO%%'
+                        OR l.accion_registrada ILIKE '%%RECHAZO_ROL%%'
+                    )
+                """
+
+        logs_raw = conn.execute(f"""
+            SELECT l.id, l.timestamp, l.usuario, l.accion_registrada, l.expediente, l.ip_origen
+            FROM log_seguridad l
+            WHERE {where_sql}
+            ORDER BY l.id DESC
+            LIMIT %s
+        """, tuple(params + [limit])).fetchall()
+
+        unread_params = list(params)
+        unread_sql = where_sql
+        if since_id and since_id > 0:
+            unread_sql = f"({where_sql}) AND l.id > %s"
+            unread_params.append(since_id)
+
+        unread_count = conn.execute(f"""
+            SELECT COUNT(*) as total
+            FROM log_seguridad l
+            WHERE {unread_sql}
+        """, tuple(unread_params)).fetchone()["total"]
+
+        notificaciones = [normalizar_notificacion_log(dict(row)) for row in logs_raw]
+        latest_id = max([n.get("id") or 0 for n in notificaciones], default=since_id or 0)
+
+        return {
+            "status": "success",
+            "poll_interval_ms": 15000,
+            "latest_id": latest_id,
+            "unread_count": unread_count or 0,
+            "notifications": notificaciones
         }
     finally:
         conn.close()
@@ -4042,12 +6150,21 @@ async def get_f1_details():
 
 
 @app.get("/api/v1/security/export-csv")
-async def export_security_csv():
+async def export_security_csv(request: Request):
     """
     Genera el archivo CSV para la auditoría de seguridad.
     """
     conn = get_db_connection()
     try:
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "EXPORTACION",
+            expediente="-",
+            detalle="descarga CSV de auditoria de seguridad",
+            severidad="ADVERTENCIA"
+        )
+        conn.commit()
         registros = conn.execute("SELECT * FROM log_seguridad ORDER BY id DESC").fetchall()
         
         stream = io.StringIO()
@@ -4071,13 +6188,24 @@ async def buscar_jurisprudencia_semantica(req: JurisprudenciaRequest):
     if not req.texto_expediente:
         raise HTTPException(status_code=400, detail="Falta el texto del expediente.")
 
-    # 1. Convertimos el caso de consulta en un vector
-    vector_consulta = generar_embedding(req.texto_expediente)
+    perfil_consulta = _perfil_jurisprudencia_texto(req.texto_expediente)
+    texto_consulta_semantica = (
+        f"Materia: {perfil_consulta.get('materia')}. "
+        f"Petitorio: {formato_monto(perfil_consulta.get('petitorio'))}. "
+        f"Riesgo o contexto: {perfil_consulta.get('riesgo')}. "
+        f"Hechos: {perfil_consulta.get('resumen')}"
+    )
+    vector_consulta = generar_embedding(texto_consulta_semantica)
     
     if not vector_consulta:
-        return {"status": "error", "resultados": []}
+        return {
+            "status": "error",
+            "resultados": [],
+            "diagnostico": "No se pudo generar embedding. Verifica que Ollama este activo y que el modelo nomic-embed-text este disponible."
+        }
 
     vector_pg = str(vector_consulta)
+    numero_actual = (req.numero_expediente or "").strip()
     conn = get_db_connection()
     
     try:
@@ -4091,9 +6219,10 @@ async def buscar_jurisprudencia_semantica(req: JurisprudenciaRequest):
                    ROUND(((1 - (embedding <=> %s::vector)) * 100)::numeric, 2) AS porcentaje_similitud
             FROM registro_expedientes 
             WHERE embedding IS NOT NULL
+              AND (%s = '' OR numero_expediente <> %s)
             ORDER BY embedding <=> %s::vector
-            LIMIT 3
-        ''', (vector_pg, vector_pg))
+            LIMIT 5
+        ''', (vector_pg, numero_actual, numero_actual, vector_pg))
         
         filas = cursor.fetchall()
         casos_reales = []
@@ -4101,29 +6230,54 @@ async def buscar_jurisprudencia_semantica(req: JurisprudenciaRequest):
         for fila in filas:
             resumen_guardado = "Sin resumen disponible."
             decision_guardada = "Sin detalles registrados."
+            obj_json = {}
             
             if fila["json_resultados"]:
-                obj_json = fila["json_resultados"] if isinstance(fila["json_resultados"], dict) else json.loads(fila["json_resultados"])
+                obj_json = fila["json_resultados"] if isinstance(fila["json_resultados"], dict) else cargar_json_bd(fila["json_resultados"], {})
                 resumen_guardado = obj_json.get("sintesis_rag", {}).get("tecnico", resumen_guardado)
                 decision_guardada = obj_json.get("postura_defensa", {}).get("tecnico", decision_guardada)
 
             fragmento_hechos = resumen_guardado[:160] + "..." if len(resumen_guardado) > 160 else resumen_guardado
             fragmento_decision = decision_guardada[:140] + "..." if len(decision_guardada) > 140 else decision_guardada
+            similitud = float(fila["porcentaje_similitud"] or 0)
+            perfil_caso = _perfil_jurisprudencia_json(obj_json, fila)
+            factores, explicacion, nivel = _explicar_similitud_jurisprudencia(perfil_consulta, perfil_caso, similitud)
+            puntos_texto = []
+            for punto in (perfil_caso.get("puntos") or [])[:3]:
+                if isinstance(punto, dict):
+                    puntos_texto.append(_texto_corto(punto.get("descripcion") or punto.get("punto") or json.dumps(punto, ensure_ascii=False), 120))
+                else:
+                    puntos_texto.append(_texto_corto(str(punto), 120))
 
             casos_reales.append({
                 "expediente": f"EXP. {fila['numero_expediente']}",
-                "similitud": f"{fila['porcentaje_similitud']}%", # Porcentaje real calculado por IA
+                "numero_expediente": fila["numero_expediente"],
+                "similitud": f"{similitud:.2f}%",
+                "score_semantico": round(similitud / 100, 4),
+                "nivel_relevancia": nivel,
+                "caracter_jurisprudencial": "Referencial; validar obligatoriedad normativa antes de citar como vinculante",
+                "explicacion_similitud": explicacion,
+                "factores_similitud": factores,
                 "juzgado": "Juzgado de Paz Letrado - Callao",
                 "fecha": fila["fecha_analisis"].strftime("%Y-%m-%d") if fila["fecha_analisis"] else "Reciente",
                 "hechos": f"Demandante: {fila['demandante']}. Demandado: {fila['demandado']}. {fragmento_hechos}",
                 "decision": f"Petitorio: {formato_monto(fila['monto_petitorio'])}. {fragmento_decision}",
-                "fundamento": f"Riesgo de Capacidad: {fila['riesgo_capacidad']}."
+                "fundamento": f"Riesgo de Capacidad: {fila['riesgo_capacidad']}.",
+                "puntos_comparables": puntos_texto
             })
 
         if not casos_reales:
             casos_reales = [{"expediente": "SISTEMA SIN HISTORIAL VECTORIAL", "similitud": "0%", "hechos": "Se necesita guardar al menos un expediente con análisis RAG para tener jurisprudencia base."}]
 
-        return {"status": "success", "resultados": casos_reales}
+        return {
+            "status": "success",
+            "resultados": casos_reales,
+            "perfil_consulta": {
+                "materia": perfil_consulta.get("materia"),
+                "petitorio": formato_monto(perfil_consulta.get("petitorio")),
+                "riesgo": perfil_consulta.get("riesgo")
+            }
+        }
         
     except Exception as e:
         print(f"Error en búsqueda de jurisprudencia (Postgres): {e}")
@@ -4132,7 +6286,7 @@ async def buscar_jurisprudencia_semantica(req: JurisprudenciaRequest):
         conn.close()
 
 @app.get("/api/v1/expedientes")
-async def obtener_lista_expedientes(username: str = None, rol: str = None):
+async def obtener_lista_expedientes(request: Request, username: str = None, rol: str = None):
     """
     Obtiene los expedientes de la base de datos aplicando un filtro estricto:
     - El admin ve la bandeja global completa.
@@ -4141,7 +6295,23 @@ async def obtener_lista_expedientes(username: str = None, rol: str = None):
     conn = get_db_connection()
     try:
         # 1. DEFINICIÓN DE LA CONSULTA SEGÚN EL ROL DEL USUARIO CONECTADO
-        if rol == "admin" or not rol or not username:
+        usuario_token = obtener_usuario_opcional(request)
+        username = username or usuario_token.get("username") or usuario_token.get("sub")
+        rol = rol or usuario_token.get("rol")
+        if not username or not rol:
+            registrar_evento_auditoria(
+                conn,
+                request,
+                "RECHAZO_ROL",
+                usuario="Invitado",
+                expediente="-",
+                detalle="consulta de bandeja sin credenciales validas",
+                severidad="CRITICO"
+            )
+            conn.commit()
+            raise HTTPException(status_code=403, detail="Acceso rechazado por rol.")
+
+        if rol == "admin":
             # El Administrador de Módulo (o consultas sin credenciales) ve todo
             query = "SELECT * FROM registro_expedientes ORDER BY id DESC"
             parametros = ()
@@ -4162,6 +6332,15 @@ async def obtener_lista_expedientes(username: str = None, rol: str = None):
                 parametros = (username,)
             else:
                 # Red de seguridad: si viene un rol corrupto o desconocido, retorna una lista vacía
+                registrar_evento_auditoria(
+                    conn,
+                    request,
+                    "RECHAZO_ROL",
+                    usuario=username,
+                    expediente="-",
+                    detalle=f"rol desconocido en bandeja: {rol}",
+                    severidad="CRITICO"
+                )
                 query = "SELECT * FROM registro_expedientes WHERE 1=0"
                 parametros = ()
 
@@ -4177,12 +6356,24 @@ async def obtener_lista_expedientes(username: str = None, rol: str = None):
             lista_expedientes.append({
                 "id": fila["id"],
                 "numero_expediente": f"{fila['numero_expediente']}",
+                "codigo_seguimiento": generar_codigo_seguimiento(fila["numero_expediente"]),
                 "caratula": caratula.upper(),
                 "tipo": "Proceso de Alimentos",
                 "estado": "Completado" if tiene_ia else "Pendiente",
+                "fecha_analisis": fila["fecha_analisis"],
+                "estado_auditoria": fila.get("estado_auditoria") or "No evaluado",
+                "riesgo_capacidad": fila.get("riesgo_capacidad") or "No evaluado",
+                "monto_petitorio": monto_seguro(fila.get("monto_petitorio")),
+                "paginas_ocr": fila.get("paginas_ocr") or 0,
+                "asignado_juez": fila.get("asignado_juez") or "",
+                "asignado_secretario": fila.get("asignado_secretario") or "",
+                "asignado_asistente": fila.get("asignado_asistente") or "",
+                "asignado_mesapartes": fila.get("asignado_mesapartes") or "",
+                "asignado_liquidador": fila.get("asignado_liquidador") or "",
                 "vencimiento": f"Analizado el {fecha_corta}" if tiene_ia else "Pendiente de análisis"
             })
 
+        conn.commit()
         return {"status": "success", "data": lista_expedientes}
         
     except Exception as e:
@@ -4192,7 +6383,7 @@ async def obtener_lista_expedientes(username: str = None, rol: str = None):
         conn.close()
 
 @app.get("/api/v1/expedientes/{numero}")
-async def obtener_detalle_expediente(numero: str):
+async def obtener_detalle_expediente(numero: str, request: Request):
     """
     Recupera de forma individual toda la información de un expediente, 
     incluyendo sus asignaciones vigentes y el análisis cognitivo estructurado 
@@ -4200,17 +6391,21 @@ async def obtener_detalle_expediente(numero: str):
     """
     conn = get_db_connection()
     try:
-        fila = conn.execute("SELECT * FROM registro_expedientes WHERE numero_expediente = %s", (numero,)).fetchone()
-        if not fila:
-            raise HTTPException(status_code=404, detail="Expediente no encontrado")
+        fila = verificar_acceso_expediente_o_rechazar(conn, request, numero, "detalle de expediente")
             
         # Postgres puede devolver json_resultados como dict; SQLite lo devolvía como texto.
         resultados_dict = normalizar_sujetos_procesales_json(cargar_json_bd(fila["json_resultados"]))
+        if isinstance(resultados_dict, dict) and "calculadora_economica" not in resultados_dict:
+            resultados_dict["calculadora_economica"] = modulo_calculadora_economica(
+                resultados_dict.get("revision_financiera", {}),
+                resultados_dict.get("capacidad_cargas", {})
+            )
         
         return {
             "status": "success",
             "data": {
                 "numero_expediente": fila["numero_expediente"],
+                "codigo_seguimiento": generar_codigo_seguimiento(fila["numero_expediente"]),
                 "demandante": fila["demandante"],
                 "demandado": fila["demandado"],
                 "tiene_analisis": fila["json_resultados"] is not None,
@@ -4233,22 +6428,80 @@ async def obtener_detalle_expediente(numero: str):
         conn.close()
 
 @app.post("/api/v1/login")
-async def login_sistema(req: LoginRequest):
+async def login_sistema(req: LoginRequest, request: Request):
     """
     Verifica las credenciales del usuario y retorna sus datos de perfil y rol.
     """
     conn = get_db_connection()
-    cur = conn.cursor()
     try:
+        asegurar_columnas_seguridad_usuarios()
         usuario = conn.execute('''
-            SELECT username, nombre, cargo, rol 
+            SELECT username, password, nombre, cargo, rol,
+                   COALESCE(failed_login_attempts, 0) AS failed_login_attempts,
+                   locked_until
             FROM usuarios 
-            WHERE username = %s AND password = %s
-        ''', (req.username, req.password)).fetchone()
+            WHERE username = %s
+        ''', (req.username,)).fetchone()
         
-        cur.close()
-        if not usuario:
+        now = datetime.now()
+        if usuario and usuario.get("locked_until") and usuario["locked_until"] > now:
+            registrar_evento_auditoria(
+                conn,
+                request,
+                "LOGIN_BLOQUEADO",
+                usuario=req.username,
+                expediente="-",
+                detalle=f"cuenta bloqueada hasta {usuario['locked_until'].strftime('%Y-%m-%d %H:%M:%S')}",
+                severidad="CRITICO"
+            )
+            conn.commit()
+            raise HTTPException(
+                status_code=423,
+                detail=f"Cuenta bloqueada temporalmente. Intenta nuevamente despues de {usuario['locked_until'].strftime('%H:%M:%S')}."
+            )
+
+        password_ok = bool(usuario and verificar_password(req.password, usuario.get("password")))
+        if not password_ok:
+            intentos = (usuario.get("failed_login_attempts", 0) + 1) if usuario else 1
+            tipo = "LOGIN_RECHAZADO"
+            detalle = "credenciales invalidas"
+            severidad = "ADVERTENCIA"
+            if usuario:
+                locked_until = None
+                if intentos >= LOGIN_MAX_FAILED_ATTEMPTS:
+                    locked_until = now + timedelta(minutes=LOGIN_LOCK_MINUTES)
+                    tipo = "LOGIN_BLOQUEADO"
+                    detalle = f"cuenta bloqueada por {intentos} intentos fallidos"
+                    severidad = "CRITICO"
+                conn.execute('''
+                    UPDATE usuarios
+                    SET failed_login_attempts = %s,
+                        last_failed_login = %s,
+                        locked_until = %s
+                    WHERE username = %s
+                ''', (intentos, now, locked_until, req.username))
+            registrar_evento_auditoria(
+                conn,
+                request,
+                tipo,
+                usuario=req.username,
+                expediente="-",
+                detalle=detalle,
+                severidad=severidad
+            )
+            conn.commit()
+            if usuario and intentos >= LOGIN_MAX_FAILED_ATTEMPTS:
+                raise HTTPException(status_code=423, detail="Cuenta bloqueada temporalmente por multiples intentos fallidos.")
             raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos.")
+
+        updates = ["failed_login_attempts = 0", "locked_until = NULL", "last_failed_login = NULL"]
+        params = []
+        if not str(usuario.get("password") or "").startswith("pbkdf2_sha256$"):
+            updates.append("password = %s")
+            updates.append("password_changed_at = COALESCE(password_changed_at, %s)")
+            params.extend([hash_password(req.password), now])
+        params.append(req.username)
+        conn.execute(f"UPDATE usuarios SET {', '.join(updates)} WHERE username = %s", tuple(params))
 
         usuario_data = {
             "username": usuario["username"],
@@ -4263,6 +6516,16 @@ async def login_sistema(req: LoginRequest):
             "cargo": usuario_data["cargo"],
             "rol": usuario_data["rol"]
         })
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "LOGIN_EXITOSO",
+            usuario=usuario_data["username"],
+            expediente="-",
+            detalle=f"rol={usuario_data['rol']}",
+            severidad="INFO"
+        )
+        conn.commit()
 
         return {
             "status": "success",
@@ -4281,12 +6544,176 @@ async def obtener_sesion_actual(request: Request):
         "data": obtener_usuario_desde_token(request)
     }
 
+
+@app.post("/api/v1/auth/change-password")
+async def cambiar_password(payload: ChangePasswordRequest, request: Request):
+    usuario_token = obtener_usuario_desde_token(request)
+    username = usuario_token.get("username") or usuario_token.get("sub")
+    validar_password_segura(payload.password_nueva)
+    if payload.password_actual == payload.password_nueva:
+        raise HTTPException(status_code=400, detail="La nueva contrasena debe ser distinta a la actual.")
+
+    conn = get_db_connection()
+    try:
+        asegurar_columnas_seguridad_usuarios()
+        usuario = conn.execute("SELECT username, password FROM usuarios WHERE username = %s", (username,)).fetchone()
+        if not usuario or not verificar_password(payload.password_actual, usuario.get("password")):
+            registrar_evento_auditoria(
+                conn,
+                request,
+                "CAMBIO_PASSWORD_RECHAZADO",
+                usuario=username,
+                expediente="-",
+                detalle="password actual incorrecta",
+                severidad="ADVERTENCIA"
+            )
+            conn.commit()
+            raise HTTPException(status_code=401, detail="La contrasena actual no es correcta.")
+
+        conn.execute('''
+            UPDATE usuarios
+            SET password = %s,
+                password_changed_at = %s,
+                failed_login_attempts = 0,
+                locked_until = NULL,
+                reset_token_hash = NULL,
+                reset_token_expires_at = NULL
+            WHERE username = %s
+        ''', (hash_password(payload.password_nueva), datetime.now(), username))
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "CAMBIO_PASSWORD",
+            usuario=username,
+            expediente="-",
+            detalle="password actualizada por el usuario autenticado",
+            severidad="ADVERTENCIA"
+        )
+        conn.commit()
+        return {"status": "success", "message": "Contrasena actualizada correctamente."}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/auth/password-recovery")
+async def solicitar_recuperacion_password(payload: PasswordRecoveryRequest, request: Request):
+    identificador = (payload.username_or_email or "").strip().lower()
+    conn = get_db_connection()
+    try:
+        asegurar_columnas_seguridad_usuarios()
+        usuario = conn.execute('''
+            SELECT username
+            FROM usuarios
+            WHERE lower(username) = %s
+               OR lower(username || '@sigeja.gob.pe') = %s
+        ''', (identificador, identificador)).fetchone()
+
+        response = {
+            "status": "success",
+            "message": "Si la cuenta existe, se registraron instrucciones de recuperacion para el usuario institucional."
+        }
+        if usuario:
+            token = secrets.token_urlsafe(24)
+            expires_at = datetime.now() + timedelta(minutes=PASSWORD_RESET_MINUTES)
+            conn.execute('''
+                UPDATE usuarios
+                SET reset_token_hash = %s,
+                    reset_token_expires_at = %s
+                WHERE username = %s
+            ''', (hash_token_seguridad(token), expires_at, usuario["username"]))
+            registrar_evento_auditoria(
+                conn,
+                request,
+                "RECUPERACION_PASSWORD",
+                usuario=usuario["username"],
+                expediente="-",
+                detalle=f"token de recuperacion generado; vence={expires_at.strftime('%Y-%m-%d %H:%M:%S')}",
+                severidad="ADVERTENCIA"
+            )
+            if os.getenv("SIGEJA_ENV", "dev").lower() != "production":
+                print(f"[SIGEJA DEV] Token recuperacion {usuario['username']}: {token}")
+                response["dev_reset_token"] = token
+                response["dev_username"] = usuario["username"]
+        else:
+            registrar_evento_auditoria(
+                conn,
+                request,
+                "RECUPERACION_PASSWORD",
+                usuario=identificador or "desconocido",
+                expediente="-",
+                detalle="solicitud para cuenta no confirmada",
+                severidad="ADVERTENCIA"
+            )
+        conn.commit()
+        return response
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/auth/password-reset")
+async def confirmar_recuperacion_password(payload: PasswordResetConfirmRequest, request: Request):
+    validar_password_segura(payload.password_nueva)
+    conn = get_db_connection()
+    try:
+        asegurar_columnas_seguridad_usuarios()
+        usuario = conn.execute('''
+            SELECT username, reset_token_hash, reset_token_expires_at
+            FROM usuarios
+            WHERE username = %s
+        ''', (payload.username,)).fetchone()
+        token_ok = bool(
+            usuario
+            and usuario.get("reset_token_hash")
+            and usuario.get("reset_token_expires_at")
+            and usuario["reset_token_expires_at"] >= datetime.now()
+            and hmac.compare_digest(usuario["reset_token_hash"], hash_token_seguridad(payload.reset_token))
+        )
+        if not token_ok:
+            registrar_evento_auditoria(
+                conn,
+                request,
+                "RESET_PASSWORD_RECHAZADO",
+                usuario=payload.username,
+                expediente="-",
+                detalle="token invalido o vencido",
+                severidad="CRITICO"
+            )
+            conn.commit()
+            raise HTTPException(status_code=400, detail="El codigo de recuperacion es invalido o vencio.")
+
+        conn.execute('''
+            UPDATE usuarios
+            SET password = %s,
+                password_changed_at = %s,
+                failed_login_attempts = 0,
+                locked_until = NULL,
+                reset_token_hash = NULL,
+                reset_token_expires_at = NULL
+            WHERE username = %s
+        ''', (hash_password(payload.password_nueva), datetime.now(), payload.username))
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "RESET_PASSWORD",
+            usuario=payload.username,
+            expediente="-",
+            detalle="password restablecida mediante token temporal",
+            severidad="ADVERTENCIA"
+        )
+        conn.commit()
+        return {"status": "success", "message": "Contrasena restablecida correctamente."}
+    finally:
+        conn.close()
+
+
 @app.post("/api/v1/register")
-async def registrar_usuario(req: RegisterRequest):
+async def registrar_usuario(req: RegisterRequest, request: Request):
     """
     Registra un nuevo usuario institucional en la base de datos SQLite.
     Usa el prefijo del correo electrónico institucional como 'username'.
     """
+    validar_password_segura(req.password)
+
     # Generamos el username extrayendo el prefijo del correo (ej: m.gomez de m.gomez@pj.gob.pe)
     username_generado = req.email.split('@')[0].lower()
     
@@ -4317,7 +6744,16 @@ async def registrar_usuario(req: RegisterRequest):
         conn.execute('''
             INSERT INTO usuarios (username, password, nombre, cargo, rol)
             VALUES (%s, %s, %s, %s, %s)
-        ''', (username_generado, req.password, req.nombre, cargo_formateado, rol_interno))
+        ''', (username_generado, hash_password(req.password), req.nombre, cargo_formateado, rol_interno))
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "CREACION_USUARIO",
+            usuario=username_generado,
+            expediente="-",
+            detalle=f"nuevo usuario institucional; rol={rol_interno}",
+            severidad="ADVERTENCIA"
+        )
         conn.commit()
         
         return {
@@ -4343,7 +6779,7 @@ async def listar_personal_judicial():
         conn.close()
 
 @app.post("/api/v1/asignar-expediente")
-async def ejecutar_asignacion_judicial(req: AsignacionRequest):
+async def ejecutar_asignacion_judicial(req: AsignacionRequest, request: Request):
     """Asigna un usuario a un rol específico de un expediente. Sobrescribe si ya existía uno anterior."""
     # Lista blanca para prevenir inyecciones SQL en los nombres de las columnas
     columnas_validas = ["asignado_juez", "asignado_secretario", "asignado_asistente", "asignado_mesapartes", "asignado_liquidador"]
@@ -4360,6 +6796,14 @@ async def ejecutar_asignacion_judicial(req: AsignacionRequest):
             SET {req.rol_columna} = %s 
             WHERE numero_expediente = %s
         ''', (valor_asignado, req.numero_expediente))
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "CAMBIO_ASIGNACION",
+            expediente=req.numero_expediente,
+            detalle=f"{req.rol_columna} -> {req.username_usuario or 'sin asignacion'}",
+            severidad="ADVERTENCIA"
+        )
         conn.commit()
         
         accion = f"Asignación de personal modificada en rol {req.rol_columna} a favor de {req.username_usuario}"
@@ -4371,7 +6815,7 @@ async def ejecutar_asignacion_judicial(req: AsignacionRequest):
         conn.close()
 
 @app.post("/api/v1/crear-expediente")
-async def crear_expediente_manual(req: CrearExpedienteRequest):
+async def crear_expediente_manual(req: CrearExpedienteRequest, request: Request):
     """
     Registra un nuevo expediente en la base de datos (Mesa de Partes/Admin).
     Permite opcionalmente inyectar los encargados desde su creación.
@@ -4381,6 +6825,15 @@ async def crear_expediente_manual(req: CrearExpedienteRequest):
         # Validación de duplicados
         existe = conn.execute("SELECT id FROM registro_expedientes WHERE numero_expediente = %s", (req.numero_expediente.strip(),)).fetchone()
         if existe:
+            registrar_evento_auditoria(
+                conn,
+                request,
+                "DUPLICADO_EXPEDIENTE",
+                expediente=req.numero_expediente.strip(),
+                detalle="intento de crear expediente ya registrado",
+                severidad="ADVERTENCIA"
+            )
+            conn.commit()
             raise HTTPException(status_code=400, detail=f"El expediente {req.numero_expediente} ya existe en el sistema.")
 
         conn.execute('''
@@ -4396,6 +6849,14 @@ async def crear_expediente_manual(req: CrearExpedienteRequest):
             req.asignado_mesapartes if req.asignado_mesapartes else None,
             req.asignado_liquidador if req.asignado_liquidador else None
         ))
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "CREACION_EXPEDIENTE",
+            expediente=req.numero_expediente.strip(),
+            detalle="expediente pre-registrado manualmente",
+            severidad="ADVERTENCIA"
+        )
         conn.commit()
         return {"status": "success", "message": "Expediente pre-registrado exitosamente en la base de datos."}
     except Exception as e:
@@ -4443,8 +6904,14 @@ async def eliminar_expediente(numero: str):
         conn.close()
 
 @app.get("/api/v1/expedientes/{numero}/pdfs")
-async def listar_pdfs_expediente(numero: str):
+async def listar_pdfs_expediente(numero: str, request: Request):
     """Lista todos los PDFs almacenados para un expediente."""
+    conn = get_db_connection()
+    try:
+        verificar_acceso_expediente_o_rechazar(conn, request, numero, "lista de documentos PDF")
+    finally:
+        conn.close()
+
     nombre_seguro = re.sub(r'[^a-zA-Z0-9-]', '_', numero)
     carpeta = f"pdfs_guardados/{nombre_seguro}"
     if os.path.exists(carpeta):
@@ -4456,10 +6923,110 @@ async def listar_pdfs_expediente(numero: str):
         return {"status": "success", "files": [f"{nombre_seguro}.pdf"]}
     return {"status": "success", "files": []}
 
+def _normalizar_texto_busqueda_pdf(texto: str) -> str:
+    texto = unicodedata.normalize("NFKD", str(texto or ""))
+    texto = "".join(c for c in texto if not unicodedata.combining(c))
+    texto = re.sub(r'\s+', ' ', texto).strip().lower()
+    return texto
+
+def _terminos_candidatos_evidencia(term: str) -> list:
+    base = re.sub(r'\s+', ' ', str(term or "")).strip()
+    candidatos = []
+    if base:
+        candidatos.append(base)
+    fecha = re.match(r'^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$', base)
+    if fecha:
+        meses = {
+            "01": "enero", "02": "febrero", "03": "marzo", "04": "abril",
+            "05": "mayo", "06": "junio", "07": "julio", "08": "agosto",
+            "09": "septiembre", "10": "octubre", "11": "noviembre", "12": "diciembre"
+        }
+        dia, mes, anio = fecha.groups()
+        mes_nombre = meses.get(mes.zfill(2))
+        if mes_nombre:
+            candidatos.append(f"{int(dia)} de {mes_nombre} de {anio}")
+            candidatos.append(f"{dia.zfill(2)} de {mes_nombre} de {anio}")
+    solo_numero = re.sub(r'[^\d.]', '', base)
+    if solo_numero and solo_numero not in candidatos:
+        candidatos.append(solo_numero)
+    palabras = [p for p in re.split(r'\s+', base) if len(p) >= 4]
+    if len(palabras) >= 2:
+        candidatos.append(" ".join(palabras[:4]))
+    elif palabras:
+        candidatos.append(palabras[0])
+    return list(dict.fromkeys(candidatos))
+
+@app.get("/api/v1/expedientes/{numero}/buscar-evidencia")
+async def buscar_evidencia_pdf(numero: str, request: Request, term: str):
+    """Ubica en que PDF y pagina aparece una evidencia textual."""
+    if not term or not term.strip():
+        raise HTTPException(status_code=400, detail="Termino de busqueda requerido.")
+
+    conn = get_db_connection()
+    try:
+        verificar_acceso_expediente_o_rechazar(conn, request, numero, "busqueda de evidencia documental")
+    finally:
+        conn.close()
+
+    nombre_seguro = re.sub(r'[^a-zA-Z0-9-]', '_', numero)
+    carpeta = f"pdfs_guardados/{nombre_seguro}"
+    rutas = []
+    if os.path.exists(carpeta):
+        rutas = [os.path.join(carpeta, f) for f in sorted(os.listdir(carpeta)) if f.lower().endswith(".pdf")]
+    else:
+        ruta_antigua = f"pdfs_guardados/{nombre_seguro}.pdf"
+        if os.path.exists(ruta_antigua):
+            rutas = [ruta_antigua]
+
+    if not rutas:
+        raise HTTPException(status_code=404, detail="No hay PDFs guardados para este expediente.")
+
+    candidatos = _terminos_candidatos_evidencia(term)
+    candidatos_norm = [_normalizar_texto_busqueda_pdf(c) for c in candidatos if c]
+    candidatos_compactos = [re.sub(r'[^a-z0-9]', '', c) for c in candidatos_norm if c]
+
+    for ruta in rutas:
+        try:
+            with open(ruta, "rb") as f_pdf:
+                lector = PyPDF2.PdfReader(f_pdf)
+                for idx, pagina in enumerate(lector.pages):
+                    texto_pagina = _extraer_texto_pypdf2_pagina(pagina)
+                    texto_norm = _normalizar_texto_busqueda_pdf(texto_pagina)
+                    texto_compacto = re.sub(r'[^a-z0-9]', '', texto_norm)
+                    encontrado = next((c for c in candidatos_norm if c and c in texto_norm), None)
+                    if not encontrado:
+                        encontrado = next((c for c in candidatos_compactos if c and c in texto_compacto), None)
+                    if encontrado:
+                        return {
+                            "status": "success",
+                            "found": True,
+                            "archivo": os.path.basename(ruta),
+                            "pagina": idx + 1,
+                            "search_term": candidatos[0],
+                            "metodo": "texto_nativo"
+                        }
+        except Exception as e:
+            print(f"No se pudo buscar texto nativo en {ruta}: {e}")
+
+    return {
+        "status": "success",
+        "found": False,
+        "archivo": os.path.basename(rutas[0]),
+        "pagina": 1,
+        "search_term": candidatos[0],
+        "metodo": "no_encontrado"
+    }
+
 @app.get("/api/v1/expedientes/{numero}/pdf/{filename}")
-async def obtener_pdf_especifico(numero: str, filename: str):
+async def obtener_pdf_especifico(numero: str, filename: str, request: Request):
     """Retorna un PDF específico de un expediente por nombre de archivo."""
     from fastapi.responses import FileResponse
+    conn = get_db_connection()
+    try:
+        verificar_acceso_expediente_o_rechazar(conn, request, numero, "documento PDF")
+    finally:
+        conn.close()
+
     nombre_seguro = re.sub(r'[^a-zA-Z0-9-]', '_', numero)
     nombre_archivo_seguro = re.sub(r'[^a-zA-Z0-9._-]', '_', filename)
     ruta = f"pdfs_guardados/{nombre_seguro}/{nombre_archivo_seguro}"
@@ -4468,9 +7035,15 @@ async def obtener_pdf_especifico(numero: str, filename: str):
     return FileResponse(ruta, media_type="application/pdf")
 
 @app.get("/api/v1/expedientes/{numero}/pdf")
-async def obtener_pdf_expediente(numero: str):
+async def obtener_pdf_expediente(numero: str, request: Request):
     """Retorna el primer PDF del expediente (compatibilidad con versión anterior)."""
     from fastapi.responses import FileResponse
+    conn = get_db_connection()
+    try:
+        verificar_acceso_expediente_o_rechazar(conn, request, numero, "documento PDF")
+    finally:
+        conn.close()
+
     nombre_seguro = re.sub(r'[^a-zA-Z0-9-]', '_', numero)
     # Intenta formato nuevo (carpeta)
     carpeta = f"pdfs_guardados/{nombre_seguro}"
@@ -4492,7 +7065,9 @@ async def debug_extraer_texto(files: List[UploadFile] = File(...)):
     """
     resultados = []
     for upload_file in files:
+        validar_nombre_y_tamano_pdf(upload_file)
         contenido = await upload_file.read()
+        validar_nombre_y_tamano_pdf(upload_file, len(contenido))
         texto, _, _ = modulo_ocr_tesseract(contenido)
         # Encontrar todos los 8-digit numbers con contexto
         dnis_debug = []

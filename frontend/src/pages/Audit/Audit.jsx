@@ -4,8 +4,16 @@ import {
   Bell, ChevronDown, Download, BrainCircuit, Activity, Fingerprint, ShieldCheck, Loader2, X, ChevronRight
 } from 'lucide-react';
 import Pagination from '../../components/common/Pagination';
+import LiveNotifications from '../../components/common/LiveNotifications';
 
 const LOGS_POR_PAGINA = 8;
+
+const getLogBadgeClass = (severidad = 'INFO') => {
+  const value = String(severidad || 'INFO').toUpperCase();
+  if (value === 'CRITICO') return 'bg-rose-50 text-rose-700 border-rose-200';
+  if (value === 'ADVERTENCIA') return 'bg-amber-50 text-amber-700 border-amber-200';
+  return 'bg-blue-50 text-blue-700 border-blue-200';
+};
 
 const Audit = () => {
   const navigate = useNavigate();
@@ -120,24 +128,17 @@ const Audit = () => {
     <div className="flex-1 bg-[#f8fafc] flex flex-col min-h-screen">
       
       {/* Header Superior */}
-      <header className="bg-white border-b border-slate-200 w-full h-[93px] px-8 sticky top-0 z-10 flex items-center shrink-0">
+      <header className="bg-white border-b border-slate-200 w-full h-[76px] xl:h-[93px] px-4 xl:px-8 sticky top-0 z-10 flex items-center shrink-0">
         <div className="flex justify-between items-center w-full">
           <h2 className="text-xl font-bold text-slate-800 tracking-tight">Calidad y Auditoría</h2>
           
-          <div className="flex items-center gap-4">
-            <div className="flex items-center bg-slate-100 border border-slate-200 rounded-lg px-4 py-1.5 gap-3 cursor-pointer hover:bg-slate-200 transition-all">
-               <Bell className="w-5 h-5 text-slate-600" />
-               <div className="text-[10px] leading-tight text-left hidden md:block">
-                 <span className="font-bold block text-slate-700">Notificaciones</span>
-                 <span className="text-slate-500">Tu buzón de mensajes</span>
-               </div>
-               <ChevronDown className="w-4 h-4 ml-1 text-slate-400" />
-            </div>
+          <div className="flex items-center gap-2 xl:gap-4">
+            <LiveNotifications usuarioActivo={usuarioActivo} />
 
-            <div onClick={() => navigate('/profile')} className="flex items-center bg-[#2546b0] text-white rounded-lg px-4 py-1.5 gap-3 cursor-pointer hover:bg-blue-800 transition-all shadow-sm">
+            <div onClick={() => navigate('/profile')} className="flex items-center bg-[#2546b0] text-white rounded-lg px-3 xl:px-4 py-1.5 gap-2 xl:gap-3 cursor-pointer hover:bg-blue-800 transition-all shadow-sm max-w-[220px] xl:max-w-none">
                <div className="w-8 h-8 bg-blue-400 rounded flex items-center justify-center font-bold text-xs shadow-inner">{usuarioActivo.nombre?.split(' ').slice(0, 2).map(n => n[0]).join('').toUpperCase() || 'US'}</div>
-               <div className="text-[10px] leading-tight text-left">
-                 <span className="font-bold block tracking-wide">{usuarioActivo.nombre}</span>
+               <div className="text-[10px] leading-tight text-left min-w-0">
+                 <span className="font-bold block tracking-wide truncate max-w-[130px] xl:max-w-none">{usuarioActivo.nombre}</span>
                  <span className="opacity-80">{usuarioActivo.cargo}</span>
                </div>
                <ChevronDown className="w-4 h-4 ml-1 opacity-60" />
@@ -147,11 +148,11 @@ const Audit = () => {
       </header>
 
       {/* Contenido Principal */}
-      <main className="p-8 w-full max-w-[1600px] mx-auto overflow-y-auto custom-scrollbar">
+      <main className="p-4 xl:p-8 w-full max-w-[1600px] mx-auto overflow-y-auto custom-scrollbar">
         
         {/* Título de Sección y Botón Exportar */}
-        <div className="flex justify-between items-center mb-6">
-          <h3 className="text-2xl font-bold text-slate-800 tracking-tight">
+        <div className="flex justify-between items-center gap-4 mb-6">
+          <h3 className="text-xl xl:text-2xl font-bold text-slate-800 tracking-tight">
             Metricas de validación y monitorización de seguridad
           </h3>
           
@@ -308,22 +309,30 @@ const Audit = () => {
                </div>
                
                <div className="overflow-x-auto">
-                 <table className="w-full text-left border-collapse">
+                 <table className="w-full min-w-[1100px] text-left border-collapse">
                    <thead>
                      <tr className="bg-white text-[#1a3059] font-bold text-[10px] uppercase tracking-widest border-b border-slate-200">
-                       <th className="px-6 py-4">Timestamp</th>
-                       <th className="px-6 py-4">Usuario</th>
-                       <th className="px-6 py-4">Acción Registrada</th>
+                      <th className="px-6 py-4">Timestamp</th>
+                      <th className="px-6 py-4">Severidad</th>
+                      <th className="px-6 py-4">Usuario</th>
+                      <th className="px-6 py-4">Tipo</th>
+                      <th className="px-6 py-4">Acción Registrada</th>
                        <th className="px-6 py-4">Expediente</th>
                        <th className="px-6 py-4">IP Origen</th>
                      </tr>
                    </thead>
                    <tbody className="divide-y divide-slate-100 text-[11px] font-bold text-slate-800">
-                     {logsPaginados.map((item) => (
-                       <tr key={item.id} className="hover:bg-slate-50 transition-colors">
-                         <td className="px-6 py-6">{item.timestamp}</td>
-                         <td className="px-6 py-6">{item.usuario}</td>
-                         <td className="px-6 py-6">{item.accion_registrada || item.accion || '—'}</td>
+                    {logsPaginados.map((item) => (
+                      <tr key={item.id} className="hover:bg-slate-50 transition-colors">
+                        <td className="px-6 py-6">{item.timestamp}</td>
+                        <td className="px-6 py-6">
+                          <span className={`inline-flex px-2 py-1 rounded border text-[9px] font-black ${getLogBadgeClass(item.severidad)}`}>
+                            {item.severidad || 'INFO'}
+                          </span>
+                        </td>
+                        <td className="px-6 py-6">{item.usuario}</td>
+                        <td className="px-6 py-6 text-[10px] text-slate-500">{item.tipo_evento || 'GENERAL'}</td>
+                        <td className="px-6 py-6 min-w-[280px]">{item.accion_registrada || item.accion || '—'}</td>
                          <td className="px-6 py-6">{item.expediente}</td>
                          <td className="px-6 py-6">{item.ip_origen || item.ip || '—'}</td>
                        </tr>
