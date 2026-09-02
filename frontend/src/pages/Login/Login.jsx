@@ -19,6 +19,7 @@ const Login = () => {
   const [resetToken, setResetToken] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [recoveryMessage, setRecoveryMessage] = useState('');
+  const [devResetTokenVisible, setDevResetTokenVisible] = useState('');
   const [recoveryLoading, setRecoveryLoading] = useState(false);
 
   const handleLogin = async (e) => {
@@ -68,6 +69,7 @@ const Login = () => {
     setRecoveryLoading(true);
     setError('');
     setRecoveryMessage('');
+    setDevResetTokenVisible('');
     try {
       const res = await fetch('http://localhost:8000/api/v1/auth/password-recovery', {
         method: 'POST',
@@ -79,6 +81,10 @@ const Login = () => {
       if (data.dev_reset_token) {
         setResetUser(data.dev_username || recoveryUser);
         setResetToken(data.dev_reset_token);
+        setDevResetTokenVisible(data.dev_reset_token);
+        setRecoveryMessage('Codigo temporal generado para entorno de desarrollo.');
+      } else {
+        setRecoveryMessage(data.message || 'Solicitud registrada. Usa el usuario institucional exacto, por ejemplo j.valdivia.');
       }
     } catch (err) {
       setError('No se pudo registrar la solicitud de recuperacion.');
@@ -189,7 +195,7 @@ const Login = () => {
             <input
               value={recoveryUser}
               onChange={(e) => setRecoveryUser(e.target.value)}
-              placeholder="Usuario institucional"
+              placeholder="Usuario institucional exacto, ej. j.valdivia"
               className="w-full border border-slate-300 rounded-lg px-3 py-2 text-xs mb-2 focus:outline-none focus:border-[#2546b0]"
             />
             <button
@@ -202,6 +208,19 @@ const Login = () => {
             </button>
             {recoveryMessage && (
               <p className="text-[11px] text-emerald-700 font-semibold mt-3">{recoveryMessage}</p>
+            )}
+            {devResetTokenVisible && (
+              <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+                <span className="block text-[10px] font-black uppercase tracking-wide text-amber-700">
+                  Codigo temporal generado
+                </span>
+                <p className="mt-1 break-all font-mono text-xs font-bold text-slate-800">
+                  {devResetTokenVisible}
+                </p>
+                <p className="mt-1 text-[10px] text-amber-700">
+                  Ya fue copiado al campo Codigo temporal. Vence en 15 minutos.
+                </p>
+              </div>
             )}
             <div className="grid grid-cols-1 gap-2 mt-4">
               <input

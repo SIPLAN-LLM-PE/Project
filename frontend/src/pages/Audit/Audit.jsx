@@ -281,21 +281,31 @@ const Audit = () => {
               </div>
 
               {/* Card 4: Fuga de Datos */}
-              <div className="bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
+              <div className={`bg-white p-5 rounded-xl border shadow-sm flex flex-col justify-between ${
+                Number(securityData?.kpis?.fuga_datos || 0) > 0 ? 'border-rose-200' : 'border-slate-200'
+              }`}>
                 <h4 className="text-sm font-bold text-[#1a3059] mb-4">Fuga de Datos</h4>
                 <div className="flex justify-between items-center mb-4">
                   <div className="flex items-baseline gap-1">
-                    <span className="text-4xl font-extrabold text-green-500">
+                    <span className={`text-4xl font-extrabold ${
+                      Number(securityData?.kpis?.fuga_datos || 0) > 0 ? 'text-rose-500' : 'text-green-500'
+                    }`}>
                       {securityData?.kpis?.fuga_datos || "0"}
                     </span>
                     <span className="text-xs font-bold text-slate-500">incidentes</span>
                   </div>
-                  <div className="p-2.5 bg-green-100 text-green-500 rounded-lg">
+                  <div className={`p-2.5 rounded-lg ${
+                    Number(securityData?.kpis?.fuga_datos || 0) > 0 ? 'bg-rose-100 text-rose-500' : 'bg-green-100 text-green-500'
+                  }`}>
                     <ShieldCheck size={24} />
                   </div>
                 </div>
                 <div className="text-[10px] font-medium">
-                  <span className="text-slate-500">No se detecto fuga de datos</span>
+                  <span className="text-slate-500">
+                    {Number(securityData?.kpis?.fuga_datos || 0) > 0
+                      ? "Revisar eventos de exposicion de datos"
+                      : `No se detecto fuga de datos (${securityData?.kpis?.incidentes_seguridad || 0} evento(s) de seguridad registrados)`}
+                  </span>
                 </div>
               </div>
 

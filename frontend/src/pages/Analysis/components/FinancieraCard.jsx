@@ -61,7 +61,7 @@ export const FinancieraCard = ({ data, calculadora, onJumpToSource }) => {
           <div className="flex justify-between items-end">
             <div>
               <span className="text-[10px] font-bold text-slate-400 uppercase block mb-1 tracking-tight">
-                Brecha sin Sustento (B = max(0, PA - ΣGN))
+                Brecha no monetizada (B = max(0, PA - ΣGN))
               </span>
               <h5 className={`text-2xl font-mono font-bold ${alerta ? 'text-amber-600' : 'text-emerald-600'}`}>
                 S/. {brecha.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -71,7 +71,7 @@ export const FinancieraCard = ({ data, calculadora, onJumpToSource }) => {
               <span className={`text-[10px] font-bold px-2.5 py-1 rounded-md shadow-sm ${
                 alerta ? 'bg-amber-100 text-amber-700' : 'bg-emerald-100 text-emerald-700'
               }`}>
-                {sinGastosMonetizadosPeroConPruebas ? "SIN GASTOS MONETIZADOS" : `${porcentaje.toFixed(1)}% SIN SUSTENTO`}
+                {sinGastosMonetizadosPeroConPruebas ? "SIN GASTOS MONETIZADOS" : `${porcentaje.toFixed(1)}% PENDIENTE`}
               </span>
             </div>
           </div>
@@ -88,10 +88,10 @@ export const FinancieraCard = ({ data, calculadora, onJumpToSource }) => {
               </div>
             </div>
             <div className="bg-white/80 backdrop-blur-sm p-3 rounded-lg border border-slate-200">
-              <span className="text-[9px] font-bold text-slate-400 uppercase block mb-1">Gastos Probados (Σ Gn)</span>
+              <span className="text-[9px] font-bold text-slate-400 uppercase block mb-1">Gastos Monetizados (Σ Gn)</span>
               <div className="flex items-center gap-2">
                 <p className="text-sm font-bold text-emerald-600">S/. {sumaGastos.toFixed(2)}</p>
-                <SourceButton value={`S/. ${sumaGastos.toFixed(2)}`} label="Gastos probados" />
+                <SourceButton value={`S/. ${sumaGastos.toFixed(2)}`} label="Gastos monetizados" />
               </div>
             </div>
           </div>
@@ -126,7 +126,7 @@ export const FinancieraCard = ({ data, calculadora, onJumpToSource }) => {
           <div>
             <h6 className="text-[10px] font-bold text-slate-500 uppercase mb-2 flex items-center gap-1.5 px-1">
               <Receipt size={12} className="text-slate-400" /> 
-              Desglose de Gastos Acreditados
+              Desglose de Gastos Monetizados
             </h6>
             <div className="bg-white rounded-lg border border-slate-200 divide-y divide-slate-50 overflow-hidden shadow-sm">
               {detalles.length > 0 ? (
@@ -276,7 +276,7 @@ export const FinancieraCard = ({ data, calculadora, onJumpToSource }) => {
                 {alerta
                   ? (mediosProbatoriosSinMonto.length > 0
                       ? `La pretensión excede los gastos con monto exacto encontrados en el texto, pero existen ${mediosProbatoriosSinMonto.length} medio(s) probatorio(s) admitido(s) sin monto cuantificado (ver arriba). No debe leerse como ausencia total de sustento.`
-                      : "La pretensión excede los medios probatorios. Se sugiere requerir mayor sustento documental para validar el petitorio.")
+                      : "El petitorio supera los gastos que el sistema logró monetizar automáticamente. Se recomienda revisar los demás conceptos de necesidad y los medios probatorios asociados.")
                   : "Existe una correlación técnica aceptable entre los gastos probados y el monto solicitado."}
               </p>
             </div>

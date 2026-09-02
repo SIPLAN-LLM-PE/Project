@@ -41,6 +41,8 @@ const LiveNotifications = ({ usuarioActivo }) => {
   const [unreadCount, setUnreadCount] = useState(0);
   const [latestId, setLatestId] = useState(0);
   const dropdownRef = useRef(null);
+  const isOpenRef = useRef(false);
+  const lastSeenIdRef = useRef(0);
 
   const usuario = useMemo(() => {
     if (usuarioActivo?.username || usuarioActivo?.rol) return usuarioActivo;
@@ -59,25 +61,35 @@ const LiveNotifications = ({ usuarioActivo }) => {
   useEffect(() => {
     const stored = Number(localStorage.getItem(storageKey) || 0);
     setLastSeenId(stored);
+    lastSeenIdRef.current = stored;
   }, [storageKey]);
+
+  useEffect(() => {
+    isOpenRef.current = isOpen;
+  }, [isOpen]);
+
+  useEffect(() => {
+    lastSeenIdRef.current = lastSeenId;
+  }, [lastSeenId]);
 
   useEffect(() => {
     let mounted = true;
 
     const fetchNotifications = async () => {
       try {
-        setLoading(true);
+        if (document.hidden) return;
+        if (mounted) setLoading(true);
         const params = new URLSearchParams({
           username,
           rol,
-          since_id: String(lastSeenId || 0),
+          since_id: String(lastSeenIdRef.current || 0),
           limit: '8',
         });
         const response = await fetch(`${API_BASE}/api/v1/notifications/live?${params.toString()}`);
         const data = await response.json();
         if (!mounted || data.status !== 'success') return;
         setNotifications(data.notifications || []);
-        setUnreadCount(isOpen ? 0 : Number(data.unread_count || 0));
+        setUnreadCount(isOpenRef.current ? 0 : Number(data.unread_count || 0));
         setLatestId(Number(data.latest_id || 0));
       } catch (error) {
         console.warn('No se pudieron cargar notificaciones live:', error);
@@ -87,12 +99,12 @@ const LiveNotifications = ({ usuarioActivo }) => {
     };
 
     fetchNotifications();
-    const interval = setInterval(fetchNotifications, 15000);
+    const interval = setInterval(fetchNotifications, 30000);
     return () => {
       mounted = false;
       clearInterval(interval);
     };
-  }, [username, rol, lastSeenId, isOpen]);
+  }, [username, rol]);
 
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -107,6 +119,7 @@ const LiveNotifications = ({ usuarioActivo }) => {
   useEffect(() => {
     if (isOpen && latestId > 0) {
       localStorage.setItem(storageKey, String(latestId));
+      lastSeenIdRef.current = latestId;
       setLastSeenId(latestId);
       setUnreadCount(0);
     }
@@ -142,7 +155,7 @@ const LiveNotifications = ({ usuarioActivo }) => {
         <div className="absolute right-0 top-[calc(100%+10px)] w-[360px] max-w-[calc(100vw-32px)] bg-white border border-slate-200 rounded-lg shadow-xl z-[80] overflow-hidden">
           <div className="px-4 py-3 border-b border-slate-100">
             <p className="text-sm font-black text-[#061a3d]">Alertas en vivo</p>
-            <p className="text-[11px] text-slate-500">Actualizado automaticamente cada 15 segundos</p>
+            <p className="text-[11px] text-slate-500">Actualizado automaticamente cada 30 segundos</p>
           </div>
           <div className="max-h-[360px] overflow-y-auto">
             {notifications.length === 0 ? (

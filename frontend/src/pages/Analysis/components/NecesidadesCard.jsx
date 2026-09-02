@@ -33,7 +33,7 @@ export const NecesidadesCard = ({ data }) => {
             <thead>
               <tr className="bg-slate-50/50 text-slate-500 text-[11px] border-b border-slate-100">
                 <th className="px-6 py-3 font-medium">Categoría</th>
-                <th className="px-6 py-3 font-medium">Monto Acreditado</th>
+                <th className="px-6 py-3 font-medium">Monto Monetizado</th>
                 <th className="px-6 py-3 font-medium">Observaciones</th>
               </tr>
             </thead>
@@ -67,7 +67,7 @@ export const NecesidadesCard = ({ data }) => {
             <tfoot className="bg-slate-50/30 border-t border-slate-100">
               <tr>
                 <td className="px-6 py-3.5 font-bold text-slate-800 text-right text-xs">
-                  Total Acreditado:
+                  Total Monetizado:
                 </td>
                 <td className="px-6 py-3.5 font-bold text-slate-800 font-mono text-[11px] tracking-tight">
                   S/. {data.suma_gastos_sustentados.toFixed(2)}

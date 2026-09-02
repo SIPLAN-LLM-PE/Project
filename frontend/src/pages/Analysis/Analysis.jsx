@@ -1,4 +1,4 @@
-﻿import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   CheckCircle, Save, Loader2, Bell, ChevronDown, Upload, Trash2, Search, ZoomIn, ZoomOut,
   Printer, Menu, ChevronUp, User, Bot, FileText, FileQuestion, ExternalLink, AlertTriangle, Hash
@@ -25,7 +25,7 @@ import LiveNotifications from '../../components/common/LiveNotifications';
 import { apiService } from '../../services/api';
 
 // ==========================================
-// CACHÃ‰ DE MEMORIA GLOBAL
+// CACHÉ DE MEMORIA GLOBAL
 // ==========================================
 let draftAnalysisData = null;
 let draftPdfFiles = [];
@@ -163,7 +163,7 @@ export const Analysis = () => {
   const [isChatLoading, setIsChatLoading] = useState(false);
   const [chatMessages, setChatMessages] = useState(draftChatMessages);
 
-  // 4. CONFIGURACIÃ“N DE TARJETAS
+  // 4. CONFIGURACIÓN DE TARJETAS
   const [cardVisibility, setCardVisibility] = useState({
     resumen: false, postura: false, plazos: false, admisibilidad: false,
     necesidades: false, capacidad: false, controversias: false, sujetos: false, financiera: false
@@ -239,7 +239,7 @@ export const Analysis = () => {
           setActivePdfIndex(0);
         }
       } catch (err) {
-        console.error("Error al recuperar el anÃ¡lisis de la BD:", err);
+        console.error("Error al recuperar el análisis de la BD:", err);
       }
     };
     cargarAnalisisExistente();
@@ -266,10 +266,10 @@ export const Analysis = () => {
 
   useEffect(() => {
     if (loadingProgress < 15) setLoadingText("Escaneando documento PDF...");
-    else if (loadingProgress < 30) setLoadingText("Extrayendo texto (MÃ³dulo OCR)...");
+    else if (loadingProgress < 30) setLoadingText("Extrayendo texto (Módulo OCR)...");
     else if (loadingProgress < 50) setLoadingText("Identificando sujetos procesales...");
     else if (loadingProgress < 85) setLoadingText("Analizando contexto legal con Mistral IA...");
-    else if (loadingProgress < 95) setLoadingText("Generando auditorÃ­a financiera y cargas...");
+    else if (loadingProgress < 95) setLoadingText("Generando auditoría financiera y cargas...");
     else setLoadingText("Ensamblando informe final, casi listo...");
   }, [loadingProgress]);
 
@@ -349,7 +349,7 @@ export const Analysis = () => {
           }
         }
       } catch (err) {
-        console.error("Error inicializando la pantalla de anÃ¡lisis:", err);
+        console.error("Error inicializando la pantalla de análisis:", err);
       }
     };
     inicializarVistaAnalisis();
@@ -362,9 +362,9 @@ export const Analysis = () => {
 
     if (expediente.tiene_analisis) {
       const deseaVerExistente = window.confirm(
-        `El expediente ${expediente.numero_expediente} ya cuenta con un anÃ¡lisis guardado.\n\n` +
-        `â€¢ Presiona ACEPTAR si deseas ver el anÃ¡lisis oficial ya registrado (Modo Lectura).\n` +
-        `â€¢ Presiona CANCELAR si deseas cargar un nuevo documento PDF y generar un nuevo anÃ¡lisis.`
+        `El expediente ${expediente.numero_expediente} ya cuenta con un análisis guardado.\n\n` +
+        `• Presiona ACEPTAR si deseas ver el análisis oficial ya registrado (Modo Lectura).\n` +
+        `• Presiona CANCELAR si deseas cargar un nuevo documento PDF y generar un nuevo análisis.`
       );
       if (deseaVerExistente) {
         setIsExpedienteModalOpen(false);
@@ -410,7 +410,7 @@ export const Analysis = () => {
   };
 
   // ==========================================
-  // FUNCIONES DE LÃ“GICA
+  // FUNCIONES DE LÓGICA
   // ==========================================
 
   const construirSnapshotVersion = (data = analysisData) => {
@@ -457,7 +457,7 @@ export const Analysis = () => {
         id: Date.now(),
         fecha: new Date().toLocaleString(),
         version: nuevaVersion,
-        titulo: 'EdiciÃ³n Manual',
+        titulo: 'Edición Manual',
         usuario: firmaUsuario,
         comentario: descripcion,
         snapshot: construirSnapshotVersion(),
@@ -491,7 +491,7 @@ export const Analysis = () => {
     };
   };
 
-  const construirHitoHistorial = (descripcion, titulo = 'EdiciÃ³n Manual') => {
+  const construirHitoHistorial = (descripcion, titulo = 'Edición Manual') => {
     const usuarioActivo = JSON.parse(localStorage.getItem('usuario') || '{}');
     const firmaUsuario = usuarioActivo?.username
       ? `${usuarioActivo.username} (${usuarioActivo.rol === 'admin' ? 'Admin' : 'Sec'})`
@@ -520,7 +520,7 @@ export const Analysis = () => {
           ...construirConfiguracionIA({
             version_analisis: versionActual,
             evento: "CAMBIO_TONO_VISUAL",
-            observacion: `Tono activo: ${nuevoTonoSimple ? 'lenguaje ciudadano' : 'lenguaje tÃ©cnico'}`
+            observacion: `Tono activo: ${nuevoTonoSimple ? 'lenguaje ciudadano' : 'lenguaje técnico'}`
           }),
           tono_visualizacion: nuevoTonoSimple ? "ciudadano" : "tecnico"
         }
@@ -560,8 +560,8 @@ export const Analysis = () => {
     if (archivoGrande) {
       window.alert(
         `No se pudo cargar "${archivoGrande.name}".\n\n` +
-        `TamaÃ±o detectado: ${formatFileSize(archivoGrande.size)}.\n` +
-        `LÃ­mite permitido: ${MAX_UPLOAD_FILE_MB} MB por PDF.`
+        `Tamaño detectado: ${formatFileSize(archivoGrande.size)}.\n` +
+        `Límite permitido: ${MAX_UPLOAD_FILE_MB} MB por PDF.`
       );
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
@@ -632,7 +632,7 @@ export const Analysis = () => {
 
       if (res.ok && response && (response.status === "success" || response.resultados)) {
         setLoadingProgress(100);
-        setLoadingText("Â¡AnÃ¡lisis Completado!");
+        setLoadingText("¡Análisis Completado!");
         setTimeout(async () => {
           const data = response.resultados || response;
           setAnalysisData(data);
@@ -647,9 +647,9 @@ export const Analysis = () => {
               id: Date.now(),
               fecha: new Date().toLocaleString(),
               version: 'v1',
-              titulo: 'GeneraciÃ³n Inicial RAG',
+              titulo: 'Generación Inicial RAG',
               usuario: 'Sistema SIPLAN (IA)',
-              comentario: 'AnÃ¡lisis automÃ¡tico completado con Ã©xito.',
+              comentario: 'Análisis automático completado con éxito.',
               snapshot: construirSnapshotVersion(data),
               isActual: true
             }]);
@@ -662,8 +662,8 @@ export const Analysis = () => {
         }, 600);
       } else {
         const mensajeError = res.status === 413
-          ? (response.detail || `Uno de los PDFs supera el lÃ­mite permitido de ${MAX_UPLOAD_FILE_MB} MB.`)
-          : (response.detail || "Error de validaciÃ³n en el expediente.");
+          ? (response.detail || `Uno de los PDFs supera el límite permitido de ${MAX_UPLOAD_FILE_MB} MB.`)
+          : (response.detail || "Error de validación en el expediente.");
         setLoadingText(mensajeError);
         setTimeout(() => {
           setIsLoading(false);
@@ -675,7 +675,7 @@ export const Analysis = () => {
       }
     } catch (error) {
       console.error("Error:", error);
-      setLoadingText("Error en el anÃ¡lisis. Revisa la conexiÃ³n o intenta con un PDF mÃ¡s liviano.");
+      setLoadingText("Error en el análisis. Revisa la conexión o intenta con un PDF más liviano.");
       setTimeout(() => setIsLoading(false), 2000);
     }
   };
@@ -827,7 +827,7 @@ export const Analysis = () => {
       });
       const data = await res.json();
       if (data.status === "success") {
-        const hitoCorreccion = construirHitoHistorial(`RegeneraciÃ³n IA por correcciÃ³n de datos: "${correcciones}"`, 'CorrecciÃ³n IA');
+        const hitoCorreccion = construirHitoHistorial(`Regeneración IA por corrección de datos: "${correcciones}"`, 'Corrección IA');
         const historialActualizado = historialEntries.map(h => ({ ...h, isActual: false })).concat(hitoCorreccion);
         const configCorreccion = construirConfiguracionIA({
           version_analisis: hitoCorreccion.version,
@@ -884,12 +884,12 @@ export const Analysis = () => {
     if (!analysisData) return;
     setIsSavingDB(true);
     try {
-      const hitoAprobacion = construirHitoHistorial("AnÃ¡lisis oficial aprobado y guardado en la base de datos central.", "AprobaciÃ³n Oficial");
+      const hitoAprobacion = construirHitoHistorial("Análisis oficial aprobado y guardado en la base de datos central.", "Aprobación Oficial");
       const historialActualizado = historialEntries.map(h => ({ ...h, isActual: false })).concat(hitoAprobacion);
       const configuracionIA = construirConfiguracionIA({
         version_analisis: hitoAprobacion.version,
         evento: "APROBACION_ANALISIS",
-        observacion: "AnÃ¡lisis aprobado por usuario revisor"
+        observacion: "Análisis aprobado por usuario revisor"
       });
       const resultadosVersionados = {
         ...analysisData,
@@ -960,7 +960,7 @@ export const Analysis = () => {
       setChatMessages(msjsConRespuesta);
       draftChatMessages = msjsConRespuesta;
     } catch (error) {
-      const msjsConError = [...nuevosMensajes, { rol: 'assistant', contenido: 'Error de conexiÃ³n.' }];
+      const msjsConError = [...nuevosMensajes, { rol: 'assistant', contenido: 'Error de conexión.' }];
       setChatMessages(msjsConError);
       draftChatMessages = msjsConError;
     } finally {
@@ -1054,7 +1054,7 @@ export const Analysis = () => {
       {/* 1. Header Superior */}
       <header className="bg-white border-b border-slate-200 w-full h-[76px] xl:h-[93px] px-4 xl:px-8 flex items-center shrink-0 z-10">
         <div className="flex justify-between items-center w-full">
-          <h2 className="text-xl font-bold text-slate-800 tracking-tight">AnÃ¡lisis IA</h2>
+          <h2 className="text-xl font-bold text-slate-800 tracking-tight">Análisis IA</h2>
           <div className="flex items-center gap-2 xl:gap-4">
             <LiveNotifications usuarioActivo={usuarioHeader} />
             <div onClick={() => navigate('/profile')} className="flex items-center bg-[#2546b0] text-white rounded-lg px-3 xl:px-4 py-1.5 gap-2 xl:gap-3 cursor-pointer hover:bg-blue-800 transition-all shadow-sm max-w-[220px] xl:max-w-none">
@@ -1075,7 +1075,7 @@ export const Analysis = () => {
         </div>
       </header>
 
-      {/* 2. Ãrea de Trabajo */}
+      {/* 2. Área de Trabajo */}
       <main className="flex-1 flex min-h-0 overflow-hidden">
 
         {/* COLUMNA IZQUIERDA: VISOR DE EXPEDIENTE */}
@@ -1088,7 +1088,7 @@ export const Analysis = () => {
                 <div className="bg-[#1a3059] p-5 text-white flex justify-between items-center">
                   <div>
                     <h2 className="text-sm font-bold tracking-wide">Bandeja de Expedientes Asignados</h2>
-                    <p className="text-[10px] text-blue-200 mt-0.5">Selecciona el caso correspondiente antes de proceder con la carga o revisiÃ³n.</p>
+                    <p className="text-[10px] text-blue-200 mt-0.5">Selecciona el caso correspondiente antes de proceder con la carga o revisión.</p>
                   </div>
                   <button
                     onClick={() => setIsExpedienteModalOpen(false)}
@@ -1118,7 +1118,7 @@ export const Analysis = () => {
                       <div className="shrink-0">
                         {exp.tiene_analisis ? (
                           <span className="bg-emerald-50 text-emerald-700 px-2.5 py-1 rounded-md text-[9px] font-bold border border-emerald-200/60 block text-center">
-                            Ver AnÃ¡lisis
+                            Ver Análisis
                           </span>
                         ) : (
                           <span className="bg-amber-50 text-amber-700 px-2.5 py-1 rounded-md text-[9px] font-bold border border-amber-200/60 block text-center">
@@ -1193,7 +1193,7 @@ export const Analysis = () => {
                 ) : (
                   <Save size={14} className="mr-2" />
                 )}
-                {isSavingDB ? "Guardando..." : isSavedDB ? "Â¡Aprobado y Guardado!" : "Aprobar y Guardar AnÃ¡lisis"}
+                {isSavingDB ? "Guardando..." : isSavedDB ? "¡Aprobado y Guardado!" : "Aprobar y Guardar Análisis"}
               </button>
             )}
           </div>
@@ -1240,10 +1240,10 @@ export const Analysis = () => {
               <button
                 onClick={() => setIsResumenPdfsOpen(true)}
                 className="shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-bold text-blue-600 bg-blue-50 border border-blue-200 hover:bg-blue-100 transition-all whitespace-nowrap"
-                title="Ver quÃ© datos extrajo SIGEJA de cada PDF"
+                title="Ver qué datos extrajo SIGEJA de cada PDF"
               >
                 <Search size={12} />
-                Ver extracciÃ³n por PDF
+                Ver extracción por PDF
               </button>
             )}
           </div>
@@ -1254,10 +1254,10 @@ export const Analysis = () => {
               <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl max-h-[80vh] flex flex-col overflow-hidden border border-slate-200">
                 <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100 bg-slate-50">
                   <div>
-                    <h2 className="text-sm font-bold text-[#1a3059]">ExtracciÃ³n por documento PDF</h2>
-                    <p className="text-xs text-slate-500 mt-0.5">{resumenPorPdf.length} archivo(s) analizados â€” verifica que SIGEJA leyÃ³ cada PDF correctamente</p>
+                    <h2 className="text-sm font-bold text-[#1a3059]">Extracción por documento PDF</h2>
+                    <p className="text-xs text-slate-500 mt-0.5">{resumenPorPdf.length} archivo(s) analizados — verifica que SIGEJA leyó cada PDF correctamente</p>
                   </div>
-                  <button onClick={() => setIsResumenPdfsOpen(false)} className="text-slate-400 hover:text-slate-700 text-xl font-bold leading-none">Ã—</button>
+                  <button onClick={() => setIsResumenPdfsOpen(false)} className="text-slate-400 hover:text-slate-700 text-xl font-bold leading-none">×</button>
                 </div>
                 <div className="overflow-y-auto p-4 space-y-4">
                   {resumenPorPdf.map((r, i) => (
@@ -1279,7 +1279,7 @@ export const Analysis = () => {
                           </div>
                         </div>
                         <div className="flex items-center gap-3 text-xs text-slate-500 shrink-0">
-                          <span>~{r.paginas_estimadas} pÃ¡g.</span>
+                          <span>~{r.paginas_estimadas} pág.</span>
                           <span>{Number(r.caracteres_extraidos || 0).toLocaleString()} chars</span>
                           <span className={`px-2 py-0.5 rounded-full font-bold text-[10px] ${
                             r.calidad_extraccion === 'Alta' ? 'bg-green-100 text-green-700' :
@@ -1300,17 +1300,17 @@ export const Analysis = () => {
                         <div>
                           <p className="font-bold text-slate-600 mb-1">Nombres detectados</p>
                           {r.entidades_detectadas.nombres.length > 0
-                            ? r.entidades_detectadas.nombres.slice(0, 5).map((n, j) => <div key={j} className="text-slate-700 truncate">Â· {n}</div>)
+                            ? r.entidades_detectadas.nombres.slice(0, 5).map((n, j) => <div key={j} className="text-slate-700 truncate">· {n}</div>)
                             : <span className="text-slate-400 italic">Ninguno</span>}
                         </div>
                         <div>
                           <p className="font-bold text-slate-600 mb-1">DNIs detectados</p>
                           {r.entidades_detectadas.dnis.length > 0
-                            ? r.entidades_detectadas.dnis.map((d, j) => <div key={j} className="text-slate-700 font-mono">Â· {d}</div>)
+                            ? r.entidades_detectadas.dnis.map((d, j) => <div key={j} className="text-slate-700 font-mono">· {d}</div>)
                             : <span className="text-slate-400 italic">Ninguno</span>}
                           <p className="font-bold text-slate-600 mb-1 mt-2">Montos S/.</p>
                           {r.entidades_detectadas.montos.length > 0
-                            ? r.entidades_detectadas.montos.slice(0, 4).map((m, j) => <div key={j} className="text-slate-700">Â· {m}</div>)
+                            ? r.entidades_detectadas.montos.slice(0, 4).map((m, j) => <div key={j} className="text-slate-700">· {m}</div>)
                             : <span className="text-slate-400 italic">Ninguno</span>}
                         </div>
                         <div className="col-span-2">
@@ -1322,8 +1322,8 @@ export const Analysis = () => {
                           </div>
                         </div>
                         <div className="col-span-2">
-                          <p className="font-bold text-slate-600 mb-1">Preview del texto extraÃ­do</p>
-                          <p className="text-slate-500 text-[11px] bg-slate-50 rounded p-2 leading-relaxed font-mono">{r.preview || '(vacÃ­o)'}</p>
+                          <p className="font-bold text-slate-600 mb-1">Preview del texto extraído</p>
+                          <p className="text-slate-500 text-[11px] bg-slate-50 rounded p-2 leading-relaxed font-mono">{r.preview || '(vacío)'}</p>
                         </div>
                       </div>
                     </div>
@@ -1376,7 +1376,7 @@ export const Analysis = () => {
                       </p>
                       <p className="text-xs text-slate-600 truncate">
                         {activeEvidence.label}: <span className="font-bold text-slate-900">{activeEvidence.term}</span>
-                        <span className="text-slate-400"> Â· {activeEvidence.pdfName}</span>
+                        <span className="text-slate-400"> · {activeEvidence.pdfName}</span>
                       </p>
                     </div>
                     <button
@@ -1420,7 +1420,7 @@ export const Analysis = () => {
                 </div>
                 <h3 className="text-xl font-bold text-slate-500 mb-2 tracking-tight">Sube un Expediente para analizar</h3>
                 <p className="text-sm text-slate-400 text-center max-w-sm font-medium">
-                  El asistente IA requiere un documento en formato PDF para iniciar la extracciÃ³n de entidades y el anÃ¡lisis legal.
+                  El asistente IA requiere un documento en formato PDF para iniciar la extracción de entidades y el análisis legal.
                 </p>
               </div>
             )}
@@ -1439,7 +1439,7 @@ export const Analysis = () => {
                 onClick={() => hasDocument && setIsMenuOpen(!isMenuOpen)}
               />
               <span className="text-[10px] xl:text-xs font-bold tracking-widest opacity-90 uppercase truncate">
-                {hasDocument ? `Exp. NÂ° ${expedienteSeleccionado?.numero_expediente || ''}` : 'SIN EXPEDIENTE ACTIVO'}
+                {hasDocument ? `Exp. N° ${expedienteSeleccionado?.numero_expediente || ''}` : 'SIN EXPEDIENTE ACTIVO'}
               </span>
               {hasDocument && (
                 <span className="hidden xl:inline-flex items-center gap-1 rounded bg-white/10 border border-white/15 px-2 py-0.5 text-[9px] font-black tracking-wider text-blue-100">
@@ -1483,7 +1483,7 @@ export const Analysis = () => {
                 {!Object.values(cardVisibility).some(Boolean) && (
                   <div className="h-full flex flex-col items-center justify-center text-slate-300 opacity-60 italic">
                     <Search size={40} className="mb-2" />
-                    <p className="text-sm font-medium">Usa el menÃº para mostrar informaciÃ³n</p>
+                    <p className="text-sm font-medium">Usa el menú para mostrar información</p>
                   </div>
                 )}
               </>
@@ -1567,7 +1567,7 @@ export const Analysis = () => {
                       handleSendChat(e);
                     }
                   }}
-                  placeholder="PregÃºntale a la IA sobre este expediente..."
+                  placeholder="Pregúntale a la IA sobre este expediente..."
                   disabled={isChatLoading || !hasDocument}
                   className="w-full border border-slate-300 bg-slate-50 rounded-xl px-5 py-3 text-[11px] font-bold focus:outline-none focus:border-[#2546b0] focus:ring-1 focus:ring-[#2546b0] transition-all shadow-sm pr-12 disabled:opacity-50"
                 />

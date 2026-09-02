@@ -21,6 +21,7 @@ export const PlazosCard = ({ data, onJumpToSource }) => {
   const calendarioJudicial = data.calendario_judicial || {};
   const diasNoHabiles = Array.isArray(calendarioJudicial.dias_no_habiles) ? calendarioJudicial.dias_no_habiles : [];
   const tieneDiasNoHabiles = diasNoHabiles.length > 0;
+  const etiquetaPresentacion = data.tipo_presentacion === "contestacion" ? "Fecha de Contestación" : "Fecha de Presentación";
   const SourceButton = ({ value, label }) => {
     if (!value || !onJumpToSource || value === "No detectado") return null;
     return (
@@ -51,10 +52,10 @@ export const PlazosCard = ({ data, onJumpToSource }) => {
               </span>
             </div>
             <div className="flex justify-between items-center text-xs">
-              <span className="text-[#2a3f5f] font-bold">Fecha de Presentación</span>
+              <span className="text-[#2a3f5f] font-bold">{etiquetaPresentacion}</span>
               <span className="font-bold text-slate-800 flex items-center gap-1">
                 {data.fecha_presentacion}
-                <SourceButton value={data.fecha_presentacion} label="Fecha de presentacion" />
+                <SourceButton value={data.fecha_presentacion} label={etiquetaPresentacion} />
               </span>
             </div>
             <div className="flex justify-between items-center text-xs pt-1 border-t border-slate-50 mt-1">
@@ -125,7 +126,7 @@ export const PlazosCard = ({ data, onJumpToSource }) => {
             <div className="flex items-center gap-2 mb-2">
               <AlertCircle size={14} className="text-amber-600" />
               <h5 className="text-[10px] font-black uppercase tracking-widest text-amber-800">
-                RevisiÃ³n de fechas inconsistentes
+                Revisión de fechas inconsistentes
               </h5>
             </div>
             <div className="space-y-2">
