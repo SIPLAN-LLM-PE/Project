@@ -213,7 +213,7 @@ export const Analysis = () => {
       setActiveEvidence(null);
       resetChat();
       try {
-        const res = await fetch(`http://localhost:8000/api/v1/expedientes/${expedienteSeleccionado.numero_expediente}`);
+        const res = await fetch(`/api/v1/expedientes/${expedienteSeleccionado.numero_expediente}`);
         const data = await res.json().catch(() => ({}));
         if (res.status === 403) {
           setAccessDenied(`No tienes permisos para ver el expediente ${expedienteSeleccionado.numero_expediente}.`);
@@ -277,7 +277,7 @@ export const Analysis = () => {
     const inicializarVistaAnalisis = async () => {
       const usuarioActivo = JSON.parse(localStorage.getItem('usuario')) || { username: "", rol: "" };
       try {
-        const res = await fetch(`http://localhost:8000/api/v1/expedientes?username=${usuarioActivo.username}&rol=${usuarioActivo.rol}`);
+        const res = await fetch(`/api/v1/expedientes?username=${usuarioActivo.username}&rol=${usuarioActivo.rol}`);
         const data = await res.json();
         if (data.status === 'success') {
           const listaMapeada = data.data.map(e => ({
@@ -293,7 +293,7 @@ export const Analysis = () => {
             if (casoEncontrado) {
               setExpedienteSeleccionado(casoEncontrado);
               if (casoEncontrado.tiene_analisis) {
-                const resDetalle = await fetch(`http://localhost:8000/api/v1/expedientes/${casoEncontrado.numero_expediente}`);
+                const resDetalle = await fetch(`/api/v1/expedientes/${casoEncontrado.numero_expediente}`);
                 const dataDetalle = await resDetalle.json().catch(() => ({}));
                 if (resDetalle.status === 403) {
                   setAccessDenied(`No tienes permisos para ver el expediente ${casoEncontrado.numero_expediente}.`);
@@ -321,7 +321,7 @@ export const Analysis = () => {
                 }
               }
             } else {
-              const resDetalle = await fetch(`http://localhost:8000/api/v1/expedientes/${expedienteUrl}`);
+              const resDetalle = await fetch(`/api/v1/expedientes/${expedienteUrl}`);
               const dataDetalle = await resDetalle.json().catch(() => ({}));
               if (resDetalle.status === 403) {
                 setAccessDenied(`No tienes permisos para ver el expediente ${expedienteUrl}.`);
@@ -369,7 +369,7 @@ export const Analysis = () => {
       if (deseaVerExistente) {
         setIsExpedienteModalOpen(false);
         setIsLoading(true);
-        fetch(`http://localhost:8000/api/v1/expedientes/${expediente.numero_expediente}`)
+        fetch(`/api/v1/expedientes/${expediente.numero_expediente}`)
           .then(res => res.json())
           .then(data => {
             if (data && data.data && (data.data.resultados_json || data.data.resultados)) {
@@ -533,12 +533,12 @@ export const Analysis = () => {
     setActivePdfIndex(0);
     if (!numero) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/expedientes/${numero}/pdfs`);
+      const res = await fetch(`/api/v1/expedientes/${numero}/pdfs`);
       const data = await res.json();
       if (res.ok && data.files && data.files.length > 0) {
         const archivos = data.files.map(nombre => ({
           name: nombre,
-          url: `http://localhost:8000/api/v1/expedientes/${numero}/pdf/${encodeURIComponent(nombre)}`
+          url: `/api/v1/expedientes/${numero}/pdf/${encodeURIComponent(nombre)}`
         }));
         setPdfFiles(archivos);
         setActivePdfIndex(0);
@@ -592,7 +592,7 @@ export const Analysis = () => {
       formData.append("confirmacion_datos_sensibles", opciones.confirmacionDatosSensibles ? "true" : "false");
       formData.append("confirmacion_duplicados", opciones.confirmacionDuplicados ? "true" : "false");
 
-      const res = await fetch("http://localhost:8000/api/v1/analyze-document", {
+      const res = await fetch("/api/v1/analyze-document", {
         method: "POST",
         body: formData
       });
@@ -684,7 +684,7 @@ export const Analysis = () => {
     const usuarioActivo = JSON.parse(localStorage.getItem('usuario'));
     const firmaUsuario = usuarioActivo ? `${usuarioActivo.username}` : 'm.gomez';
     try {
-      await fetch("http://localhost:8000/api/v1/audit/sensitive-validation", {
+      await fetch("/api/v1/audit/sensitive-validation", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -738,7 +738,7 @@ export const Analysis = () => {
     const numero = expedienteSeleccionado?.numero_expediente;
     if (!numero || !termino) return null;
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/expedientes/${encodeURIComponent(numero)}/buscar-evidencia?term=${encodeURIComponent(termino)}`);
+      const res = await fetch(`/api/v1/expedientes/${encodeURIComponent(numero)}/buscar-evidencia?term=${encodeURIComponent(termino)}`);
       const data = await res.json();
       if (res.ok && data?.status === "success") return data;
     } catch (err) {
@@ -814,7 +814,7 @@ export const Analysis = () => {
   const handleRegenerarResumen = async (correcciones) => {
     setIsRegenerating(true);
     try {
-      const res = await fetch('http://localhost:8000/api/v1/regenerate-summary', {
+      const res = await fetch('/api/v1/regenerate-summary', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -898,7 +898,7 @@ export const Analysis = () => {
         trazabilidad_cambios: historialActualizado,
         historial: historialActualizado
       };
-      const res = await fetch('http://localhost:8000/api/v1/save-analysis', {
+      const res = await fetch('/api/v1/save-analysis', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -938,7 +938,7 @@ export const Analysis = () => {
     setChatInput("");
     setIsChatLoading(true);
     try {
-      const res = await fetch('http://localhost:8000/api/v1/chat', {
+      const res = await fetch('/api/v1/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -997,7 +997,7 @@ export const Analysis = () => {
         version_analisis: analysisData.version_analisis || analysisData.configuracion_ia?.version_analisis || "v1",
         trazabilidad_cambios: analysisData.trazabilidad_cambios || analysisData.historial || historialEntries
       };
-      const response = await fetch('http://localhost:8000/api/v1/export-word', {
+      const response = await fetch('/api/v1/export-word', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(exportData),
@@ -1022,7 +1022,7 @@ export const Analysis = () => {
     const usuarioActivo = JSON.parse(localStorage.getItem('usuario') || '{}');
     const nombreExpediente = expedienteSeleccionado?.numero_expediente || pdfFiles[0]?.name || "Expediente";
     try {
-      const response = await fetch('http://localhost:8000/api/v1/export-admisibilidad-pdf', {
+      const response = await fetch('/api/v1/export-admisibilidad-pdf', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

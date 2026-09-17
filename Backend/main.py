@@ -1262,7 +1262,7 @@ Responde ÚNICAMENTE con este JSON (sin texto adicional):
 
     try:
         res = requests.post(
-            "http://localhost:11434/api/generate",
+            "http://ollama:11434/api/generate",
             json={"model": "mistral", "prompt": prompt, "format": "json",
                   "stream": False, "options": {"temperature": 0.0}},
             timeout=60
@@ -1751,7 +1751,7 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
         try:
             print("🤖 Consultando Mistral para extraer datos...")
             res = requests.post(
-                "http://localhost:11434/api/generate",
+                "http://ollama:11434/api/generate",
                 json={
                     "model": "mistral",
                     "prompt": prompt_ner,
@@ -3299,7 +3299,7 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
     """
 
     try:
-        url = "http://localhost:11434/api/generate"
+        url = "http://ollama:11434/api/generate"
         payload = {"model": "mistral", "prompt": prompt_ia, "format": "json", "stream": False, "options": {"temperature": 0}}
         response = requests.post(url, json=payload, timeout=90)
         raw_res = cargar_json_llm(response.json().get("response", "{}"), {})
@@ -3640,7 +3640,7 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
     prompt = _construir_prompt_cargas(texto_plano[:max_chars_entrada])
 
     try:
-        url = "http://localhost:11434/api/generate"
+        url = "http://ollama:11434/api/generate"
         payload = {"model": "mistral", "prompt": prompt, "format": "json", "stream": False, "options": {"temperature": 0.1, "num_predict": NUM_PREDICT_CARGAS, "top_p": 0.85, "num_ctx": num_ctx}}
         response = requests.post(url, json=payload, timeout=60)
         
@@ -3973,7 +3973,7 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
     # caracteres, para dimensionar num_ctx con precisión en vez de estimarlo.
     overhead_chars = len(_construir_prompt(""))
     try:
-        url = "http://localhost:11434/api/generate"
+        url = "http://ollama:11434/api/generate"
 
         def ejecutar_rag_con_limites(techo_ctx: int, num_predict: int, etiqueta: str):
             num_ctx_intento, max_chars_intento = _dimensionar_llm_dinamico(
@@ -4426,7 +4426,7 @@ def detectar_datos_sensibles_menor(texto: str, limite: int = 12) -> list:
 def generar_embedding(texto: str) -> list:
     """Envía el texto limpio a Ollama para obtener su representación vectorial (768 dimensiones)."""
     try:
-        url = "http://localhost:11434/api/embeddings"
+        url = "http://ollama:11434/api/embeddings"
         texto_limpio = (texto or "").strip()[:1800]
         if not texto_limpio:
             return []
@@ -5003,7 +5003,7 @@ async def chat_expediente(request: ChatRequest):
     """
     
     try:
-        url = "http://localhost:11434/api/generate"
+        url = "http://ollama:11434/api/generate"
         payload = {
             "model": "mistral",
             "prompt": prompt_sistema,
@@ -5088,7 +5088,7 @@ SIGEJA-Chat:
 """
 
     try:
-        url = "http://localhost:11434/api/generate"
+        url = "http://ollama:11434/api/generate"
         payload = {
             "model": "mistral",
             "prompt": prompt_sistema,
@@ -5176,7 +5176,7 @@ async def regenerar_resumen_con_feedback(req: RegenerarRequest, request: Request
     """
     
     try:
-        url = "http://localhost:11434/api/generate"
+        url = "http://ollama:11434/api/generate"
         payload = {
             "model": "mistral",
             "prompt": prompt_regeneracion,
@@ -5295,7 +5295,7 @@ async def guardar_analisis_aprobado(req: SaveAnalysisRequest, request: Request):
         config_ia.setdefault("pipeline_version", "SIGEJA-RAG-2026.08")
         config_ia.setdefault("modelo_principal", "mistral")
         config_ia.setdefault("proveedor_modelo", "Ollama local")
-        config_ia.setdefault("endpoint_modelo", "localhost:11434")
+        config_ia.setdefault("endpoint_modelo", "ollama:11434")
         config_ia.setdefault("tono_visualizacion", "tecnico")
         config_ia.setdefault("parametros", {
             "temperature_resumen": 0.1,

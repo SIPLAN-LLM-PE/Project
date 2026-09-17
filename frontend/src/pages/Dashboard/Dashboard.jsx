@@ -150,7 +150,7 @@ const Dashboard = () => {
     setIsLoading(true);
     try {
       // 🚀 PASAMOS LAS CREDENCIALES ACTIVAS EN LA URL PARA FILTRAR LA BD
-      const res = await fetch(`http://localhost:8000/api/v1/expedientes?username=${usuarioActivo.username}&rol=${usuarioActivo.rol}`);
+      const res = await fetch(`/api/v1/expedientes?username=${usuarioActivo.username}&rol=${usuarioActivo.rol}`);
       const data = await res.json();
       if (data.status === 'success') {
         setExpedientes(data.data);
@@ -164,7 +164,7 @@ const Dashboard = () => {
 
   const cargarPersonalJudicial = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/v1/usuarios-personal');
+      const res = await fetch('/api/v1/usuarios-personal');
       const data = await res.json();
       if (data.status === 'success') setPersonalJudicial(data.data);
     } catch (e) {
@@ -179,7 +179,7 @@ const Dashboard = () => {
     setSearchTerms({ asignado_juez: '', asignado_secretario: '', asignado_asistente: '', asignado_mesapartes: '', asignado_liquidador: '' });
 
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/expedientes/${exp.numero_expediente}`);
+      const res = await fetch(`/api/v1/expedientes/${exp.numero_expediente}`);
       const data = await res.json();
       if (data.status === "success") {
         setFormAsignacion({
@@ -199,7 +199,7 @@ const Dashboard = () => {
   const handleCambiarAsignacion = async (columna, username) => {
     setFormAsignacion(prev => ({ ...prev, [columna]: username }));
     try {
-      await fetch('http://localhost:8000/api/v1/asignar-expediente', {
+      await fetch('/api/v1/asignar-expediente', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -216,7 +216,7 @@ const Dashboard = () => {
   const handleCrearExpediente = async (e) => {
     e.preventDefault();
     try {
-      const res = await fetch('http://localhost:8000/api/v1/crear-expediente', {
+      const res = await fetch('/api/v1/crear-expediente', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(nuevoExpForm)
@@ -257,7 +257,7 @@ const Dashboard = () => {
   const handleEditarExpediente = async (e) => {
     e.preventDefault();
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/expedientes/${expedienteAEditar.numero_expediente}`, {
+      const res = await fetch(`/api/v1/expedientes/${expedienteAEditar.numero_expediente}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -283,7 +283,7 @@ const Dashboard = () => {
     if (!confirmar) return;
 
     try {
-      const res = await fetch(`http://localhost:8000/api/v1/expedientes/${numero}`, { method: 'DELETE' });
+      const res = await fetch(`/api/v1/expedientes/${numero}`, { method: 'DELETE' });
       const data = await res.json();
       if (res.ok) {
         cargarDashboard();

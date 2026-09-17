@@ -76,7 +76,7 @@ const Profile = () => {
     }
     setSecurityLoading(true);
     try {
-      const res = await fetch('http://localhost:8000/api/v1/auth/change-password', {
+      const res = await fetch('/api/v1/auth/change-password', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

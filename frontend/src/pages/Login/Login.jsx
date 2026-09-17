@@ -29,7 +29,7 @@ const Login = () => {
 
     try {
       // 2. PETICIÓN REAL AL BACKEND FASTAPI
-      const res = await fetch('http://localhost:8000/api/v1/login', {
+      const res = await fetch('/api/v1/login', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -71,7 +71,7 @@ const Login = () => {
     setRecoveryMessage('');
     setDevResetTokenVisible('');
     try {
-      const res = await fetch('http://localhost:8000/api/v1/auth/password-recovery', {
+      const res = await fetch('/api/v1/auth/password-recovery', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username_or_email: recoveryUser })
@@ -97,7 +97,7 @@ const Login = () => {
     setRecoveryLoading(true);
     setError('');
     try {
-      const res = await fetch('http://localhost:8000/api/v1/auth/password-reset', {
+      const res = await fetch('/api/v1/auth/password-reset', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

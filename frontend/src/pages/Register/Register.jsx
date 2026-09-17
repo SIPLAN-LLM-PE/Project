@@ -41,7 +41,7 @@ const Register = () => {
 
     try {
       // 3. LLAMADO POST REAL A LA API DE FASTAPI
-      const res = await fetch('http://localhost:8000/api/v1/register', {
+      const res = await fetch('/api/v1/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -71,7 +71,7 @@ const Reports = () => {
   useEffect(() => {
     const fetchMetrics = async () => {
       try {
-        const response = await fetch('http://localhost:8000/api/v1/reports/dashboard-metrics');
+        const response = await fetch('/api/v1/reports/dashboard-metrics');
         const data = await response.json();
         setDashboardData(data);
         setPaginaExport(1);
@@ -89,7 +89,7 @@ const Reports = () => {
   const handleExportarCSV = async () => {
     setIsExporting(true);
     try {
-      const response = await fetch('http://localhost:8000/api/v1/reports/export-csv');
+      const response = await fetch('/api/v1/reports/export-csv');
       
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);

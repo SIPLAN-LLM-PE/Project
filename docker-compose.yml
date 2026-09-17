@@ -52,6 +52,7 @@ services:
       - ollama_data:/root/.ollama
     ports:
       - "11434:11434"
+    gpus: all
 
 volumes:
   postgres_data:

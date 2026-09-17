@@ -46,7 +46,7 @@ const Audit = () => {
   useEffect(() => {
     const fetchSecurityData = async () => {
       try {
-        const response = await fetch('http://localhost:8000/api/v1/security/dashboard-metrics');
+        const response = await fetch('/api/v1/security/dashboard-metrics');
         const data = await response.json();
         setSecurityData(data);
         setPaginaLogs(1);
@@ -65,7 +65,7 @@ const Audit = () => {
     if (ocrDetails) return; // ya cargado
     setIsLoadingOcr(true);
     try {
-      const res = await fetch('http://localhost:8000/api/v1/security/ocr-details');
+      const res = await fetch('/api/v1/security/ocr-details');
       const data = await res.json();
       setOcrDetails(data);
     } catch (e) {
@@ -80,7 +80,7 @@ const Audit = () => {
     if (bertDetails) return;
     setIsLoadingBert(true);
     try {
-      const res = await fetch('http://localhost:8000/api/v1/security/bertscore-details');
+      const res = await fetch('/api/v1/security/bertscore-details');
       setBertDetails(await res.json());
     } catch (e) {
       console.error('Error cargando detalle BERTScore:', e);
@@ -94,7 +94,7 @@ const Audit = () => {
     if (f1Details) return;
     setIsLoadingF1(true);
     try {
-      const res = await fetch('http://localhost:8000/api/v1/security/f1-details');
+      const res = await fetch('/api/v1/security/f1-details');
       setF1Details(await res.json());
     } catch (e) {
       console.error('Error cargando detalle F1:', e);
@@ -107,7 +107,7 @@ const Audit = () => {
   const handleExportarCSV = async () => {
     setIsExporting(true);
     try {
-      const response = await fetch('http://localhost:8000/api/v1/security/export-csv');
+      const response = await fetch('/api/v1/security/export-csv');
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');

@@ -22,7 +22,7 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente, numeroE
     setPerfilConsulta(null);
     setExpandedIndex(0);
     try {
-      const res = await fetch('http://localhost:8000/api/v1/jurisprudencia', {
+      const res = await fetch('/api/v1/jurisprudencia', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({

@@ -18,7 +18,7 @@ export const RatingModal = ({ isOpen, onClose, expediente, usuario, onSaved }) =
     setIsSubmitting(true);
     setErrorMessage("");
     try {
-      const response = await fetch('http://localhost:8000/api/v1/analysis-feedback', {
+      const response = await fetch('/api/v1/analysis-feedback', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
