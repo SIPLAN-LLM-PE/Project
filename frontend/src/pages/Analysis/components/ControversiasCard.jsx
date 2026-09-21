@@ -1,20 +1,52 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Hammer, Trash2, Pencil, CheckCircle2, Save, XCircle, Edit3, RefreshCw } from 'lucide-react';
 
 // Sub-componente: Maneja el estado individual de cada controversia (Tu código original intacto)
-const PuntoControvertido = ({ punto, index, onNotifyChange }) => {
+const PuntoControvertido = ({ punto, index, onNotifyChange, onUpdatePoint }) => {
   const [isEditing, setIsEditing] = useState(false);
   const [text, setText] = useState(punto.sugerencia);
-  const [status, setStatus] = useState('pending'); // Estados: 'pending', 'accepted', 'discarded'
+  const [status, setStatus] = useState(punto.estado_revision || 'pending'); // Estados: 'pending', 'accepted', 'discarded'
+
+  useEffect(() => {
+    setText(punto.sugerencia);
+    setStatus(punto.estado_revision || 'pending');
+    setIsEditing(false);
+  }, [punto.sugerencia, punto.estado_revision]);
 
   const manejarAceptar = () => {
     setStatus('accepted');
+    if (onUpdatePoint) {
+      onUpdatePoint(index, {
+        ...punto,
+        sugerencia: text,
+        estado_revision: 'accepted'
+      }, `Aprobó punto controvertido: ${punto.tema || "Sin título"}`);
+    }
     if (onNotifyChange) onNotifyChange(`Aprobó punto controvertido: ${punto.tema || "Sin título"}`);
   };
 
   const manejarGuardar = () => {
     setIsEditing(false);
+    if (onUpdatePoint) {
+      onUpdatePoint(index, {
+        ...punto,
+        sugerencia: text,
+        estado_revision: status === 'accepted' ? 'accepted' : 'edited'
+      }, `Modificó redacción de controversia: ${punto.tema || "Sin título"}`);
+    }
     if (onNotifyChange) onNotifyChange(`Modificó redacción de controversia: ${punto.tema || "Sin título"}`);
+  };
+
+
+  const manejarDescartar = () => {
+    setStatus('discarded');
+    if (onUpdatePoint) {
+      onUpdatePoint(index, {
+        ...punto,
+        sugerencia: text,
+        estado_revision: 'discarded'
+      }, `Descartó punto controvertido: ${punto.tema || "Sin título"}`);
+    }
   };
 
   if (status === 'discarded') return null;
@@ -69,7 +101,7 @@ const PuntoControvertido = ({ punto, index, onNotifyChange }) => {
         ) : (
           <>
             <button 
-              onClick={() => setStatus('discarded')} 
+              onClick={manejarDescartar} 
               className="flex items-center gap-1.5 text-[10px] text-slate-400 hover:text-red-500 font-medium transition-colors"
             >
               <Trash2 size={12} /> Descartar
@@ -96,7 +128,7 @@ const PuntoControvertido = ({ punto, index, onNotifyChange }) => {
 };
 
 // Componente Principal
-export const ControversiasCard = ({ puntos, onNotifyChange, onRegenerate, isRegenerating }) => {
+export const ControversiasCard = ({ puntos, onNotifyChange, onRegenerate, isRegenerating, onUpdatePoint }) => {
   // Estado para la caja de texto de regeneración global
   const [correccion, setCorreccion] = useState("");
 
@@ -135,6 +167,7 @@ export const ControversiasCard = ({ puntos, onNotifyChange, onRegenerate, isRege
             punto={punto} 
             index={index} 
             onNotifyChange={onNotifyChange} 
+            onUpdatePoint={onUpdatePoint}
           />
         ))}
       </div>

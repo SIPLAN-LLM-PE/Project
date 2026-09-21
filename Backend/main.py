@@ -594,7 +594,7 @@ class EditarExpedienteRequest(BaseModel):
     # Nota: El número de expediente no se incluye porque será la llave en la URL y es inmutable.
 
 class JurisprudenciaRequest(BaseModel):
-    texto_expediente: str
+    texto_expediente: str = ""
     numero_expediente: str = ""
 
 class RegenerarRequest(BaseModel):
@@ -631,6 +631,11 @@ class SaveAnalysisRequest(BaseModel):
     tiempo_procesamiento_seg: float
     paginas_ocr: int
     resultados_json: dict
+
+class AnalysisDraftRequest(BaseModel):
+    resultados_json: dict = Field(default_factory=dict)
+    detalle: str = ""
+    usuario: str = "Usuario SIGEJA"
 
 class SensitiveValidationRequest(BaseModel):
     numero_expediente: str
@@ -4424,22 +4429,38 @@ def detectar_datos_sensibles_menor(texto: str, limite: int = 12) -> list:
     return hallazgos
 
 def generar_embedding(texto: str) -> list:
-    """Envía el texto limpio a Ollama para obtener su representación vectorial (768 dimensiones)."""
-    try:
-        url = "http://ollama:11434/api/embeddings"
-        texto_limpio = (texto or "").strip()[:1800]
-        if not texto_limpio:
-            return []
-        payload = {
-            "model": "nomic-embed-text", # Modelo súper rápido y ligero
-            "prompt": texto_limpio
-        }
-        res = requests.post(url, json=payload, timeout=120)
-        res.raise_for_status()
-        return res.json().get("embedding", [])
-    except Exception as e:
-        print(f"Error generando embedding RAG: {e}")
+    """Envia el texto limpio a Ollama para obtener su representacion vectorial."""
+    texto_limpio = (texto or "").strip()[:1800]
+    if not texto_limpio:
         return []
+
+    urls_configuradas = os.getenv("SIGEJA_OLLAMA_EMBED_URLS", "").strip()
+    urls = [u.strip() for u in urls_configuradas.split(",") if u.strip()] or [
+        "http://localhost:11434/api/embeddings",
+        "http://ollama:11434/api/embeddings",
+    ]
+    timeout = int(os.getenv("SIGEJA_OLLAMA_EMBED_TIMEOUT", "120"))
+    payload = {
+        "model": "nomic-embed-text",
+        "prompt": texto_limpio
+    }
+
+    ultimo_error = None
+    for url in urls:
+        try:
+            res = requests.post(url, json=payload, timeout=timeout)
+            res.raise_for_status()
+            embedding = res.json().get("embedding", [])
+            if embedding:
+                return embedding
+        except Exception as e:
+            ultimo_error = e
+
+    if ultimo_error:
+        print(f"Error generando embedding RAG: {ultimo_error}")
+    else:
+        print("Error generando embedding RAG: respuesta sin embedding")
+    return []
 
 # --- ENDPOINTS (API) ---
 
@@ -5268,6 +5289,47 @@ async def guardar_feedback_analisis(payload: AnalysisFeedbackRequest, request: R
         conn.rollback()
         print(f"Error guardando feedback IA: {e}")
         raise HTTPException(status_code=500, detail="No se pudo registrar el feedback.")
+    finally:
+        conn.close()
+
+
+@app.patch("/api/v1/expedientes/{numero}/analysis-draft")
+async def guardar_borrador_analisis(numero: str, payload: AnalysisDraftRequest, request: Request):
+    """
+    Persiste ediciones manuales puntuales del analisis sin marcarlo como aprobacion oficial.
+    Se usa para sugerencias editadas, aceptadas o descartadas desde la vista de analisis.
+    """
+    conn = get_db_connection()
+    try:
+        verificar_acceso_expediente_o_rechazar(conn, request, numero, "edicion de analisis")
+        resultados_guardar = dict(payload.resultados_json or {})
+        if not resultados_guardar:
+            raise HTTPException(status_code=400, detail="No hay resultados de analisis para guardar.")
+
+        json_texto = json.dumps(resultados_guardar, ensure_ascii=False)
+        conn.execute('''
+            UPDATE registro_expedientes
+            SET json_resultados = %s
+            WHERE numero_expediente = %s
+        ''', (json_texto, numero))
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "EDICION_ANALISIS",
+            usuario=payload.usuario,
+            expediente=numero,
+            detalle=(payload.detalle or "edicion manual de analisis")[:250],
+            severidad="INFO"
+        )
+        conn.commit()
+        return {"status": "success", "message": "Edicion guardada correctamente."}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        print(f"Error guardando borrador de analisis: {e}")
+        raise HTTPException(status_code=500, detail="No se pudo guardar la edicion del analisis.")
     finally:
         conn.close()
 
@@ -6631,31 +6693,55 @@ async def export_security_csv(request: Request):
 app.include_router(router) 
 
 @app.post("/api/v1/jurisprudencia")
-async def buscar_jurisprudencia_semantica(req: JurisprudenciaRequest):
-    if not req.texto_expediente:
-        raise HTTPException(status_code=400, detail="Falta el texto del expediente.")
-
-    perfil_consulta = _perfil_jurisprudencia_texto(req.texto_expediente)
-    texto_consulta_semantica = (
-        f"Materia: {perfil_consulta.get('materia')}. "
-        f"Petitorio: {formato_monto(perfil_consulta.get('petitorio'))}. "
-        f"Riesgo o contexto: {perfil_consulta.get('riesgo')}. "
-        f"Hechos: {perfil_consulta.get('resumen')}"
-    )
-    vector_consulta = generar_embedding(texto_consulta_semantica)
-    
-    if not vector_consulta:
-        return {
-            "status": "error",
-            "resultados": [],
-            "diagnostico": "No se pudo generar embedding. Verifica que Ollama este activo y que el modelo nomic-embed-text este disponible."
-        }
-
-    vector_pg = str(vector_consulta)
+async def buscar_jurisprudencia_semantica(req: JurisprudenciaRequest, request: Request):
+    texto_base = (req.texto_expediente or "").strip()
     numero_actual = (req.numero_expediente or "").strip()
     conn = get_db_connection()
-    
+
     try:
+        if not texto_base and numero_actual:
+            fila_contexto = verificar_acceso_expediente_o_rechazar(
+                conn,
+                request,
+                numero_actual,
+                "busqueda semantica de jurisprudencia"
+            )
+            obj_json = cargar_json_bd(fila_contexto.get("json_resultados"), {})
+            if isinstance(obj_json, dict) and obj_json:
+                texto_base = preparar_texto_para_vector(obj_json)
+            if len(texto_base) < 120:
+                texto_base = (
+                    f"Demandante: {fila_contexto.get('demandante') or 'No detectado'}. "
+                    f"Demandado: {fila_contexto.get('demandado') or 'No detectado'}. "
+                    f"Petitorio: {formato_monto(fila_contexto.get('monto_petitorio'))}. "
+                    f"Riesgo: {fila_contexto.get('riesgo_capacidad') or 'No detectado'}. "
+                    f"{texto_base}"
+                ).strip()
+
+        if not texto_base:
+            return {
+                "status": "error",
+                "resultados": [],
+                "diagnostico": "No se recibio texto ni se pudo reconstruir el contexto desde el expediente."
+            }
+
+        perfil_consulta = _perfil_jurisprudencia_texto(texto_base)
+        texto_consulta_semantica = (
+            f"Materia: {perfil_consulta.get('materia')}. "
+            f"Petitorio: {formato_monto(perfil_consulta.get('petitorio'))}. "
+            f"Riesgo o contexto: {perfil_consulta.get('riesgo')}. "
+            f"Hechos: {perfil_consulta.get('resumen')}"
+        )
+        vector_consulta = generar_embedding(texto_consulta_semantica)
+
+        if not vector_consulta:
+            return {
+                "status": "error",
+                "resultados": [],
+                "diagnostico": "No se pudo generar embedding. Verifica que Ollama este activo y que el modelo nomic-embed-text este disponible."
+            }
+
+        vector_pg = str(vector_consulta)
         cursor = conn.cursor()
         # 2. BÚSQUEDA VECTORIAL AVANZADA
         # El operador <=> calcula la distancia coseno. 

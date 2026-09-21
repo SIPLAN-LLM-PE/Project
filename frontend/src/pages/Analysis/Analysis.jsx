@@ -508,6 +508,61 @@ export const Analysis = () => {
     };
   };
 
+
+  const persistirBorradorAnalisis = async (resultadosActualizados, detalle) => {
+    const numero = expedienteSeleccionado?.numero_expediente || "";
+    if (!numero || !resultadosActualizados) return;
+    const usuarioActivo = JSON.parse(localStorage.getItem('usuario') || '{}');
+    const token = localStorage.getItem('access_token');
+    const res = await fetch(`/api/v1/expedientes/${encodeURIComponent(numero)}/analysis-draft`, {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { Authorization: `Bearer ${token}` } : {})
+      },
+      body: JSON.stringify({
+        resultados_json: resultadosActualizados,
+        detalle,
+        usuario: usuarioActivo.username || usuarioActivo.nombre || "Usuario SIGEJA"
+      })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.status !== "success") {
+      throw new Error(data.detail || "No se pudo guardar la edición del análisis.");
+    }
+  };
+
+  const handleActualizarPuntoSugerido = async (index, puntoActualizado, descripcion) => {
+    if (!analysisData) return;
+    const hitoEdicion = construirHitoHistorial(descripcion, "Edición de Sugerencia");
+    const historialActualizado = historialEntries.map(h => ({ ...h, isActual: false })).concat(hitoEdicion);
+    const puntosActualizados = (analysisData.puntos_sugeridos || []).map((punto, idx) =>
+      idx === index ? puntoActualizado : punto
+    );
+    const resultadosActualizados = {
+      ...analysisData,
+      puntos_sugeridos: puntosActualizados,
+      version_analisis: hitoEdicion.version,
+      configuracion_ia: construirConfiguracionIA({
+        version_analisis: hitoEdicion.version,
+        evento: "EDICION_SUGERENCIA",
+        observacion: descripcion
+      }),
+      trazabilidad_cambios: historialActualizado,
+      historial: historialActualizado
+    };
+
+    setAnalysisData(resultadosActualizados);
+    setHistorialEntries(historialActualizado);
+
+    try {
+      await persistirBorradorAnalisis(resultadosActualizados, descripcion);
+    } catch (error) {
+      console.error("Error guardando edición de sugerencia:", error);
+      window.alert(error.message || "No se pudo guardar la edición. Intenta nuevamente.");
+    }
+  };
+
   const handleCambiarTonoIA = () => {
     const nuevoTonoSimple = !isSimpleTone;
     setIsSimpleTone(nuevoTonoSimple);
@@ -1473,8 +1528,8 @@ export const Analysis = () => {
                 {cardVisibility.controversias && (
                   <ControversiasCard
                     puntos={analysisData.puntos_sugeridos}
-                    onNotifyChange={registrarCambioManual}
                     onRegenerate={handleRegenerarResumen}
+                    onUpdatePoint={handleActualizarPuntoSugerido}
                     isRegenerating={isRegenerating}
                   />
                 )}
@@ -1590,6 +1645,7 @@ export const Analysis = () => {
         onClose={() => setIsJurisprudenciaOpen(false)}
         textoExpediente={textoExpediente}
         numeroExpediente={expedienteSeleccionado?.numero_expediente || ""}
+        analysisData={analysisData}
       />
       <HistorialDrawer
         isOpen={isHistorialOpen}

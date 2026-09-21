@@ -1,7 +1,29 @@
 import React, { useState, useEffect } from 'react';
 import { X, Library, Sparkles, AlertTriangle, ChevronRight, Loader2 } from 'lucide-react';
 
-export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente, numeroExpediente }) => {
+const textoSeguro = (value) => {
+  if (!value) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return "";
+  }
+};
+
+const construirContextoJurisprudencia = (analysisData) => {
+  if (!analysisData) return "";
+  return [
+    textoSeguro(analysisData.sintesis_rag?.tecnico || analysisData.resumen_tecnico),
+    textoSeguro(analysisData.postura_defensa?.tecnico || analysisData.postura_contestacion?.tecnico || analysisData.postura_contestacion),
+    textoSeguro(analysisData.revision_financiera || analysisData.financiera),
+    textoSeguro(analysisData.capacidad_cargas || analysisData.capacidad_demandado),
+    textoSeguro(analysisData.plazos),
+    textoSeguro(analysisData.sujetos_procesales)
+  ].filter(Boolean).join("\n\n");
+};
+
+export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente, numeroExpediente, analysisData }) => {
   const [casos, setCasos] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
   const [diagnostico, setDiagnostico] = useState("");
@@ -9,11 +31,13 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente, numeroE
   const [expandedIndex, setExpandedIndex] = useState(0); // El índice 0 estará abierto por defecto
 
   // Disparar la búsqueda cuando se abre el Drawer
+  const contextoBusqueda = (textoExpediente || "").trim() || construirContextoJurisprudencia(analysisData);
+
   useEffect(() => {
-    if (isOpen && textoExpediente) {
+    if (isOpen && (contextoBusqueda || numeroExpediente)) {
       buscarJurisprudencia();
     }
-  }, [isOpen, textoExpediente, numeroExpediente]);
+  }, [isOpen, contextoBusqueda, numeroExpediente]);
 
   const buscarJurisprudencia = async () => {
     setIsLoading(true);
@@ -22,11 +46,15 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente, numeroE
     setPerfilConsulta(null);
     setExpandedIndex(0);
     try {
+      const token = localStorage.getItem('access_token');
       const res = await fetch('/api/v1/jurisprudencia', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
         body: JSON.stringify({
-          texto_expediente: textoExpediente,
+          texto_expediente: contextoBusqueda,
           numero_expediente: numeroExpediente || ""
         })
       });
