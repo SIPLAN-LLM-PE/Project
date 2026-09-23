@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { AlertTriangle, Bell, CheckCircle2, ChevronDown, Loader2, ShieldAlert } from 'lucide-react';
 
 const API_BASE = 'http://localhost:8000';
@@ -41,8 +42,11 @@ const LiveNotifications = ({ usuarioActivo }) => {
   const [unreadCount, setUnreadCount] = useState(0);
   const [latestId, setLatestId] = useState(0);
   const dropdownRef = useRef(null);
+  const buttonRef = useRef(null);
+  const panelRef = useRef(null);
   const isOpenRef = useRef(false);
   const lastSeenIdRef = useRef(0);
+  const [panelPosition, setPanelPosition] = useState({ top: 0, right: 16 });
 
   const usuario = useMemo(() => {
     if (usuarioActivo?.username || usuarioActivo?.rol) return usuarioActivo;
@@ -57,6 +61,24 @@ const LiveNotifications = ({ usuarioActivo }) => {
   const rol = usuario?.rol || usuario?.role || '';
   const storageKey = `sigeja_notifications_seen_${username}`;
   const [lastSeenId, setLastSeenId] = useState(() => Number(localStorage.getItem(storageKey) || 0));
+
+  const calcularPosicionPanel = () => {
+    if (!buttonRef.current) return panelPosition;
+    const rect = buttonRef.current.getBoundingClientRect();
+    return {
+      top: Math.round(rect.bottom + 10),
+      right: Math.max(16, Math.round(window.innerWidth - rect.right)),
+    };
+  };
+
+  const toggleNotifications = () => {
+    if (isOpen) {
+      setIsOpen(false);
+      return;
+    }
+    setPanelPosition(calcularPosicionPanel());
+    setIsOpen(true);
+  };
 
   useEffect(() => {
     const stored = Number(localStorage.getItem(storageKey) || 0);
@@ -108,13 +130,31 @@ const LiveNotifications = ({ usuarioActivo }) => {
 
   useEffect(() => {
     const handleClickOutside = (event) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+      const clickedButton = buttonRef.current?.contains(event.target);
+      const clickedPanel = panelRef.current?.contains(event.target);
+      if (!clickedButton && !clickedPanel) {
         setIsOpen(false);
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  useEffect(() => {
+    const updatePanelPosition = () => {
+      setPanelPosition(calcularPosicionPanel());
+    };
+
+    if (isOpen) {
+      updatePanelPosition();
+      window.addEventListener('resize', updatePanelPosition);
+      window.addEventListener('scroll', updatePanelPosition, true);
+      return () => {
+        window.removeEventListener('resize', updatePanelPosition);
+        window.removeEventListener('scroll', updatePanelPosition, true);
+      };
+    }
+  }, [isOpen]);
 
   useEffect(() => {
     if (isOpen && latestId > 0) {
@@ -128,8 +168,9 @@ const LiveNotifications = ({ usuarioActivo }) => {
   return (
     <div className="relative" ref={dropdownRef}>
       <button
+        ref={buttonRef}
         type="button"
-        onClick={() => setIsOpen(prev => !prev)}
+        onClick={toggleNotifications}
         className="relative flex items-center bg-slate-100 border border-slate-200 rounded-lg px-3 xl:px-4 py-1.5 gap-2 xl:gap-3 cursor-pointer hover:bg-slate-200 transition-all"
       >
         <div className="relative">
@@ -152,7 +193,12 @@ const LiveNotifications = ({ usuarioActivo }) => {
       </button>
 
       {isOpen && (
-        <div className="absolute right-0 top-[calc(100%+10px)] w-[360px] max-w-[calc(100vw-32px)] bg-white border border-slate-200 rounded-lg shadow-xl z-[80] overflow-hidden">
+        createPortal(
+        <div
+          ref={panelRef}
+          style={{ top: panelPosition.top, right: panelPosition.right }}
+          className="fixed w-[360px] max-w-[calc(100vw-32px)] bg-white border border-slate-200 rounded-lg shadow-2xl z-[300] overflow-hidden"
+        >
           <div className="px-4 py-3 border-b border-slate-100">
             <p className="text-sm font-black text-[#061a3d]">Alertas en vivo</p>
             <p className="text-[11px] text-slate-500">Actualizado automaticamente cada 30 segundos</p>
@@ -189,7 +235,9 @@ const LiveNotifications = ({ usuarioActivo }) => {
               );
             })}
           </div>
-        </div>
+        </div>,
+        document.body
+        )
       )}
     </div>
   );

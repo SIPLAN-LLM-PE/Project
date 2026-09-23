@@ -27,13 +27,17 @@ const Login = () => {
     setLoading(true);
     setError(''); // Limpiamos errores anteriores
 
+    let timeoutId;
     try {
+      const controller = new AbortController();
+      timeoutId = setTimeout(() => controller.abort(), 15000);
       // 2. PETICIÓN REAL AL BACKEND FASTAPI
       const res = await fetch('/api/v1/login', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
         },
+        signal: controller.signal,
         body: JSON.stringify({
           username: username,
           password: password
@@ -59,8 +63,11 @@ const Login = () => {
       }
     } catch (err) {
       console.error("Error en autenticación:", err);
-      setError('No se pudo conectar con el servidor de autenticación.');
+      setError(err.name === 'AbortError'
+        ? 'El servidor de autenticación está demorando demasiado. Verifica que el backend esté activo y vuelve a intentar.'
+        : 'No se pudo conectar con el servidor de autenticación.');
     } finally {
+      if (timeoutId) clearTimeout(timeoutId);
       setLoading(false);
     }
   };

@@ -41,6 +41,89 @@ const MAX_UPLOAD_FILE_MB = 50;
 const MAX_UPLOAD_FILE_BYTES = MAX_UPLOAD_FILE_MB * 1024 * 1024;
 const formatFileSize = (bytes = 0) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 
+const progressStageConfig = {
+  preparando: { floor: 2, ceiling: 8, durationMs: 4000 },
+  ocr: { floor: 5, ceiling: 41, durationMs: 45000 },
+  validaciones: { floor: 42, ceiling: 50, durationMs: 9000 },
+  requiere_confirmacion: { floor: 45, ceiling: 48, durationMs: 1000 },
+  integridad: { floor: 52, ceiling: 54, durationMs: 5000 },
+  ner: { floor: 55, ceiling: 67, durationMs: 35000 },
+  rag: { floor: 68, ceiling: 81, durationMs: 95000 },
+  plazos: { floor: 82, ceiling: 87, durationMs: 12000 },
+  financiera: { floor: 88, ceiling: 92, durationMs: 35000 },
+  cargas: { floor: 93, ceiling: 95, durationMs: 25000 },
+  ensamblando: { floor: 96, ceiling: 98, durationMs: 12000 },
+  completado: { floor: 100, ceiling: 100, durationMs: 1000 },
+  error: { floor: 100, ceiling: 100, durationMs: 1000 }
+};
+
+const progressStageInsights = {
+  preparando: [
+    "Ordenando archivos y preparando el expediente para análisis.",
+    "Verificando nombres, tamaño y formato de los documentos."
+  ],
+  ocr: [
+    "Leyendo texto nativo de los PDFs.",
+    "Separando documentos y midiendo calidad OCR.",
+    "Guardando texto extraído para evitar reprocesos futuros.",
+    "Clasificando cada PDF por tipo documental."
+  ],
+  validaciones: [
+    "Buscando duplicados por expediente y hash de documento.",
+    "Revisando indicios de datos sensibles antes de continuar.",
+    "Preparando validaciones de seguridad y anonimización."
+  ],
+  integridad: [
+    "Comparando el número de expediente esperado contra los PDFs.",
+    "Validando que los documentos pertenezcan al mismo caso."
+  ],
+  ner: [
+    "Buscando demandante, demandado, DNIs, domicilios y montos.",
+    "Combinando reglas spaCy, regex y validación semántica.",
+    "Contrastando entidades extraídas con Mistral.",
+    "Limpiando posibles errores OCR en nombres y apellidos."
+  ],
+  rag: [
+    "Seleccionando fragmentos clave de demanda, audiencia, sentencia y contestación.",
+    "Preparando contexto reducido para Mistral sin perder hechos esenciales.",
+    "Mistral está generando la síntesis jurídica y ciudadana.",
+    "Revisando postura procesal, estado actual y puntos controvertidos.",
+    "Validando que el resumen no contradiga sentencia, audiencia o fallo.",
+    "Estructurando la respuesta IA en formato JSON para el dashboard."
+  ],
+  plazos: [
+    "Detectando fechas procesales relevantes.",
+    "Calculando plazos y verificando admisibilidad."
+  ],
+  financiera: [
+    "Ubicando petitorio, ofrecimientos, ingresos y gastos acreditados.",
+    "Validando montos contra evidencia literal del expediente.",
+    "Evitando confundir ingresos del demandado con petitorio."
+  ],
+  cargas: [
+    "Analizando capacidad económica y posibles cargas familiares.",
+    "Verificando dependientes, empleador e ingresos reportados.",
+    "Calculando estimación económica y alertas de coherencia."
+  ],
+  ensamblando: [
+    "Armando tarjetas del análisis y métricas de auditoría.",
+    "Guardando resultado final y trazabilidad del expediente."
+  ]
+};
+
+const getProgressStageConfig = (stage = "", percentage = 0) => {
+  const config = progressStageConfig[String(stage || "").toLowerCase()] || {
+    floor: percentage || 0,
+    ceiling: Math.min(98, Math.max(percentage || 0, (percentage || 0) + 6)),
+    durationMs: 25000
+  };
+  return {
+    ...config,
+    floor: Math.max(config.floor, percentage || 0),
+    ceiling: Math.max(config.ceiling, percentage || 0)
+  };
+};
+
 const getAnalysisSessionKey = () => {
   if (typeof window === 'undefined') return 'server';
   try {
@@ -154,9 +237,19 @@ export const Analysis = () => {
   const [activePdfIndex, setActivePdfIndex] = useState(draftActivePdfIndex);
   const fileInputRef = useRef(null);
   const chatScrollRef = useRef(null);
+  const uploadInProgressRef = useRef(false);
+  const backendProgressRef = useRef({
+    stage: "",
+    floor: 0,
+    ceiling: 0,
+    startedAt: 0,
+    durationMs: 20000
+  });
 
   const [loadingProgress, setLoadingProgress] = useState(0);
   const [loadingText, setLoadingText] = useState("Iniciando...");
+  const [loadingInsight, setLoadingInsight] = useState("Preparando lectura de documentos.");
+  const [usingBackendProgress, setUsingBackendProgress] = useState(false);
 
   // 3. ESTADOS DEL CHAT
   const [chatInput, setChatInput] = useState("");
@@ -254,24 +347,105 @@ export const Analysis = () => {
   }, [hasDocument]);
 
   useEffect(() => {
-    if (!isLoading) { setLoadingProgress(0); return; }
+    if (!isLoading) {
+      setLoadingProgress(0);
+      setUsingBackendProgress(false);
+      setLoadingInsight("Preparando lectura de documentos.");
+      backendProgressRef.current = { stage: "", floor: 0, ceiling: 0, startedAt: 0, durationMs: 20000 };
+      return;
+    }
+    if (usingBackendProgress) return;
     const timer = setInterval(() => {
       setLoadingProgress((prev) => {
         const next = prev + (Math.random() * 2.5);
-        return next >= 95 ? 95 : next;
+        return next >= 65 ? 65 : next;
       });
     }, 500);
     return () => clearInterval(timer);
-  }, [isLoading]);
+  }, [isLoading, usingBackendProgress]);
 
   useEffect(() => {
+    if (!isLoading || !usingBackendProgress) return;
+    const timer = setInterval(() => {
+      const etapa = backendProgressRef.current;
+      if (!etapa.startedAt || etapa.ceiling <= etapa.floor) return;
+      const elapsed = Date.now() - etapa.startedAt;
+      const ratio = Math.min(0.985, 1 - Math.exp(-elapsed / Math.max(1000, etapa.durationMs)));
+      const estimado = etapa.floor + ((etapa.ceiling - etapa.floor) * ratio);
+      setLoadingProgress((prev) => Math.min(etapa.ceiling, Math.max(prev, estimado)));
+    }, 500);
+    return () => clearInterval(timer);
+  }, [isLoading, usingBackendProgress]);
+
+  useEffect(() => {
+    if (usingBackendProgress) return;
     if (loadingProgress < 15) setLoadingText("Escaneando documento PDF...");
     else if (loadingProgress < 30) setLoadingText("Extrayendo texto (Módulo OCR)...");
     else if (loadingProgress < 50) setLoadingText("Identificando sujetos procesales...");
     else if (loadingProgress < 85) setLoadingText("Analizando contexto legal con Mistral IA...");
     else if (loadingProgress < 95) setLoadingText("Generando auditoría financiera y cargas...");
     else setLoadingText("Ensamblando informe final, casi listo...");
-  }, [loadingProgress]);
+  }, [loadingProgress, usingBackendProgress]);
+
+  useEffect(() => {
+    if (!isLoading) return;
+    const actualizarInsight = () => {
+      const stage = backendProgressRef.current.stage || "preparando";
+      const mensajes = progressStageInsights[stage] || [
+        "El backend sigue procesando el expediente.",
+        "Esperando respuesta del motor de análisis.",
+        "Conservando la etapa actual hasta recibir avance confirmado."
+      ];
+      const elapsed = backendProgressRef.current.startedAt
+        ? Date.now() - backendProgressRef.current.startedAt
+        : Date.now();
+      const index = Math.floor(elapsed / 3500) % mensajes.length;
+      setLoadingInsight(mensajes[index]);
+    };
+    actualizarInsight();
+    const timer = setInterval(actualizarInsight, 3500);
+    return () => clearInterval(timer);
+  }, [isLoading, usingBackendProgress]);
+
+  useEffect(() => {
+    if (!isLoading || !expedienteSeleccionado?.numero_expediente) return;
+    let cancelado = false;
+    const consultarProgreso = async () => {
+      try {
+        const numero = encodeURIComponent(expedienteSeleccionado.numero_expediente);
+        const res = await fetch(`/api/v1/analysis-progress/${numero}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (cancelado || !data) return;
+        const porcentaje = Number(data.porcentaje || 0);
+        if (porcentaje > 0) {
+          const etapa = String(data.etapa || "procesando").toLowerCase();
+          const config = getProgressStageConfig(etapa, porcentaje);
+          const previo = backendProgressRef.current;
+          if (previo.stage !== etapa || porcentaje > previo.floor) {
+            backendProgressRef.current = {
+              stage: etapa,
+              floor: Math.max(porcentaje, previo.stage === etapa ? previo.floor : config.floor),
+              ceiling: config.ceiling,
+              startedAt: Date.now(),
+              durationMs: config.durationMs
+            };
+          }
+          setUsingBackendProgress(true);
+          setLoadingProgress((prev) => Math.min(99, Math.max(prev, porcentaje)));
+          setLoadingText(data.detalle || data.etapa || "Procesando expediente...");
+        }
+      } catch (err) {
+        // Fallback silencioso: se mantiene la barra simulada si el backend aun no expone progreso.
+      }
+    };
+    consultarProgreso();
+    const timer = setInterval(consultarProgreso, 1200);
+    return () => {
+      cancelado = true;
+      clearInterval(timer);
+    };
+  }, [isLoading, expedienteSeleccionado?.numero_expediente]);
 
   useEffect(() => {
     const inicializarVistaAnalisis = async () => {
@@ -609,6 +783,10 @@ export const Analysis = () => {
   };
 
   const handleFileUpload = (event) => {
+    if (uploadInProgressRef.current || isLoading) {
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
     const files = Array.from(event.target.files);
     if (!files.length) return;
     const archivoGrande = files.find(file => file.size > MAX_UPLOAD_FILE_BYTES);
@@ -625,8 +803,14 @@ export const Analysis = () => {
   };
 
   const procesarEnvioDocumento = async (files, opciones = {}) => {
+    if (uploadInProgressRef.current && !opciones.confirmacionDatosSensibles && !opciones.confirmacionDuplicados) return;
+    uploadInProgressRef.current = true;
+    backendProgressRef.current = { stage: "", floor: 0, ceiling: 0, startedAt: 0, durationMs: 20000 };
     setIsLoading(true);
     setLoadingProgress(0);
+    setUsingBackendProgress(false);
+    setLoadingText("Preparando archivos del expediente...");
+    setLoadingInsight("Ordenando PDFs y preparando el análisis.");
     setPdfFiles([]);
     setActivePdfIndex(0);
     setResumenPorPdf([]);
@@ -657,6 +841,7 @@ export const Analysis = () => {
 
       if (res.ok && response?.status === "requires_sensitive_confirmation") {
         setIsLoading(false);
+        uploadInProgressRef.current = false;
         setSensitiveModal({
           isOpen: true,
           hallazgos: response.hallazgos_sensibles || [],
@@ -674,6 +859,7 @@ export const Analysis = () => {
           `Se detectaron posibles duplicados en la carga.\n\n${detalleDuplicados}\n\n` +
           'Si continuas, se reemplazaran los documentos guardados y se reprocesara el expediente. Deseas continuar?'
         );
+        uploadInProgressRef.current = false;
         if (confirmarReproceso) {
           await procesarEnvioDocumento(files, {
             ...opciones,
@@ -713,6 +899,7 @@ export const Analysis = () => {
             resumen: true, postura: true, plazos: true, sujetos: true,
             financiera: true, capacidad: true, controversias: true
           });
+          uploadInProgressRef.current = false;
           setIsLoading(false);
         }, 600);
       } else {
@@ -725,13 +912,17 @@ export const Analysis = () => {
           setHasDocument(false);
           setPdfFiles([]);
           setActivePdfIndex(0);
+          uploadInProgressRef.current = false;
           if (fileInputRef.current) fileInputRef.current.value = "";
         }, 4500);
       }
     } catch (error) {
       console.error("Error:", error);
       setLoadingText("Error en el análisis. Revisa la conexión o intenta con un PDF más liviano.");
-      setTimeout(() => setIsLoading(false), 2000);
+      setTimeout(() => {
+        uploadInProgressRef.current = false;
+        setIsLoading(false);
+      }, 2000);
     }
   };
 
@@ -763,6 +954,7 @@ export const Analysis = () => {
   const cancelarAnalisisPorDatosSensibles = async () => {
     const hallazgosCount = sensitiveModal.hallazgos.length;
     setSensitiveModal({ isOpen: false, hallazgos: [], files: [] });
+    uploadInProgressRef.current = false;
     setIsLoading(false);
     setHasDocument(false);
     setPdfFiles([]);
@@ -1402,6 +1594,9 @@ export const Analysis = () => {
                   <h3 className="text-lg font-bold text-[#1a3059] mb-2">Analizando Expediente</h3>
                   <p className="text-[11px] font-medium text-slate-500 mb-8 h-4 transition-all duration-300 uppercase tracking-wide">
                     {loadingText}
+                  </p>
+                  <p className="text-[11px] text-slate-500 mb-5 min-h-[34px] leading-relaxed px-4">
+                    {loadingInsight}
                   </p>
                   <div className="w-full bg-slate-200/60 rounded-full h-2.5 mb-3 overflow-hidden shadow-inner">
                     <div

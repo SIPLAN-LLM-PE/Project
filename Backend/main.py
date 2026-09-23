@@ -14,6 +14,7 @@ import base64
 import hmac
 import hashlib
 import secrets
+import threading
 from pydantic import BaseModel, Field
 import re
 from datetime import datetime, timedelta, date
@@ -70,6 +71,57 @@ MAX_UPLOAD_FILE_MB = int(os.getenv("SIGEJA_MAX_UPLOAD_FILE_MB", "50"))
 MAX_UPLOAD_FILE_BYTES = MAX_UPLOAD_FILE_MB * 1024 * 1024
 OLLAMA_RAG_TIMEOUT_SECONDS = int(os.getenv("SIGEJA_OLLAMA_RAG_TIMEOUT", "900"))
 OLLAMA_RAG_MAX_CTX = int(os.getenv("SIGEJA_OLLAMA_RAG_MAX_CTX", "32768"))
+RAG_ANALYZE_MODE = os.getenv("SIGEJA_RAG_ANALYZE_MODE", "fast").strip().lower()
+RAG_FAST_MAX_CHARS = int(os.getenv("SIGEJA_RAG_FAST_MAX_CHARS", "24000"))
+RAG_FAST_NUM_PREDICT = int(os.getenv("SIGEJA_RAG_FAST_NUM_PREDICT", "3200"))
+BERT_ANALYZE_MODE = os.getenv("SIGEJA_BERT_ANALYZE_MODE", "lexical").strip().lower()
+OCR_AUTO_DEEP_ENABLED = os.getenv("SIGEJA_OCR_AUTO_DEEP", "false").strip().lower() in ("1", "true", "yes", "si")
+OCR_AUTO_DEEP_MAX_PAGES = int(os.getenv("SIGEJA_OCR_AUTO_DEEP_MAX_PAGES", "8"))
+OCR_DEEP_MIN_TEXT_CHARS = int(os.getenv("SIGEJA_OCR_DEEP_MIN_TEXT_CHARS", "1200"))
+_ANALYSIS_LOCK = threading.Lock()
+_ANALYSIS_IN_PROGRESS: set[str] = set()
+_ANALYSIS_OCR_CACHE: dict[str, dict] = {}
+_ANALYSIS_OCR_CACHE_MAX = int(os.getenv("SIGEJA_OCR_CACHE_MAX", "80"))
+_ANALYSIS_PROGRESS: dict[str, dict] = {}
+
+
+def obtener_ollama_generate_urls() -> list[str]:
+    urls_configuradas = os.getenv("SIGEJA_OLLAMA_GENERATE_URLS", "").strip()
+    return [u.strip() for u in urls_configuradas.split(",") if u.strip()] or [
+        "http://localhost:11434/api/generate",
+        "http://ollama:11434/api/generate",
+    ]
+
+
+def post_ollama_generate(payload: dict, timeout: int | float = 120):
+    ultimo_error = None
+    for url in obtener_ollama_generate_urls():
+        try:
+            response = requests.post(url, json=payload, timeout=timeout)
+            response.raise_for_status()
+            return response
+        except Exception as e:
+            ultimo_error = e
+            print(f"⚠ Ollama generate falló en {url}: {e}")
+    raise ultimo_error
+
+
+def _progress_key(numero_expediente: str) -> str:
+    return re.sub(r'[^a-zA-Z0-9-]', '_', numero_expediente or "")
+
+
+def actualizar_progreso_analisis(numero_expediente: str, porcentaje: int, etapa: str, detalle: str = ""):
+    key = _progress_key(numero_expediente)
+    with _ANALYSIS_LOCK:
+        previo = _ANALYSIS_PROGRESS.get(key, {})
+        _ANALYSIS_PROGRESS[key] = {
+            "numero_expediente": numero_expediente,
+            "porcentaje": max(int(previo.get("porcentaje", 0) or 0), min(100, int(porcentaje))),
+            "etapa": etapa,
+            "detalle": detalle,
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "activo": key in _ANALYSIS_IN_PROGRESS
+        }
 
 
 def formatear_tamano_archivo(bytes_count: int) -> str:
@@ -432,6 +484,122 @@ def asegurar_tabla_feedback_analisis():
         conn.close()
 
 
+def asegurar_tabla_metricas_validacion():
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS metricas_validacion (
+                id SERIAL PRIMARY KEY,
+                numero_expediente TEXT UNIQUE NOT NULL,
+                fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                usuario TEXT,
+                ocr_accuracy REAL,
+                ocr_cer REAL,
+                ocr_ref_chars INTEGER,
+                ocr_generated_chars INTEGER,
+                ner_precision REAL,
+                ner_recall REAL,
+                ner_f1 REAL,
+                bert_precision REAL,
+                bert_recall REAL,
+                bert_f1 REAL,
+                referencias_ner JSONB,
+                predicciones_ner JSONB,
+                resumen_referencia TEXT,
+                resumen_generado TEXT,
+                detalle JSONB
+            )
+        """)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Error preparando tabla metricas_validacion: {e}")
+    finally:
+        conn.close()
+
+
+def asegurar_tabla_ocr_documentos():
+    conn = get_db_connection()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS ocr_documentos (
+                id SERIAL PRIMARY KEY,
+                numero_expediente TEXT NOT NULL,
+                nombre_archivo TEXT NOT NULL,
+                documento_index INTEGER DEFAULT 0,
+                sha256 TEXT NOT NULL,
+                modo_ocr TEXT NOT NULL DEFAULT 'std',
+                texto_ocr TEXT NOT NULL,
+                ocr_precision REAL,
+                metodo TEXT,
+                chars INTEGER DEFAULT 0,
+                fecha_actualizacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (numero_expediente, nombre_archivo, modo_ocr)
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ocr_documentos_sha ON ocr_documentos (sha256, modo_ocr)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ocr_documentos_exp ON ocr_documentos (numero_expediente, documento_index)")
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print(f"Error preparando tabla ocr_documentos: {e}")
+    finally:
+        conn.close()
+
+
+def obtener_ocr_documento_cache(conn, sha256: str, modo_ocr: str = "std"):
+    if not sha256:
+        return None
+    return conn.execute("""
+        SELECT texto_ocr, ocr_precision, metodo
+        FROM ocr_documentos
+        WHERE sha256 = %s AND modo_ocr = %s
+        ORDER BY fecha_actualizacion DESC
+        LIMIT 1
+    """, (sha256, modo_ocr)).fetchone()
+
+
+def guardar_ocr_documento_cache(
+    conn,
+    numero_expediente: str,
+    nombre_archivo: str,
+    documento_index: int,
+    sha256: str,
+    modo_ocr: str,
+    texto_ocr: str,
+    ocr_precision,
+    metodo: str
+):
+    if not sha256 or not texto_ocr:
+        return
+    conn.execute("""
+        INSERT INTO ocr_documentos (
+            numero_expediente, nombre_archivo, documento_index, sha256, modo_ocr,
+            texto_ocr, ocr_precision, metodo, chars, fecha_actualizacion
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        ON CONFLICT (numero_expediente, nombre_archivo, modo_ocr)
+        DO UPDATE SET
+            documento_index = EXCLUDED.documento_index,
+            sha256 = EXCLUDED.sha256,
+            texto_ocr = EXCLUDED.texto_ocr,
+            ocr_precision = EXCLUDED.ocr_precision,
+            metodo = EXCLUDED.metodo,
+            chars = EXCLUDED.chars,
+            fecha_actualizacion = CURRENT_TIMESTAMP
+    """, (
+        numero_expediente,
+        nombre_archivo,
+        documento_index,
+        sha256,
+        modo_ocr,
+        texto_ocr,
+        float(ocr_precision or 0),
+        metodo,
+        len(texto_ocr or "")
+    ))
+
+
 def extraer_numero_expediente(texto_plano):
     # Busca formatos como: 00245-2026-0-1801-JP-FC-01 o variaciones
     patron = r'(\d{4,5}\s*-\s*\d{4}\s*-\s*\d{1,4}\s*-\s*\d{4}\s*-\s*[A-Z]{2}\s*-\s*[A-Z]{2}\s*-\s*\d{1,2})'
@@ -587,6 +755,8 @@ simular_asignaciones_admin()
 crear_usuarios_prueba()
 asegurar_columnas_seguridad_usuarios()
 asegurar_tabla_feedback_analisis()
+asegurar_tabla_metricas_validacion()
+asegurar_tabla_ocr_documentos()
 
 class EditarExpedienteRequest(BaseModel):
     demandante: str
@@ -636,6 +806,19 @@ class AnalysisDraftRequest(BaseModel):
     resultados_json: dict = Field(default_factory=dict)
     detalle: str = ""
     usuario: str = "Usuario SIGEJA"
+
+
+class ValidationNERRequest(BaseModel):
+    numero_expediente: str
+    entidades_referencia: dict = Field(default_factory=dict)
+    usuario: str = "Usuario SIGEJA"
+
+
+class ValidationBERTRequest(BaseModel):
+    numero_expediente: str
+    resumen_referencia: str
+    usuario: str = "Usuario SIGEJA"
+
 
 class SensitiveValidationRequest(BaseModel):
     numero_expediente: str
@@ -852,7 +1035,7 @@ def calcular_ocr_precision(texto: str) -> float:
     split_penalty = min(0.30, n_splits * 0.03)
     return round(max(0.0, char_score - split_penalty) * 100, 1)
 
-def calcular_bert_score(texto_original: str, resumen_texto: str) -> float:
+def calcular_bert_score(texto_original: str, resumen_texto: str, usar_embeddings: bool = True) -> float:
     """
     Fidelidad RAG aproximada: mide si los conceptos relevantes del resumen
     aparecen en el texto fuente. Normaliza tildes, stopwords y sufijos frecuentes
@@ -901,6 +1084,9 @@ def calcular_bert_score(texto_original: str, resumen_texto: str) -> float:
     precision = presentes / len(tokens_res)
     cobertura = len(set(tokens_res).intersection(tokens_src)) / max(1, len(set(tokens_res)))
     score_lexico = min(1.0, (precision * 0.85) + (cobertura * 0.15) + 0.08)
+
+    if not usar_embeddings:
+        return round(score_lexico, 2)
 
     # Complemento semantico real para RAG: si Ollama/pgvector esta disponible,
     # usamos embeddings y evitamos que pequenas diferencias de redaccion bajen el score.
@@ -1046,7 +1232,25 @@ def _extraer_texto_pypdf2_pagina(pagina) -> str:
         return pagina.extract_text() or ""
 
 
-def modulo_ocr_tesseract(contenido_pdf: bytes) -> tuple:
+def _contar_paginas_pdf(contenido_pdf: bytes) -> int:
+    try:
+        return len(PyPDF2.PdfReader(io.BytesIO(contenido_pdf)).pages)
+    except Exception:
+        return 0
+
+
+def _debe_escalar_ocr_profundo(contenido_pdf: bytes, texto_actual: str, forzar_ocr: bool = False) -> bool:
+    if forzar_ocr:
+        return True
+    if not OCR_AUTO_DEEP_ENABLED:
+        return False
+    if len((texto_actual or "").strip()) >= OCR_DEEP_MIN_TEXT_CHARS:
+        paginas = _contar_paginas_pdf(contenido_pdf)
+        return paginas > 0 and paginas <= OCR_AUTO_DEEP_MAX_PAGES
+    return True
+
+
+def modulo_ocr_tesseract(contenido_pdf: bytes, permitir_ocr_profundo: bool = False) -> tuple:
     """
     Extrae texto con estrategia de 3 niveles + auto-escalado por calidad.
     Retorna (texto, precision, metodo):
@@ -1105,6 +1309,13 @@ def modulo_ocr_tesseract(contenido_pdf: bytes) -> tuple:
         print(f"⚠ pdfplumber falló: {type(e).__name__}")
 
     # NIVEL 3: OCR profundo automático (Tesseract 300 DPI + preprocesado)
+    if not _debe_escalar_ocr_profundo(contenido_pdf, texto_extraido, permitir_ocr_profundo):
+        if texto_extraido.strip():
+            calidad = calcular_ocr_precision(texto_extraido)
+            print("⚡ OCR profundo omitido: texto digital suficiente; usa OCR profundo manual si lo necesitas.")
+            prec = _comparar_textos_ocr(texto_nativo, texto_extraido) if texto_nativo and texto_nativo != texto_extraido else calidad
+            return texto_extraido, prec, "pdfplumber"
+
     print("🚀 Auto-escalado a OCR Profundo por baja calidad de texto nativo...")
     texto_ocr = modulo_ocr_avanzado_imagen(contenido_pdf)
     if texto_ocr and texto_ocr not in ("[ERROR_OCR_PROFUNDO]", ""):
@@ -1266,10 +1477,9 @@ Responde ÚNICAMENTE con este JSON (sin texto adicional):
 }}"""
 
     try:
-        res = requests.post(
-            "http://ollama:11434/api/generate",
-            json={"model": "mistral", "prompt": prompt, "format": "json",
-                  "stream": False, "options": {"temperature": 0.0}},
+        res = post_ollama_generate(
+            {"model": "mistral", "prompt": prompt, "format": "json",
+             "stream": False, "options": {"temperature": 0.0}},
             timeout=60
         )
         v = json.loads(res.json().get("response", "{}"))
@@ -1524,6 +1734,27 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
     def estandarizar_nombre(texto):
         if not texto or texto.upper() in ["NO DETECTADO", "NULL", ""]: return "No detectado"
         limpio = re.sub(r'\s+', ' ', texto).strip().upper()
+        # Algunos PDFs narrativos o respuestas LLM devuelven la frase completa
+        # ("la presente demanda se dirige contra X") como si fuera el nombre.
+        # Nos quedamos solo con la persona posterior al marcador procesal.
+        limpio = re.sub(
+            r'^(?:LA\s+)?(?:PRESENTE\s+)?DEMANDA\s+(?:DE\s+ALIMENTOS\s+)?(?:SE\s+)?(?:DIRIGE|INTERPONE|FORMULA)\s+CONTRA\s+',
+            '',
+            limpio,
+            flags=re.IGNORECASE
+        )
+        limpio = re.sub(
+            r'^.*?\bCONTRA\s+(?=[A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,}){1,5}$)',
+            '',
+            limpio,
+            flags=re.IGNORECASE
+        )
+        limpio = re.sub(
+            r'\b(?:CON\s+DOMICILIO|DOMICILIAD[AO]|IDENTIFICAD[AO]|CON\s+D\.?N\.?I\.?|DNI|PETITORIO|FUNDAMENTOS)\b.*$',
+            '',
+            limpio,
+            flags=re.IGNORECASE
+        ).strip(" ,.;:-")
         # Quitamos ruido de OCR o prefijos
         for prefijo in ['PARTE ', 'LA ', 'EL ', 'DON ', 'DOÑA ']:
             if limpio.startswith(prefijo): limpio = limpio[len(prefijo):]
@@ -1755,9 +1986,8 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
         """
         try:
             print("🤖 Consultando Mistral para extraer datos...")
-            res = requests.post(
-                "http://ollama:11434/api/generate",
-                json={
+            res = post_ollama_generate(
+                {
                     "model": "mistral",
                     "prompt": prompt_ner,
                     "format": "json",
@@ -1890,6 +2120,33 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
     # 6. ESTANDARIZACIÓN FINAL (Aplica para Mistral y Python)
     entidades["demandante"]["nombre"] = estandarizar_nombre(entidades["demandante"]["nombre"])
     entidades["demandado"]["nombre"] = estandarizar_nombre(entidades["demandado"]["nombre"])
+
+    def _nombre_sucio_procesal(nombre: str) -> bool:
+        return bool(re.search(
+            r'\b(?:DEMANDA|DIRIGE|INTERPONE|FORMULA|CONTRA|PRESENTE|PETITORIO|FUNDAMENTOS|DOMICILIO)\b',
+            str(nombre or ""),
+            re.IGNORECASE
+        ))
+
+    if _nombre_sucio_procesal(entidades["demandado"]["nombre"]) and entidades["demandado"]["dni"] not in ("No detectado", "No encontrado"):
+        patron_dni = r'(?<!\d)' + re.escape(entidades["demandado"]["dni"]) + r'(?!\d)'
+        for m_dni in re.finditer(patron_dni, texto_plano):
+            contexto = re.sub(r'\s+', ' ', texto_plano[max(0, m_dni.start() - 420):m_dni.end() + 120]).upper()
+            candidatos = [
+                r'CONTRA\s+([A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,}){1,5})\s*,?\s*(?:IDENTIFICAD[AO]|CON\s+D\.?N\.?I\.?|DNI)',
+                r'DEMANDAD[AO]\s*[:=,]?\s*([A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,}){1,5})\s*,?\s*(?:IDENTIFICAD[AO]|CON\s+D\.?N\.?I\.?|DNI)',
+                r'([A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,}){1,5})\s*,?\s*(?:IDENTIFICAD[AO]|CON\s+D\.?N\.?I\.?|DNI)\s*(?:N[°º])?\s*' + re.escape(entidades["demandado"]["dni"])
+            ]
+            for patron in candidatos:
+                m_nom = re.search(patron, contexto, re.IGNORECASE)
+                if m_nom:
+                    candidato = estandarizar_nombre(m_nom.group(1))
+                    if candidato != "No detectado" and not _nombre_sucio_procesal(candidato):
+                        print(f"🔧 Demandado corregido por contexto DNI: {entidades['demandado']['nombre']} → {candidato}")
+                        entidades["demandado"]["nombre"] = candidato
+                        break
+            if not _nombre_sucio_procesal(entidades["demandado"]["nombre"]):
+                break
 
     # 7. DEDUPLICACIÓN FINAL — si ambas partes quedaron con el mismo DNI, la demandante cede
     # (el DNI del demandado suele ser el único en el expediente cuando la demandante no tiene doc)
@@ -3304,9 +3561,8 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
     """
 
     try:
-        url = "http://ollama:11434/api/generate"
         payload = {"model": "mistral", "prompt": prompt_ia, "format": "json", "stream": False, "options": {"temperature": 0}}
-        response = requests.post(url, json=payload, timeout=90)
+        response = post_ollama_generate(payload, timeout=90)
         raw_res = cargar_json_llm(response.json().get("response", "{}"), {})
 
         # 3) Selección de petitorio con jerarquía y validación anti-alucinación.
@@ -3579,6 +3835,42 @@ def _extraer_pension_ordenada_sentencia(texto_plano: str) -> dict:
 
     return {"tipo": "no_detectado", "valor": 0.0, "evidencia": ""}
 
+def _contexto_relevante_cargas(texto_plano: str, max_chars: int = 18000) -> str:
+    texto = texto_plano or ""
+    if len(texto) <= max_chars:
+        return texto
+    patrones = (
+        "remuneracion", "remuneración", "sueldo", "ingreso", "boleta", "empleador",
+        "dependiente", "hijo", "menor", "carga familiar", "otra obligacion",
+        "sentencia", "fallo", "ordeno", "pension", "pensión", "alimentos",
+        "contestacion", "contestación", "ofrece", "propuesta"
+    )
+    fragmentos = []
+    vistos = set()
+    texto_lower = texto.lower()
+    for patron in patrones:
+        inicio = 0
+        while True:
+            idx = texto_lower.find(patron, inicio)
+            if idx < 0:
+                break
+            a = max(0, idx - 700)
+            b = min(len(texto), idx + 1100)
+            clave = (a // 300, b // 300)
+            if clave not in vistos:
+                vistos.add(clave)
+                fragmentos.append(texto[a:b])
+            inicio = idx + len(patron)
+            if sum(len(f) for f in fragmentos) >= max_chars:
+                break
+        if sum(len(f) for f in fragmentos) >= max_chars:
+            break
+    contexto = "\n\n---\n\n".join(fragmentos).strip()
+    if len(contexto) < 1200:
+        return texto[:max_chars]
+    return contexto[:max_chars]
+
+
 def modulo_capacidad_cargas(texto_plano: str) -> dict:
     """
     Versión 2.0: Módulo de Capacidad Económica y Soporte Judicial (HU14).
@@ -3638,16 +3930,16 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
     }}
     """
 
+    texto_llm = _contexto_relevante_cargas(texto_plano)
     overhead_chars = len(_construir_prompt_cargas(""))
     num_ctx, max_chars_entrada = _dimensionar_llm_dinamico(
-        len(texto_plano), NUM_PREDICT_CARGAS, overhead_chars=overhead_chars, techo_ctx=24000
+        len(texto_llm), NUM_PREDICT_CARGAS, overhead_chars=overhead_chars, techo_ctx=18000
     )
-    prompt = _construir_prompt_cargas(texto_plano[:max_chars_entrada])
+    prompt = _construir_prompt_cargas(texto_llm[:max_chars_entrada])
 
     try:
-        url = "http://ollama:11434/api/generate"
         payload = {"model": "mistral", "prompt": prompt, "format": "json", "stream": False, "options": {"temperature": 0.1, "num_predict": NUM_PREDICT_CARGAS, "top_p": 0.85, "num_ctx": num_ctx}}
-        response = requests.post(url, json=payload, timeout=60)
+        response = post_ollama_generate(payload, timeout=60)
         
         data = cargar_json_llm(response.json().get("response", "{}"), {})
 
@@ -3909,13 +4201,107 @@ def _dimensionar_llm_dinamico(chars_texto: int, num_predict: int, overhead_chars
 
     return num_ctx, max_chars_entrada
 
+def _documentos_texto_expediente(texto_plano: str) -> list[dict]:
+    partes = re.split(r"--- \[DOCUMENTO (\d+):\s*([^\]]+)\] ---", texto_plano or "")
+    documentos = []
+    if len(partes) > 1:
+        for i in range(1, len(partes), 3):
+            try:
+                indice = int(partes[i])
+            except Exception:
+                indice = len(documentos) + 1
+            nombre = partes[i + 1].strip() if i + 1 < len(partes) else f"Documento {indice}"
+            contenido = partes[i + 2].strip() if i + 2 < len(partes) else ""
+            if contenido:
+                documentos.append({"indice": indice, "nombre": nombre, "texto": contenido})
+    elif texto_plano:
+        documentos.append({"indice": 1, "nombre": "Expediente completo", "texto": texto_plano})
+    return documentos
+
+
+def _prioridad_documento_rag(nombre: str, texto: str) -> int:
+    base = _normalizar_texto_busqueda_pdf(f"{nombre} {texto[:2500]}")
+    reglas = [
+        (90, r"sentencia|fallo|declaro fundada|se resuelve|ordeno|consentida|ejecucion|retencion"),
+        (80, r"acta|audiencia unica|audiencia"),
+        (70, r"demanda|petitorio|fundamentos de hecho"),
+        (65, r"contestacion|contesta demanda|ofrece"),
+        (55, r"admisorio|admitir a tramite|auto"),
+        (45, r"oficio|notificacion|cedula"),
+    ]
+    for puntaje, patron in reglas:
+        if re.search(patron, base, re.IGNORECASE):
+            return puntaje
+    return 30
+
+
+def _fragmentos_clave_rag(texto: str, max_chars: int) -> str:
+    if len(texto or "") <= max_chars:
+        return texto or ""
+    patrones = (
+        "sentencia", "fallo", "se resuelve", "ordeno", "declaro", "fundada",
+        "consentida", "ejecucion", "retencion", "audiencia", "petitorio",
+        "demanda", "contestacion", "ofrece", "pension", "alimentos",
+        "demandante", "demandado", "dni", "juez", "especialista", "fecha"
+    )
+    lower = texto.lower()
+    fragmentos = []
+    vistos = set()
+    for patron in patrones:
+        inicio = 0
+        while True:
+            idx = lower.find(patron, inicio)
+            if idx < 0:
+                break
+            a = max(0, idx - 650)
+            b = min(len(texto), idx + 1150)
+            clave = (a // 250, b // 250)
+            if clave not in vistos:
+                vistos.add(clave)
+                fragmentos.append(texto[a:b])
+            inicio = idx + len(patron)
+            if sum(len(f) for f in fragmentos) >= max_chars:
+                break
+        if sum(len(f) for f in fragmentos) >= max_chars:
+            break
+    salida = "\n\n".join(fragmentos).strip()
+    return salida[:max_chars] if len(salida) >= 1000 else texto[:max_chars]
+
+
+def _construir_contexto_rag_rapido(texto_plano: str, max_chars: int = 24000) -> str:
+    documentos = _documentos_texto_expediente(texto_plano)
+    if not documentos or len(texto_plano or "") <= max_chars:
+        return texto_plano or ""
+
+    docs_ordenados = sorted(
+        documentos,
+        key=lambda d: (_prioridad_documento_rag(d["nombre"], d["texto"]), d["indice"]),
+        reverse=True
+    )
+    presupuesto_por_doc = max(1800, max_chars // max(1, min(len(docs_ordenados), 8)))
+    partes = []
+    total = 0
+    for doc in docs_ordenados:
+        restante = max_chars - total
+        if restante <= 800:
+            break
+        limite = min(presupuesto_por_doc, restante)
+        frag = _fragmentos_clave_rag(doc["texto"], limite)
+        bloque = f"--- [DOCUMENTO {doc['indice']}: {doc['nombre']}] ---\n{frag}".strip()
+        partes.append(bloque)
+        total += len(bloque)
+
+    contexto = "\n\n".join(partes).strip()
+    return contexto[:max_chars] if contexto else (texto_plano or "")[:max_chars]
+
+
 def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
     import json, requests
 
     dem_nombre = entidades.get("demandante", {}).get("nombre", "No detectado").title()
     demdo_nombre = entidades.get("demandado", {}).get("nombre", "No detectado").title()
 
-    NUM_PREDICT_RESUMEN = 7000
+    NUM_PREDICT_RESUMEN = 7000 if RAG_ANALYZE_MODE == "full" else RAG_FAST_NUM_PREDICT
 
     def _construir_prompt(texto_expediente: str) -> str:
         return f"""
@@ -3974,20 +4360,20 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
     }}
     """
 
+    texto_rag = texto_plano if RAG_ANALYZE_MODE == "full" else _construir_contexto_rag_rapido(texto_plano, RAG_FAST_MAX_CHARS)
+
     # Overhead real del prompt (todo menos el texto del expediente), medido en
     # caracteres, para dimensionar num_ctx con precisión en vez de estimarlo.
     overhead_chars = len(_construir_prompt(""))
     try:
-        url = "http://ollama:11434/api/generate"
-
         def ejecutar_rag_con_limites(techo_ctx: int, num_predict: int, etiqueta: str):
             num_ctx_intento, max_chars_intento = _dimensionar_llm_dinamico(
-                len(texto_plano),
+                len(texto_rag),
                 num_predict,
                 overhead_chars=overhead_chars,
                 techo_ctx=techo_ctx
             )
-            prompt_intento = _construir_prompt(texto_plano[:max_chars_intento])
+            prompt_intento = _construir_prompt(texto_rag[:max_chars_intento])
             payload = {
                 "model": "mistral-nemo",
                 "prompt": prompt_intento,
@@ -4002,15 +4388,14 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
                 }
             }
             print(
-                f"🤖 RAG {etiqueta}: ctx={num_ctx_intento}, salida={num_predict}, "
-                f"chars={max_chars_intento}/{len(texto_plano)}"
+                f"🤖 RAG {etiqueta} ({RAG_ANALYZE_MODE}): ctx={num_ctx_intento}, salida={num_predict}, "
+                f"chars={max_chars_intento}/{len(texto_rag)} fuente={len(texto_plano)}"
             )
-            response = requests.post(url, json=payload, timeout=OLLAMA_RAG_TIMEOUT_SECONDS)
-            response.raise_for_status()
-            return response
+            return post_ollama_generate(payload, timeout=OLLAMA_RAG_TIMEOUT_SECONDS)
 
         try:
-            response = ejecutar_rag_con_limites(OLLAMA_RAG_MAX_CTX, NUM_PREDICT_RESUMEN, "principal")
+            techo_principal = OLLAMA_RAG_MAX_CTX if RAG_ANALYZE_MODE == "full" else min(OLLAMA_RAG_MAX_CTX, 16384)
+            response = ejecutar_rag_con_limites(techo_principal, NUM_PREDICT_RESUMEN, "principal")
         except requests.HTTPError as http_error:
             status = getattr(http_error.response, "status_code", None)
             if status not in (500, 502, 503, 504):
@@ -4464,6 +4849,22 @@ def generar_embedding(texto: str) -> list:
 
 # --- ENDPOINTS (API) ---
 
+@app.get("/api/v1/analysis-progress/{numero_expediente}")
+async def obtener_progreso_analisis(numero_expediente: str):
+    key = _progress_key(numero_expediente)
+    with _ANALYSIS_LOCK:
+        progreso = dict(_ANALYSIS_PROGRESS.get(key, {}))
+        progreso["activo"] = key in _ANALYSIS_IN_PROGRESS
+    if not progreso:
+        return {
+            "numero_expediente": numero_expediente,
+            "porcentaje": 0,
+            "etapa": "esperando",
+            "detalle": "Aun no inicia el analisis.",
+            "activo": False
+        }
+    return progreso
+
 @app.post("/api/v1/analyze-document")
 async def analizar_expediente(
     request: Request,
@@ -4482,11 +4883,29 @@ async def analizar_expediente(
     for f in files:
         validar_nombre_y_tamano_pdf(f)
 
-    conn = get_db_connection()
+    numero_lock = re.sub(r'[^a-zA-Z0-9-]', '_', numero_expediente or "")
+    with _ANALYSIS_LOCK:
+        if numero_lock in _ANALYSIS_IN_PROGRESS:
+            raise HTTPException(
+                status_code=409,
+                detail="Ya hay un analisis en curso para este expediente. Espera a que termine antes de volver a enviarlo."
+            )
+        _ANALYSIS_IN_PROGRESS.add(numero_lock)
+        _ANALYSIS_PROGRESS[numero_lock] = {
+            "numero_expediente": numero_expediente,
+            "porcentaje": 2,
+            "etapa": "preparando",
+            "detalle": "Preparando archivos del expediente.",
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "activo": True
+        }
+
+    conn = None
     inicio_timer = time.time()
     ip_origen = obtener_ip_origen(request)
 
     try:
+        conn = get_db_connection()
         # 🛡️ 1. AUDITORÍA PREVENTIVA: Registro de inconsistencia forzada en el nombre del archivo
         if inconsistencia_nombre:
             timestamp_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -4512,6 +4931,14 @@ async def analizar_expediente(
         ocr_precisions_doc = []
         texto_total = ""
         for i, upload_file in enumerate(files):
+            base_ocr = 5
+            avance_ocr = int(base_ocr + ((i) / max(1, len(files))) * 35)
+            actualizar_progreso_analisis(
+                numero_expediente,
+                avance_ocr,
+                "ocr",
+                f"Procesando documento {i + 1} de {len(files)}: {upload_file.filename}"
+            )
             contenido = await upload_file.read()
             try:
                 validar_nombre_y_tamano_pdf(upload_file, len(contenido))
@@ -4526,23 +4953,50 @@ async def analizar_expediente(
                 conn.commit()
                 raise limite_error
             nombre_archivo = re.sub(r'[^a-zA-Z0-9._-]', '_', upload_file.filename)
+            hash_archivo = hashlib.sha256(contenido).hexdigest()
             archivos_preparados.append({
                 "contenido": contenido,
                 "nombre_archivo": nombre_archivo,
-                "filename": upload_file.filename
+                "filename": upload_file.filename,
+                "sha256": hash_archivo
             })
 
-            if forzar_ocr:
+            modo_ocr = "deep" if forzar_ocr else "std"
+            cache_key = f"{hash_archivo}:{modo_ocr}"
+            cache_ocr = _ANALYSIS_OCR_CACHE.get(cache_key)
+            cache_db = None if cache_ocr else obtener_ocr_documento_cache(conn, hash_archivo, modo_ocr)
+            if cache_ocr:
+                texto_doc = cache_ocr["texto"]
+                ocr_prec_doc = cache_ocr["precision"]
+                ocr_met_doc = cache_ocr["metodo"]
+                print(f"♻ OCR memoria [{ocr_met_doc}] {upload_file.filename}: {ocr_prec_doc}%")
+            elif cache_db:
+                texto_doc = cache_db.get("texto_ocr") or ""
+                ocr_prec_doc = cache_db.get("ocr_precision") or 0
+                ocr_met_doc = cache_db.get("metodo") or "cache"
+                _ANALYSIS_OCR_CACHE[cache_key] = {"texto": texto_doc, "precision": ocr_prec_doc, "metodo": ocr_met_doc}
+                print(f"♻ OCR persistido [{ocr_met_doc}] {upload_file.filename}: {ocr_prec_doc}%")
+            elif forzar_ocr:
                 print(f"🚀 OCR Profundo: {upload_file.filename}")
                 texto_doc = modulo_ocr_avanzado_imagen(contenido)
                 if texto_doc == "[ERROR_OCR_PROFUNDO]" or not texto_doc.strip():
-                    texto_doc, ocr_prec_doc, ocr_met_doc = modulo_ocr_tesseract(contenido)
+                    texto_doc, ocr_prec_doc, ocr_met_doc = modulo_ocr_tesseract(contenido, permitir_ocr_profundo=True)
                 else:
                     ocr_prec_doc = calcular_ocr_precision(texto_doc)
                     ocr_met_doc = "Tesseract"
+                _ANALYSIS_OCR_CACHE[cache_key] = {"texto": texto_doc, "precision": ocr_prec_doc, "metodo": ocr_met_doc}
+                guardar_ocr_documento_cache(conn, numero_expediente, nombre_archivo, i + 1, hash_archivo, modo_ocr, texto_doc, ocr_prec_doc, ocr_met_doc)
             else:
                 print(f"⚡ Lectura estándar: {upload_file.filename}")
-                texto_doc, ocr_prec_doc, ocr_met_doc = modulo_ocr_tesseract(contenido)
+                texto_doc, ocr_prec_doc, ocr_met_doc = modulo_ocr_tesseract(contenido, permitir_ocr_profundo=forzar_ocr)
+                _ANALYSIS_OCR_CACHE[cache_key] = {"texto": texto_doc, "precision": ocr_prec_doc, "metodo": ocr_met_doc}
+                guardar_ocr_documento_cache(conn, numero_expediente, nombre_archivo, i + 1, hash_archivo, modo_ocr, texto_doc, ocr_prec_doc, ocr_met_doc)
+
+            if cache_db:
+                guardar_ocr_documento_cache(conn, numero_expediente, nombre_archivo, i + 1, hash_archivo, modo_ocr, texto_doc, ocr_prec_doc, ocr_met_doc)
+
+            if len(_ANALYSIS_OCR_CACHE) > _ANALYSIS_OCR_CACHE_MAX:
+                _ANALYSIS_OCR_CACHE.pop(next(iter(_ANALYSIS_OCR_CACHE)))
 
             print(f"📊 OCR [{ocr_met_doc}] {upload_file.filename}: {ocr_prec_doc}%")
             ocr_precisions_doc.append({
@@ -4555,6 +5009,7 @@ async def analizar_expediente(
             resumenes_por_pdf.append(resumir_pdf_individual(nombre_archivo, texto_doc))
 
         texto_extraido = texto_total.strip()
+        actualizar_progreso_analisis(numero_expediente, 42, "validaciones", "Validando duplicados e indicios de datos sensibles.")
 
         hallazgos_duplicados = []
         expediente_existente = conn.execute('''
@@ -4584,7 +5039,7 @@ async def analizar_expediente(
 
         hashes_lote = {}
         for archivo in archivos_preparados:
-            hash_archivo = hashlib.sha256(archivo["contenido"]).hexdigest()
+            hash_archivo = archivo.get("sha256") or hashlib.sha256(archivo["contenido"]).hexdigest()
             archivo["sha256"] = hash_archivo
             if hash_archivo in hashes_lote:
                 hallazgos_duplicados.append({
@@ -4616,6 +5071,7 @@ async def analizar_expediente(
                 ip_origen
             )
             conn.commit()
+            actualizar_progreso_analisis(numero_expediente, 45, "requiere_confirmacion", "Se requiere confirmar duplicados antes de continuar.")
             return {
                 "status": "requires_duplicate_confirmation",
                 "requires_confirmation": True,
@@ -4643,6 +5099,7 @@ async def analizar_expediente(
                 ip_origen
             )
             conn.commit()
+            actualizar_progreso_analisis(numero_expediente, 48, "requiere_confirmacion", "Se requiere confirmar datos sensibles antes de continuar.")
             return {
                 "status": "requires_sensitive_confirmation",
                 "requires_confirmation": True,
@@ -4682,6 +5139,7 @@ async def analizar_expediente(
                 ip_origen
             )
         conn.commit()
+        actualizar_progreso_analisis(numero_expediente, 52, "integridad", "Verificando integridad interna de documentos.")
 
         # 3. 🛡️ FILTRO DE INTEGRIDAD INTERNA - Multi-PDF
         str_esperado = re.sub(r'(?i)^(expediente|exp_?|exp\.\s*)', '', numero_expediente)
@@ -4706,6 +5164,7 @@ async def analizar_expediente(
 
         # 4. PIPELINE DE ANÁLISIS AVANZADO DE INTELIGENCIA ARTIFICIAL
         print(f"✅ Control perimetral superado ({len(files)} doc(s)). Iniciando análisis cognitivo...")
+        actualizar_progreso_analisis(numero_expediente, 55, "ner", "Extrayendo sujetos procesales y DNIs.")
 
         # Calcular OCR precision sobre el texto crudo (antes de limpiar) para medir artefactos reales
         # Precisión real: promedio de las precisiones por documento (nativo vs OCR cuando hay referencia)
@@ -4721,11 +5180,16 @@ async def analizar_expediente(
         entidades_ner = modulo_ner_spacy(texto_para_ner)
         monto_p = float(entidades_ner.get("monto_solicitado", 0) or 0)
 
+        actualizar_progreso_analisis(numero_expediente, 68, "rag", "Generando sintesis RAG con Mistral. Esta es la etapa mas pesada.")
         analisis_llm = modulo_rag_mistral(texto_extraido, entidades_ner)
+        actualizar_progreso_analisis(numero_expediente, 82, "plazos", "Calculando plazos y admisibilidad.")
         analisis_plazos = modulo_extraccion_plazos(texto_extraido)
         analisis_admisibilidad = modulo_verificacion_admisibilidad(texto_extraido)
+        actualizar_progreso_analisis(numero_expediente, 88, "financiera", "Validando auditoria financiera con Mistral.")
         analisis_financiero = modulo_auditoria_financiera(texto_extraido, monto_p)
+        actualizar_progreso_analisis(numero_expediente, 93, "cargas", "Analizando capacidad economica y cargas familiares.")
         analisis_cargas = modulo_capacidad_cargas(texto_extraido)
+        actualizar_progreso_analisis(numero_expediente, 96, "ensamblando", "Ensamblando metricas y resultado final.")
         calculadora_economica = modulo_calculadora_economica(analisis_financiero, analisis_cargas)
 
         # Fuente única de verdad para el petitorio: si el módulo financiero (con
@@ -4745,7 +5209,14 @@ async def analizar_expediente(
         resumen_concatenado = ""
         if isinstance(analisis_llm.get("resumen"), dict):
             resumen_concatenado = analisis_llm["resumen"].get("tecnico", "") + " " + analisis_llm["resumen"].get("estandar", "")
-        m_bert_score = calcular_bert_score(texto_extraido, resumen_concatenado)
+        if BERT_ANALYZE_MODE in ("off", "false", "0", "none"):
+            m_bert_score = None
+        else:
+            m_bert_score = calcular_bert_score(
+                texto_extraido,
+                resumen_concatenado,
+                usar_embeddings=BERT_ANALYZE_MODE in ("semantic", "embeddings", "full")
+            )
         m_f1_ner = calcular_f1_ner(entidades_ner)
 
 # Estructuramos el diccionario exclusivo de resultados procesados por los módulos
@@ -4794,6 +5265,7 @@ async def analizar_expediente(
         ''', (json_resultados_string, timestamp_concluido, paginas_estimadas, tiempo_total,
               m_bert_score, m_f1_ner, m_ocr_precision, ocr_detalle_json, numero_expediente))
         conn.commit()
+        actualizar_progreso_analisis(numero_expediente, 100, "completado", "Analisis completado y guardado.")
         
         print(f"💾 BASE DE DATOS: Análisis RAG indexado permanentemente para el caso {numero_expediente}")
 
@@ -4819,9 +5291,16 @@ async def analizar_expediente(
         # En caso de fallas imprevistas del sistema, imprimimos la traza completa en la consola y enviamos un 500
         import traceback
         traceback.print_exc()
+        actualizar_progreso_analisis(numero_expediente, 100, "error", f"Error durante el analisis: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
-        conn.close()
+        with _ANALYSIS_LOCK:
+            _ANALYSIS_IN_PROGRESS.discard(numero_lock)
+            if numero_lock in _ANALYSIS_PROGRESS:
+                _ANALYSIS_PROGRESS[numero_lock]["activo"] = False
+                _ANALYSIS_PROGRESS[numero_lock]["timestamp"] = datetime.now().isoformat(timespec="seconds")
+        if conn:
+            conn.close()
 
 @app.post("/api/v1/audit/sensitive-validation")
 async def registrar_validacion_sensible(request: Request, payload: SensitiveValidationRequest):
@@ -5024,7 +5503,6 @@ async def chat_expediente(request: ChatRequest):
     """
     
     try:
-        url = "http://ollama:11434/api/generate"
         payload = {
             "model": "mistral",
             "prompt": prompt_sistema,
@@ -5038,8 +5516,7 @@ async def chat_expediente(request: ChatRequest):
             }
         }
         
-        response = requests.post(url, json=payload, timeout=120)
-        response.raise_for_status()
+        response = post_ollama_generate(payload, timeout=120)
         
         data = response.json()
         return {"respuesta": data.get("response", "").strip()}
@@ -5109,7 +5586,6 @@ SIGEJA-Chat:
 """
 
     try:
-        url = "http://ollama:11434/api/generate"
         payload = {
             "model": "mistral",
             "prompt": prompt_sistema,
@@ -5123,8 +5599,7 @@ SIGEJA-Chat:
             }
         }
 
-        response = requests.post(url, json=payload, timeout=120)
-        response.raise_for_status()
+        response = post_ollama_generate(payload, timeout=120)
 
         data = response.json()
         return {
@@ -5197,7 +5672,6 @@ async def regenerar_resumen_con_feedback(req: RegenerarRequest, request: Request
     """
     
     try:
-        url = "http://ollama:11434/api/generate"
         payload = {
             "model": "mistral",
             "prompt": prompt_regeneracion,
@@ -5206,8 +5680,7 @@ async def regenerar_resumen_con_feedback(req: RegenerarRequest, request: Request
             "options": {"temperature": 0.1, "num_predict": 7000}
         }
         
-        response = requests.post(url, json=payload, timeout=400)
-        response.raise_for_status()
+        response = post_ollama_generate(payload, timeout=400)
         
         nuevo_analisis = cargar_json_llm(response.json().get("response", "{}"), {})
         conn_feedback = get_db_connection()
@@ -6494,6 +6967,728 @@ async def get_live_notifications(username: str = "", rol: str = "", since_id: in
     finally:
         conn.close()
 
+
+def _normalizar_valor_metrica(valor) -> str:
+    texto = str(valor or "").strip().lower()
+    texto = unicodedata.normalize("NFKD", texto)
+    texto = "".join(ch for ch in texto if not unicodedata.combining(ch))
+    texto = re.sub(r"\s+", " ", texto)
+    texto = re.sub(r"[^a-z0-9/.\- ]", "", texto)
+    return texto.strip()
+
+
+def _valor_metrica_vacio(valor) -> bool:
+    texto = _normalizar_valor_metrica(valor)
+    return texto in {
+        "", "none", "null", "no detectado", "no encontrado", "sin dato",
+        "sin datos", "n/a", "na", "-", "0", "0.0", "s/. 0.00", "s/ 0.00"
+    }
+
+
+def _normalizar_monto_metrica(valor):
+    texto = str(valor or "").lower().replace("s/.", "").replace("s/", "").replace("soles", "")
+    texto = texto.replace(",", "")
+    match = re.search(r'\d+(?:\.\d+)?', texto)
+    if not match:
+        return None
+    try:
+        return round(float(match.group(0)), 2)
+    except Exception:
+        return None
+
+
+def _normalizar_fecha_metrica(valor):
+    texto = _normalizar_valor_metrica(valor)
+    if _valor_metrica_vacio(texto):
+        return None
+    m = re.search(r'(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})', texto)
+    if not m:
+        return None
+    dia, mes, anio = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if anio < 100:
+        anio += 2000
+    try:
+        return datetime(anio, mes, dia).strftime("%d/%m/%Y")
+    except ValueError:
+        return None
+
+
+def _valores_normalizados_categoria(categoria: str, valor) -> list:
+    valores = valor if isinstance(valor, list) else re.split(r"[\n;,]+", str(valor or ""))
+    salida = []
+    for item in valores:
+        if _valor_metrica_vacio(item):
+            continue
+        if categoria.startswith("monto_") or categoria == "ingreso_demandado":
+            norm = _normalizar_monto_metrica(item)
+            if norm is None:
+                continue
+            norm = f"{norm:.2f}"
+        elif categoria.startswith("fecha_"):
+            norm = _normalizar_fecha_metrica(item)
+            if not norm:
+                continue
+        elif categoria.startswith("dni_"):
+            m = re.search(r'\d{8}', str(item or ""))
+            if not m:
+                continue
+            norm = m.group(0)
+        else:
+            norm = _normalizar_valor_metrica(item)
+            norm = re.sub(r'\botros dependientes del demandado\b', '', norm).strip()
+            if not norm:
+                continue
+        if norm not in salida:
+            salida.append(norm)
+    return salida
+
+
+def _valores_equivalentes_ner(categoria: str, esperado: str, predicho: str) -> bool:
+    if esperado == predicho:
+        return True
+    if categoria.startswith("monto_") or categoria == "ingreso_demandado":
+        try:
+            return abs(float(esperado) - float(predicho)) < 0.01
+        except Exception:
+            return False
+    if categoria.startswith("fecha_") or categoria.startswith("dni_"):
+        return False
+    esperado_tokens = set(_tokenizar_metricas(esperado))
+    predicho_tokens = set(_tokenizar_metricas(predicho))
+    if not esperado_tokens or not predicho_tokens:
+        return False
+    inter = esperado_tokens & predicho_tokens
+    cobertura = len(inter) / max(1, len(esperado_tokens))
+    precision = len(inter) / max(1, len(predicho_tokens))
+    return cobertura >= 0.8 or (len(esperado_tokens) <= 4 and cobertura >= 0.75 and precision >= 0.45)
+
+
+def _tokenizar_metricas(texto: str) -> list[str]:
+    normalizado = _normalizar_valor_metrica(texto)
+    return [tok for tok in re.findall(r"[a-z0-9]{3,}", normalizado) if tok not in {"para", "con", "del", "los", "las", "una", "uno", "por"}]
+
+
+def _valores_referencia_lista(valor) -> list[str]:
+    if valor is None:
+        return []
+    valores = valor if isinstance(valor, list) else re.split(r"[\n;,]+", str(valor))
+    salida = []
+    for item in valores:
+        if _valor_metrica_vacio(item):
+            continue
+        norm = _normalizar_valor_metrica(item)
+        if norm and norm not in salida:
+            salida.append(norm)
+    return salida
+
+
+def _distancia_levenshtein(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    if len(a) < len(b):
+        a, b = b, a
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        curr = [i]
+        for j, cb in enumerate(b, 1):
+            curr.append(min(curr[j - 1] + 1, prev[j] + 1, prev[j - 1] + (0 if ca == cb else 1)))
+        prev = curr
+    return prev[-1]
+
+
+def _normalizar_texto_ocr_metricas(texto: str) -> str:
+    texto = unicodedata.normalize("NFKC", texto or "")
+    texto = texto.replace("\r\n", "\n").replace("\r", "\n")
+    texto = re.sub(r'[ \t]+', ' ', texto)
+    texto = re.sub(r'\n{3,}', '\n\n', texto)
+    return texto.strip()
+
+
+def _muestras_texto_metricas(texto: str, sample_chars: int = 6000, bloques: int = 6) -> str:
+    texto = texto or ""
+    if len(texto) <= sample_chars:
+        return texto
+    bloque_len = max(400, sample_chars // bloques)
+    max_start = max(0, len(texto) - bloque_len)
+    partes = []
+    for i in range(bloques):
+        start = int((max_start * i) / max(1, bloques - 1))
+        partes.append(texto[start:start + bloque_len])
+    return "\n".join(partes)
+
+
+def calcular_metricas_ocr_cer(texto_referencia: str, texto_ocr: str) -> dict:
+    import difflib
+    ref = _normalizar_texto_ocr_metricas(texto_referencia)
+    hyp = _normalizar_texto_ocr_metricas(texto_ocr)
+    if not ref.strip():
+        raise HTTPException(status_code=400, detail="El texto de referencia OCR esta vacio.")
+    max_exact_chars = int(os.getenv("SIGEJA_OCR_CER_EXACT_MAX_CHARS", "5000"))
+    if len(ref) <= max_exact_chars and len(hyp) <= max_exact_chars:
+        distancia = _distancia_levenshtein(ref, hyp)
+        cer = distancia / max(1, len(ref))
+        metodo = "levenshtein_exacto"
+    else:
+        sample_chars = int(os.getenv("SIGEJA_OCR_CER_SAMPLE_CHARS", "12000"))
+        ref_m = _muestras_texto_metricas(ref, sample_chars=sample_chars)
+        hyp_m = _muestras_texto_metricas(hyp, sample_chars=sample_chars)
+        ratio = difflib.SequenceMatcher(None, ref_m, hyp_m, autojunk=True).ratio()
+        cer = max(0.0, min(1.0, 1.0 - ratio))
+        distancia = int(cer * len(ref))
+        metodo = "sequence_matcher_muestreado"
+    accuracy = max(0.0, 1.0 - cer) * 100
+    return {
+        "ocr_accuracy": round(accuracy, 2),
+        "ocr_cer": round(cer, 4),
+        "ocr_ref_chars": len(ref),
+        "ocr_generated_chars": len(hyp),
+        "distancia_edicion": distancia,
+        "metodo": metodo
+    }
+
+
+def _rutas_pdf_expediente(numero_expediente: str) -> list[str]:
+    nombre_seguro = re.sub(r'[^a-zA-Z0-9-]', '_', numero_expediente or "")
+    base_pdfs = os.path.join(os.path.dirname(os.path.abspath(__file__)), "pdfs_guardados")
+    carpeta = os.path.join(base_pdfs, nombre_seguro)
+    if os.path.isdir(carpeta):
+        return [os.path.join(carpeta, archivo) for archivo in sorted(os.listdir(carpeta)) if archivo.lower().endswith(".pdf")]
+    ruta_unica = os.path.join(base_pdfs, f"{nombre_seguro}.pdf")
+    return [ruta_unica] if os.path.exists(ruta_unica) else []
+
+
+def reconstruir_texto_ocr_expediente(numero_expediente: str) -> tuple[str, list]:
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("""
+            SELECT nombre_archivo, texto_ocr, ocr_precision, metodo, chars
+            FROM ocr_documentos
+            WHERE numero_expediente = %s AND modo_ocr = 'std'
+            ORDER BY documento_index ASC, id ASC
+        """, (numero_expediente,)).fetchall()
+        if rows:
+            textos = [r.get("texto_ocr") or "" for r in rows]
+            detalle = [
+                {
+                    "archivo": (r.get("nombre_archivo") or "").replace("_", " "),
+                    "chars": r.get("chars") or len(r.get("texto_ocr") or ""),
+                    "metodo": r.get("metodo") or "cache",
+                    "precision_estimada": round(float(r.get("ocr_precision") or 0), 2),
+                    "origen": "ocr_persistido"
+                }
+                for r in rows
+            ]
+            return "\n\n".join(textos).strip(), detalle
+    finally:
+        conn.close()
+
+    textos = []
+    detalle = []
+    for ruta_pdf in _rutas_pdf_expediente(numero_expediente):
+        try:
+            with open(ruta_pdf, "rb") as f_pdf:
+                contenido = f_pdf.read()
+            sha = hashlib.sha256(contenido).hexdigest()
+            cache_key = f"{sha}:std"
+            cache_ocr = _ANALYSIS_OCR_CACHE.get(cache_key)
+            if cache_ocr:
+                texto_doc = cache_ocr["texto"]
+                precision_doc = cache_ocr["precision"]
+                metodo_doc = cache_ocr["metodo"]
+            else:
+                texto_doc, precision_doc, metodo_doc = modulo_ocr_tesseract(contenido)
+                _ANALYSIS_OCR_CACHE[cache_key] = {"texto": texto_doc, "precision": precision_doc, "metodo": metodo_doc}
+            textos.append(texto_doc or "")
+            detalle.append({
+                "archivo": os.path.basename(ruta_pdf).replace("_", " "),
+                "chars": len(texto_doc or ""),
+                "metodo": metodo_doc,
+                "precision_estimada": round(float(precision_doc or 0), 2)
+            })
+        except Exception as e:
+            detalle.append({"archivo": os.path.basename(ruta_pdf), "error": str(e)})
+    return "\n\n".join(textos).strip(), detalle
+
+
+def _recorrer_valores_json(obj):
+    if isinstance(obj, dict):
+        for valor in obj.values():
+            yield from _recorrer_valores_json(valor)
+    elif isinstance(obj, list):
+        for valor in obj:
+            yield from _recorrer_valores_json(valor)
+    else:
+        yield obj
+
+
+def _extraer_resumen_generado(data: dict) -> str:
+    sintesis = data.get("sintesis_rag", {}) if isinstance(data, dict) else {}
+    if isinstance(sintesis, dict):
+        # Para validacion BERTScore se compara contra un unico resumen de salida.
+        # Concatenar tono tecnico + estandar + ciudadano castiga artificialmente
+        # la precision porque triplica informacion y estilos.
+        return str(
+            sintesis.get("estandar")
+            or sintesis.get("tecnico")
+            or sintesis.get("ciudadano")
+            or ""
+        ).strip()
+    return str(sintesis or "").strip()
+
+
+def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
+    sujetos = data.get("sujetos_procesales", {}) if isinstance(data, dict) else {}
+    demandante = sujetos.get("demandante", {}) if isinstance(sujetos, dict) else {}
+    demandado = sujetos.get("demandado", {}) if isinstance(sujetos, dict) else {}
+    financiera = data.get("revision_financiera", {}) if isinstance(data, dict) else {}
+    capacidad = data.get("capacidad_cargas", {}) if isinstance(data, dict) else {}
+    calculadora = data.get("calculadora_economica", {}) if isinstance(data, dict) else {}
+    plazos = data.get("plazos", {}) if isinstance(data, dict) else {}
+    auditoria_temporal = plazos.get("auditoria_temporal", {}) if isinstance(plazos, dict) else {}
+    eventos = auditoria_temporal.get("eventos_procesales", {}) if isinstance(auditoria_temporal, dict) else {}
+    dependientes = capacidad.get("dependientes", []) if isinstance(capacidad, dict) else []
+    menores = []
+    if isinstance(dependientes, list):
+        for dep in dependientes:
+            if isinstance(dep, dict):
+                menores.append(dep.get("nombre") or dep.get("dependiente") or dep.get("detalle"))
+            else:
+                menores.append(dep)
+    def fecha_evento(*tipos):
+        for tipo in tipos:
+            fecha = eventos.get(tipo, {}).get("fecha") if isinstance(eventos.get(tipo), dict) else None
+            if fecha:
+                return fecha
+        return None
+
+    monto_fijado = (
+        capacidad.get("monto_pension_ordenada_estimado")
+        or calculadora.get("monto_estimado")
+        or calculadora.get("estimacion")
+        or financiera.get("monto_ofrecido")
+        or financiera.get("monto_fijado")
+    )
+    def monto_ref(valor):
+        try:
+            monto = float(valor or 0)
+            return formato_monto(monto) if monto > 0 else None
+        except Exception:
+            return valor
+
+    pred = {
+        "nombre_demandante": [demandante.get("nombre")],
+        "nombre_demandado": [demandado.get("nombre")],
+        "menor": menores,
+        "dni_demandante": [demandante.get("dni")],
+        "dni_demandado": [demandado.get("dni")],
+        "monto_petitorio": [monto_ref(financiera.get("petitorio") or financiera.get("monto_petitorio") or (sujetos.get("monto_solicitado") if isinstance(sujetos, dict) else None))],
+        "ingreso_demandado": [monto_ref(capacidad.get("total_ingresos") or financiera.get("ingreso_demandado"))],
+        "monto_fijado_ofrecido": [monto_ref(monto_fijado)],
+        "fecha_presentacion_demanda": [fecha_evento("demanda", "presentacion")],
+        "fecha_audiencia_unica": [fecha_evento("audiencia")],
+        "fecha_resolucion_admisorio": [fecha_evento("admision", "sentencia")],
+    }
+    return {categoria: _valores_referencia_lista(valores) for categoria, valores in pred.items()}
+
+
+def calcular_metricas_ner(referencias: dict, predicciones: dict) -> dict:
+    categorias = [
+        "nombre_demandante", "nombre_demandado", "menor", "dni_demandante", "dni_demandado",
+        "monto_petitorio", "ingreso_demandado", "monto_fijado_ofrecido",
+        "fecha_presentacion_demanda", "fecha_audiencia_unica", "fecha_resolucion_admisorio"
+    ]
+    ref_set = set()
+    pred_set = set()
+    tp = 0
+    detalle_campos = []
+    for categoria in categorias:
+        refs = _valores_normalizados_categoria(categoria, (referencias or {}).get(categoria))
+        preds = _valores_normalizados_categoria(categoria, (predicciones or {}).get(categoria))
+        for valor in refs:
+            ref_set.add(f"{categoria}:{valor}")
+        for valor in preds:
+            pred_set.add(f"{categoria}:{valor}")
+        if not refs:
+            continue
+        acertado = any(_valores_equivalentes_ner(categoria, ref, pred) for ref in refs for pred in preds)
+        if acertado:
+            tp += 1
+        detalle_campos.append({
+            "campo": categoria,
+            "esperado": refs,
+            "predicho": preds,
+            "estado": "correcto" if acertado else "faltante",
+            "score": 1.0 if acertado else 0.0
+        })
+
+    campos_evaluados = len(detalle_campos)
+    predichas_evaluables = sum(1 for item in detalle_campos if item["predicho"])
+    precision = tp / predichas_evaluables if predichas_evaluables else (1.0 if tp and campos_evaluados else 0.0)
+    recall = tp / campos_evaluados if campos_evaluados else 0.0
+    f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+    faltantes = [
+        f"{item['campo']}:{' | '.join(item['esperado'])}"
+        for item in detalle_campos
+        if item["estado"] != "correcto"
+    ]
+    sobrantes = [
+        f"{item['campo']}:{' | '.join(item['predicho'])}"
+        for item in detalle_campos
+        if item["estado"] != "correcto" and item["predicho"]
+    ]
+    return {
+        "ner_precision": round(precision, 4),
+        "ner_recall": round(recall, 4),
+        "ner_f1": round(f1, 4),
+        "tp": tp,
+        "predichas": predichas_evaluables,
+        "referencia": campos_evaluados,
+        "faltantes": sorted(faltantes),
+        "sobrantes": sorted(sobrantes),
+        "detalle_campos": detalle_campos
+    }
+
+
+def consolidar_ner_por_campo(rows) -> list:
+    acumulado = {}
+    for row in rows or []:
+        detalle = cargar_json_bd(row.get("detalle"), {}) or {}
+        ner = detalle.get("ner", {}) if isinstance(detalle, dict) else {}
+        campos = ner.get("detalle_campos", []) if isinstance(ner, dict) else []
+        if not isinstance(campos, list):
+            continue
+        for item in campos:
+            if not isinstance(item, dict):
+                continue
+            campo = item.get("campo")
+            if not campo:
+                continue
+            stats = acumulado.setdefault(campo, {"campo": campo, "evaluados": 0, "correctos": 0, "fallidos": 0})
+            stats["evaluados"] += 1
+            if item.get("estado") == "correcto":
+                stats["correctos"] += 1
+            else:
+                stats["fallidos"] += 1
+    resumen = []
+    for stats in acumulado.values():
+        evaluados = stats["evaluados"]
+        correctos = stats["correctos"]
+        stats["accuracy"] = round((correctos / evaluados) * 100, 2) if evaluados else None
+        resumen.append(stats)
+    return sorted(resumen, key=lambda item: (-1 if item["accuracy"] is None else -item["accuracy"], item["campo"]))
+
+
+def calcular_metricas_bertscore_validacion(resumen_referencia: str, resumen_generado: str) -> dict:
+    referencia = (resumen_referencia or "").strip()
+    generado = (resumen_generado or "").strip()
+    if not referencia:
+        raise HTTPException(status_code=400, detail="El resumen manual de referencia esta vacio.")
+    if not generado:
+        raise HTTPException(status_code=400, detail="El expediente no tiene resumen automatico para comparar.")
+    try:
+        from bert_score import score as bert_score_lib
+        p, r, f1 = bert_score_lib([generado], [referencia], lang="es", verbose=False)
+        return {
+            "bert_precision": round(float(p[0]), 4),
+            "bert_recall": round(float(r[0]), 4),
+            "bert_f1": round(float(f1[0]), 4),
+            "metodo": "bert_score"
+        }
+    except Exception as e:
+        ref_tokens = set(_tokenizar_metricas(referencia))
+        gen_tokens = set(_tokenizar_metricas(generado))
+        inter = ref_tokens.intersection(gen_tokens)
+        precision = len(inter) / len(gen_tokens) if gen_tokens else 0.0
+        recall = len(inter) / len(ref_tokens) if ref_tokens else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) else 0.0
+        return {
+            "bert_precision": round(precision, 4),
+            "bert_recall": round(recall, 4),
+            "bert_f1": round(f1, 4),
+            "metodo": "lexico_fallback",
+            "nota": f"BERTScore no disponible localmente: {e}"
+        }
+
+
+def _upsert_metricas_validacion(conn, numero: str, usuario: str, campos: dict):
+    existente = conn.execute("SELECT id, detalle FROM metricas_validacion WHERE numero_expediente = %s", (numero,)).fetchone()
+    if existente and "detalle" in campos:
+        detalle_actual = cargar_json_bd(existente.get("detalle"), {}) or {}
+        detalle_nuevo = cargar_json_bd(campos.get("detalle"), {}) or {}
+        if isinstance(detalle_actual, dict) and isinstance(detalle_nuevo, dict):
+            detalle_actual.update(detalle_nuevo)
+            campos["detalle"] = json.dumps(detalle_actual, ensure_ascii=False)
+    columnas = ["fecha_actualizacion", "usuario"] + list(campos.keys())
+    valores = [datetime.now(), usuario] + list(campos.values())
+    if existente:
+        set_sql = ", ".join([f"{col} = %s" for col in columnas])
+        conn.execute(f"UPDATE metricas_validacion SET {set_sql} WHERE numero_expediente = %s", tuple(valores + [numero]))
+    else:
+        cols_sql = ", ".join(["numero_expediente"] + columnas)
+        placeholders = ", ".join(["%s"] * (len(columnas) + 1))
+        conn.execute(f"INSERT INTO metricas_validacion ({cols_sql}) VALUES ({placeholders})", tuple([numero] + valores))
+
+
+def _fila_validacion_dict(row, predicciones_actuales: dict = None) -> dict:
+    predicciones_actuales = predicciones_actuales or {}
+    if not row:
+        return {
+            "ner": {
+                "precision": None,
+                "recall": None,
+                "f1": None,
+                "referencias": {},
+                "predicciones": predicciones_actuales,
+            }
+        }
+    return {
+        "numero_expediente": row.get("numero_expediente"),
+        "fecha_actualizacion": formatear_fecha_corta(row.get("fecha_actualizacion"), "—"),
+        "usuario": row.get("usuario") or "—",
+        "ocr": {
+            "accuracy": row.get("ocr_accuracy"),
+            "cer": row.get("ocr_cer"),
+            "ref_chars": row.get("ocr_ref_chars"),
+            "generated_chars": row.get("ocr_generated_chars"),
+        },
+        "ner": {
+            "precision": row.get("ner_precision"),
+            "recall": row.get("ner_recall"),
+            "f1": row.get("ner_f1"),
+            "referencias": cargar_json_bd(row.get("referencias_ner"), {}) or {},
+            "predicciones": predicciones_actuales or cargar_json_bd(row.get("predicciones_ner"), {}) or {},
+        },
+        "bert": {
+            "precision": row.get("bert_precision"),
+            "recall": row.get("bert_recall"),
+            "f1": row.get("bert_f1"),
+            "resumen_referencia": row.get("resumen_referencia") or "",
+            "resumen_generado": row.get("resumen_generado") or "",
+        },
+        "detalle": cargar_json_bd(row.get("detalle"), {}) or {}
+    }
+
+
+@app.get("/api/v1/validation-metrics/expedientes")
+async def listar_expedientes_validacion(request: Request):
+    conn = get_db_connection()
+    try:
+        rows = conn.execute("""
+            SELECT numero_expediente, fecha_analisis, demandante, demandado, json_resultados
+            FROM registro_expedientes
+            WHERE json_resultados IS NOT NULL
+            ORDER BY fecha_analisis DESC NULLS LAST, numero_expediente ASC
+        """).fetchall()
+        return {
+            "status": "success",
+            "expedientes": [
+                {
+                    "numero_expediente": r["numero_expediente"],
+                    "fecha_analisis": formatear_fecha_corta(r.get("fecha_analisis"), "—"),
+                    "demandante": r.get("demandante") or "No detectado",
+                    "demandado": r.get("demandado") or "No detectado",
+                }
+                for r in rows
+            ]
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/validation-metrics/summary")
+async def resumen_metricas_validacion(request: Request):
+    conn = get_db_connection()
+    try:
+        stats = conn.execute("""
+            SELECT
+                COUNT(*) AS total,
+                AVG(ocr_accuracy) AS avg_ocr,
+                AVG(ner_precision) AS avg_ner_precision,
+                AVG(ner_recall) AS avg_ner_recall,
+                AVG(ner_f1) AS avg_ner_f1,
+                AVG(bert_precision) AS avg_bert_precision,
+                AVG(bert_recall) AS avg_bert_recall,
+                AVG(bert_f1) AS avg_bert_f1
+            FROM metricas_validacion
+        """).fetchone()
+        rows = conn.execute("""
+            SELECT numero_expediente, fecha_actualizacion, ocr_accuracy, ner_f1, bert_f1, detalle
+            FROM metricas_validacion
+            ORDER BY fecha_actualizacion DESC
+        """).fetchall()
+        ner_por_campo = consolidar_ner_por_campo(rows)
+        return {
+            "status": "success",
+            "global": {
+                "total": stats.get("total") or 0,
+                "ocr_accuracy": round(float(stats["avg_ocr"]), 2) if stats.get("avg_ocr") is not None else None,
+                "ner_precision": round(float(stats["avg_ner_precision"]), 4) if stats.get("avg_ner_precision") is not None else None,
+                "ner_recall": round(float(stats["avg_ner_recall"]), 4) if stats.get("avg_ner_recall") is not None else None,
+                "ner_f1": round(float(stats["avg_ner_f1"]), 4) if stats.get("avg_ner_f1") is not None else None,
+                "bert_precision": round(float(stats["avg_bert_precision"]), 4) if stats.get("avg_bert_precision") is not None else None,
+                "bert_recall": round(float(stats["avg_bert_recall"]), 4) if stats.get("avg_bert_recall") is not None else None,
+                "bert_f1": round(float(stats["avg_bert_f1"]), 4) if stats.get("avg_bert_f1") is not None else None,
+            },
+            "expedientes": [
+                {
+                    "numero_expediente": r["numero_expediente"],
+                    "fecha": formatear_fecha_corta(r.get("fecha_actualizacion"), "—"),
+                    "ocr_accuracy": r.get("ocr_accuracy"),
+                    "ner_f1": r.get("ner_f1"),
+                    "bert_f1": r.get("bert_f1"),
+                }
+                for r in rows
+            ],
+            "ner_por_campo": ner_por_campo
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/validation-metrics/{numero}")
+async def obtener_metricas_validacion(numero: str, request: Request):
+    conn = get_db_connection()
+    try:
+        fila = verificar_acceso_expediente_o_rechazar(conn, request, numero, "validacion de metricas")
+        data = cargar_json_bd(fila.get("json_resultados"), {}) or {}
+        predicciones_actuales = _extraer_predicciones_ner(data, numero)
+        row = conn.execute("SELECT * FROM metricas_validacion WHERE numero_expediente = %s", (numero,)).fetchone()
+        return {"status": "success", "metricas": _fila_validacion_dict(row, predicciones_actuales)}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/validation-metrics/ocr")
+def validar_ocr_metricas(
+    request: Request,
+    numero_expediente: str = Form(...),
+    usuario: str = Form("Usuario SIGEJA"),
+    referencia_txt: UploadFile = File(...)
+):
+    if not referencia_txt.filename.lower().endswith(".txt"):
+        raise HTTPException(status_code=400, detail="Debes cargar un archivo .txt con el texto corregido manualmente.")
+    contenido = referencia_txt.file.read()
+    try:
+        texto_referencia = contenido.decode("utf-8")
+    except UnicodeDecodeError:
+        texto_referencia = contenido.decode("latin-1", errors="replace")
+    conn = get_db_connection()
+    try:
+        verificar_acceso_expediente_o_rechazar(conn, request, numero_expediente, "validacion OCR")
+        texto_ocr, detalle_docs = reconstruir_texto_ocr_expediente(numero_expediente)
+        if not texto_ocr.strip():
+            raise HTTPException(status_code=400, detail="No se pudo reconstruir texto OCR desde los PDFs guardados del expediente.")
+        metricas = calcular_metricas_ocr_cer(texto_referencia, texto_ocr)
+        distancia = metricas.pop("distancia_edicion")
+        metodo_cer = metricas.pop("metodo", "levenshtein")
+        detalle = {"ocr": {"archivo_referencia": referencia_txt.filename, "documentos": detalle_docs, "distancia_edicion": distancia, "metodo_cer": metodo_cer}}
+        _upsert_metricas_validacion(conn, numero_expediente, usuario, {**metricas, "detalle": json.dumps(detalle, ensure_ascii=False)})
+        registrar_evento_auditoria(conn, request, "VALIDACION_METRICAS", usuario=usuario, expediente=numero_expediente, detalle=f"OCR validado con CER={metricas['ocr_cer']} accuracy={metricas['ocr_accuracy']}%", severidad="INFO")
+        conn.commit()
+        return {"status": "success", "ocr": metricas, "detalle": detalle["ocr"]}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"No se pudo validar OCR: {e}")
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/validation-metrics/ner")
+async def validar_ner_metricas(payload: ValidationNERRequest, request: Request):
+    conn = get_db_connection()
+    try:
+        fila = verificar_acceso_expediente_o_rechazar(conn, request, payload.numero_expediente, "validacion NER")
+        data = cargar_json_bd(fila.get("json_resultados"), {}) or {}
+        predicciones = _extraer_predicciones_ner(data, payload.numero_expediente)
+        metricas = calcular_metricas_ner(payload.entidades_referencia, predicciones)
+        detalle = {"ner": {"tp": metricas.pop("tp"), "predichas": metricas.pop("predichas"), "referencia": metricas.pop("referencia"), "faltantes": metricas.pop("faltantes"), "sobrantes": metricas.pop("sobrantes"), "detalle_campos": metricas.pop("detalle_campos", [])}}
+        _upsert_metricas_validacion(conn, payload.numero_expediente, payload.usuario, {
+            **metricas,
+            "referencias_ner": json.dumps(payload.entidades_referencia, ensure_ascii=False),
+            "predicciones_ner": json.dumps(predicciones, ensure_ascii=False),
+            "detalle": json.dumps(detalle, ensure_ascii=False)
+        })
+        registrar_evento_auditoria(conn, request, "VALIDACION_METRICAS", usuario=payload.usuario, expediente=payload.numero_expediente, detalle=f"NER validado F1={metricas['ner_f1']} precision={metricas['ner_precision']} recall={metricas['ner_recall']}", severidad="INFO")
+        conn.commit()
+        return {"status": "success", "ner": metricas, "predicciones": predicciones, "detalle": detalle["ner"]}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"No se pudo validar NER: {e}")
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/validation-metrics/bertscore")
+async def validar_bert_metricas(payload: ValidationBERTRequest, request: Request):
+    conn = get_db_connection()
+    try:
+        fila = verificar_acceso_expediente_o_rechazar(conn, request, payload.numero_expediente, "validacion BERTScore")
+        data = cargar_json_bd(fila.get("json_resultados"), {}) or {}
+        resumen_generado = _extraer_resumen_generado(data)
+        metricas = calcular_metricas_bertscore_validacion(payload.resumen_referencia, resumen_generado)
+        detalle = {"bert": {"metodo": metricas.pop("metodo"), "nota": metricas.pop("nota", "")}}
+        _upsert_metricas_validacion(conn, payload.numero_expediente, payload.usuario, {
+            **metricas,
+            "resumen_referencia": payload.resumen_referencia,
+            "resumen_generado": resumen_generado,
+            "detalle": json.dumps(detalle, ensure_ascii=False)
+        })
+        registrar_evento_auditoria(conn, request, "VALIDACION_METRICAS", usuario=payload.usuario, expediente=payload.numero_expediente, detalle=f"BERTScore validado F1={metricas['bert_f1']} precision={metricas['bert_precision']} recall={metricas['bert_recall']}", severidad="INFO")
+        conn.commit()
+        return {"status": "success", "bert": metricas, "resumen_generado": resumen_generado, "detalle": detalle["bert"]}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"No se pudo validar BERTScore: {e}")
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/validation-metrics/{numero}/recalculate")
+async def recalcular_metricas_validacion(numero: str, request: Request):
+    conn = get_db_connection()
+    try:
+        fila = verificar_acceso_expediente_o_rechazar(conn, request, numero, "recalculo de metricas")
+        val = conn.execute("SELECT * FROM metricas_validacion WHERE numero_expediente = %s", (numero,)).fetchone()
+        if not val:
+            raise HTTPException(status_code=404, detail="No hay metricas previas para recalcular.")
+        data = cargar_json_bd(fila.get("json_resultados"), {}) or {}
+        campos = {}
+        detalle = cargar_json_bd(val.get("detalle"), {}) or {}
+        if val.get("referencias_ner"):
+            referencias = cargar_json_bd(val.get("referencias_ner"), {}) or {}
+            predicciones = _extraer_predicciones_ner(data, numero)
+            ner = calcular_metricas_ner(referencias, predicciones)
+            detalle["ner"] = {"tp": ner.pop("tp"), "predichas": ner.pop("predichas"), "referencia": ner.pop("referencia"), "faltantes": ner.pop("faltantes"), "sobrantes": ner.pop("sobrantes"), "detalle_campos": ner.pop("detalle_campos", [])}
+            campos.update(ner)
+            campos["predicciones_ner"] = json.dumps(predicciones, ensure_ascii=False)
+        if val.get("resumen_referencia"):
+            resumen_generado = _extraer_resumen_generado(data)
+            bert = calcular_metricas_bertscore_validacion(val.get("resumen_referencia"), resumen_generado)
+            detalle["bert"] = {"metodo": bert.pop("metodo"), "nota": bert.pop("nota", "")}
+            campos.update(bert)
+            campos["resumen_generado"] = resumen_generado
+        if not campos:
+            raise HTTPException(status_code=400, detail="Solo se puede recalcular NER/BERTScore si existen referencias guardadas.")
+        campos["detalle"] = json.dumps(detalle, ensure_ascii=False)
+        _upsert_metricas_validacion(conn, numero, nombre_usuario_auditoria(request), campos)
+        conn.commit()
+        return {"status": "success", "message": "Metricas recalculadas.", "metricas": campos}
+    finally:
+        conn.close()
+
 @app.get("/api/v1/security/ocr-details")
 async def get_ocr_details():
     """
@@ -6967,7 +8162,6 @@ async def login_sistema(req: LoginRequest, request: Request):
     """
     conn = get_db_connection()
     try:
-        asegurar_columnas_seguridad_usuarios()
         usuario = conn.execute('''
             SELECT username, password, nombre, cargo, rol,
                    COALESCE(failed_login_attempts, 0) AS failed_login_attempts,
