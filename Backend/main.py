@@ -5117,6 +5117,50 @@ async def analizar_expediente(
             )
             conn.commit()
 
+        str_esperado = re.sub(r'(?i)^(expediente|exp_?|exp\.\s*)', '', numero_expediente)
+        clean_esperado = re.sub(r'[^a-zA-Z0-9]', '', str_esperado).lower()
+        inconsistencias_integridad = []
+        for texto_doc, archivo in zip(textos_por_doc, archivos_preparados):
+            num_interno = extraer_numero_expediente(texto_doc)
+            if num_interno:
+                clean_interno = re.sub(r'[^a-zA-Z0-9]', '', num_interno).lower()
+                if clean_interno != clean_esperado:
+                    inconsistencias_integridad.append({
+                        "archivo": archivo.get("filename") or archivo.get("nombre_archivo"),
+                        "expediente_detectado": num_interno,
+                        "expediente_esperado": numero_expediente,
+                        "esperado_normalizado": clean_esperado
+                    })
+
+        if inconsistencias_integridad and not inconsistencia_nombre:
+            for item in inconsistencias_integridad:
+                print(f"🛑 BLOQUEO: '{item['archivo']}' pertenece a {item['expediente_detectado']}, se esperaba {item['esperado_normalizado']}.")
+            registrar_log_seguridad(
+                conn,
+                usuario_auditoria,
+                f"CRITICO | ANOMALIA | RECHAZO_DOCUMENTO: carga detenida por {len(inconsistencias_integridad)} documento(s) con expediente interno distinto",
+                numero_expediente,
+                ip_origen
+            )
+            conn.commit()
+            actualizar_progreso_analisis(numero_expediente, 50, "requiere_confirmacion", "Se requiere confirmar inconsistencia de expediente antes de continuar.")
+            return {
+                "status": "requires_integrity_confirmation",
+                "requires_confirmation": True,
+                "detail": "Se detectaron documentos cuyo numero de expediente interno no coincide con el expediente seleccionado.",
+                "inconsistencias": inconsistencias_integridad
+            }
+
+        if inconsistencias_integridad and inconsistencia_nombre:
+            registrar_log_seguridad(
+                conn,
+                usuario_auditoria,
+                f"ADVERTENCIA | ANOMALIA_CONFIRMADA: usuario autorizo subir {len(inconsistencias_integridad)} documento(s) con expediente interno distinto",
+                numero_expediente,
+                ip_origen
+            )
+            conn.commit()
+
         os.makedirs(carpeta_expediente, exist_ok=True)
         carpeta_abs = os.path.abspath(carpeta_expediente)
         base_abs = os.path.abspath("pdfs_guardados")
@@ -5142,14 +5186,11 @@ async def analizar_expediente(
         actualizar_progreso_analisis(numero_expediente, 52, "integridad", "Verificando integridad interna de documentos.")
 
         # 3. 🛡️ FILTRO DE INTEGRIDAD INTERNA - Multi-PDF
-        str_esperado = re.sub(r'(?i)^(expediente|exp_?|exp\.\s*)', '', numero_expediente)
-        clean_esperado = re.sub(r'[^a-zA-Z0-9]', '', str_esperado).lower()
-
         for texto_doc, upload_file in zip(textos_por_doc, files):
             num_interno = extraer_numero_expediente(texto_doc)
             if num_interno:
                 clean_interno = re.sub(r'[^a-zA-Z0-9]', '', num_interno).lower()
-                if clean_interno != clean_esperado:
+                if clean_interno != clean_esperado and not inconsistencia_nombre:
                     print(f"🛑 BLOQUEO: '{upload_file.filename}' pertenece a {num_interno}, se esperaba {clean_esperado}.")
                     timestamp_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     conn.execute('''

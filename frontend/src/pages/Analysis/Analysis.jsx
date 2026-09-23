@@ -225,6 +225,12 @@ export const Analysis = () => {
     hallazgos: [],
     files: []
   });
+  const [integrityModal, setIntegrityModal] = useState({
+    isOpen: false,
+    inconsistencias: [],
+    files: [],
+    opciones: {}
+  });
 
   // 2. ESTADOS DE DATOS
   const [analysisData, setAnalysisData] = useState(draftAnalysisData);
@@ -803,7 +809,12 @@ export const Analysis = () => {
   };
 
   const procesarEnvioDocumento = async (files, opciones = {}) => {
-    if (uploadInProgressRef.current && !opciones.confirmacionDatosSensibles && !opciones.confirmacionDuplicados) return;
+    if (
+      uploadInProgressRef.current &&
+      !opciones.confirmacionDatosSensibles &&
+      !opciones.confirmacionDuplicados &&
+      !opciones.inconsistenciaNombre
+    ) return;
     uploadInProgressRef.current = true;
     backendProgressRef.current = { stage: "", floor: 0, ceiling: 0, startedAt: 0, durationMs: 20000 };
     setIsLoading(true);
@@ -830,6 +841,7 @@ export const Analysis = () => {
       formData.append("usuario_auditoria", firmaUsuario);
       formData.append("confirmacion_datos_sensibles", opciones.confirmacionDatosSensibles ? "true" : "false");
       formData.append("confirmacion_duplicados", opciones.confirmacionDuplicados ? "true" : "false");
+      formData.append("inconsistencia_nombre", opciones.inconsistenciaNombre ? "true" : "false");
 
       const res = await fetch("/api/v1/analyze-document", {
         method: "POST",
@@ -868,6 +880,18 @@ export const Analysis = () => {
         } else if (fileInputRef.current) {
           fileInputRef.current.value = "";
         }
+        return;
+      }
+
+      if (res.ok && response?.status === "requires_integrity_confirmation") {
+        setIsLoading(false);
+        uploadInProgressRef.current = false;
+        setIntegrityModal({
+          isOpen: true,
+          inconsistencias: response.inconsistencias || [],
+          files,
+          opciones
+        });
         return;
       }
 
@@ -961,6 +985,26 @@ export const Analysis = () => {
     setActivePdfIndex(0);
     if (fileInputRef.current) fileInputRef.current.value = "";
     await registrarDecisionDatosSensibles("cancelado", hallazgosCount);
+  };
+
+  const confirmarInconsistenciaExpediente = async () => {
+    const filesPendientes = integrityModal.files;
+    const opcionesPendientes = integrityModal.opciones || {};
+    setIntegrityModal({ isOpen: false, inconsistencias: [], files: [], opciones: {} });
+    await procesarEnvioDocumento(filesPendientes, {
+      ...opcionesPendientes,
+      inconsistenciaNombre: true
+    });
+  };
+
+  const cancelarAnalisisPorInconsistencia = () => {
+    setIntegrityModal({ isOpen: false, inconsistencias: [], files: [], opciones: {} });
+    uploadInProgressRef.current = false;
+    setIsLoading(false);
+    setHasDocument(false);
+    setPdfFiles([]);
+    setActivePdfIndex(0);
+    if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
   const normalizarBusquedaPdf = (valor) => {
@@ -1864,6 +1908,64 @@ export const Analysis = () => {
         usuario={usuarioHeader}
         onSaved={registrarCambioManual}
       />
+
+      {integrityModal.isOpen && (
+        <div className="fixed inset-0 z-[80] bg-slate-950/55 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-3xl bg-white border border-rose-200 shadow-2xl rounded-lg overflow-hidden">
+            <div className="px-5 py-4 bg-rose-50 border-b border-rose-200 flex items-start gap-3">
+              <div className="h-9 w-9 rounded-full bg-rose-100 text-rose-700 flex items-center justify-center shrink-0">
+                <AlertTriangle size={20} />
+              </div>
+              <div>
+                <h2 className="text-sm font-black text-slate-900">Inconsistencia de expediente</h2>
+                <p className="text-xs text-slate-600 mt-1">
+                  El sistema detecto que uno o mas documentos pertenecen a un expediente distinto al seleccionado. Revisa el detalle antes de continuar.
+                </p>
+              </div>
+            </div>
+
+            <div className="p-5">
+              <div className="border border-slate-200 rounded-md overflow-hidden">
+                <div className="grid grid-cols-[minmax(160px,1.2fr)_minmax(150px,0.9fr)_minmax(150px,0.9fr)] bg-slate-50 text-[10px] font-black uppercase tracking-widest text-slate-500 border-b border-slate-200">
+                  <div className="px-3 py-2">Documento</div>
+                  <div className="px-3 py-2">Expediente detectado</div>
+                  <div className="px-3 py-2">Expediente seleccionado</div>
+                </div>
+                <div className="max-h-64 overflow-y-auto">
+                  {integrityModal.inconsistencias.map((item, index) => (
+                    <div key={`${item.archivo}-${index}`} className="grid grid-cols-[minmax(160px,1.2fr)_minmax(150px,0.9fr)_minmax(150px,0.9fr)] text-xs border-b border-slate-100 last:border-b-0">
+                      <div className="px-3 py-2 font-bold text-slate-700 min-w-0 break-words">{item.archivo}</div>
+                      <div className="px-3 py-2 font-mono text-rose-700 min-w-0 break-all leading-relaxed">{item.expediente_detectado}</div>
+                      <div className="px-3 py-2 font-mono text-slate-900 min-w-0 break-all leading-relaxed">{item.expediente_esperado}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-md border border-dashed border-rose-300 bg-rose-50 px-4 py-3 text-xs text-rose-900">
+                Si continuas, SIGEJA permitira la subida y registrara una advertencia en auditoria. Usa esta opcion solo si verificaste manualmente que los documentos corresponden al expediente correcto.
+              </div>
+            </div>
+
+            <div className="px-5 py-4 bg-slate-50 border-t border-slate-200 flex justify-end gap-3">
+              <button
+                type="button"
+                onClick={cancelarAnalisisPorInconsistencia}
+                className="px-4 py-2 rounded-md border border-slate-300 text-xs font-bold text-slate-600 hover:bg-white"
+              >
+                Cancelar subida
+              </button>
+              <button
+                type="button"
+                onClick={confirmarInconsistenciaExpediente}
+                className="px-4 py-2 rounded-md bg-rose-600 text-xs font-bold text-white hover:bg-rose-700 shadow-sm"
+              >
+                Continuar de todos modos
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {sensitiveModal.isOpen && (
         <div className="fixed inset-0 z-[80] bg-slate-950/55 backdrop-blur-sm flex items-center justify-center p-4">
