@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  Bell, ChevronDown, Download, BrainCircuit, Activity, Fingerprint, ShieldCheck, Loader2, X, ChevronRight,
+  Bell, ChevronDown, Download, BrainCircuit, Activity, Fingerprint, ShieldCheck, Loader2, X, Check, ChevronRight,
   Upload, Save, RefreshCw, BarChart3
 } from 'lucide-react';
 import Pagination from '../../components/common/Pagination';
@@ -17,7 +17,6 @@ const NER_VALIDATION_FIELDS = [
   { key: 'dni_demandado', label: 'DNI del demandado', multiline: false, helper: 'DNI adulto, no CUI del menor.' },
   { key: 'monto_petitorio', label: 'Petitorio', multiline: false, helper: 'Monto principal solicitado por alimentos.' },
   { key: 'ingreso_demandado', label: 'Ingreso del demandado', multiline: false, helper: 'Ingreso o remuneración base detectada.' },
-  { key: 'monto_fijado_ofrecido', label: 'Monto fijado/ofrecido', multiline: false, helper: 'Monto ordenado, conciliado u ofrecido.' },
   { key: 'fecha_presentacion_demanda', label: 'Presentación de demanda', multiline: false, helper: 'Fecha de ingreso o presentación de la demanda.' },
   { key: 'fecha_audiencia_unica', label: 'Audiencia única', multiline: false, helper: 'Fecha de audiencia única o acta de audiencia.' },
   { key: 'fecha_resolucion_admisorio', label: 'Resolución/admisorio', multiline: false, helper: 'Fecha de auto admisorio o resolución principal.' }
@@ -25,7 +24,7 @@ const NER_VALIDATION_FIELDS = [
 
 const NER_FIELD_LABELS = Object.fromEntries(NER_VALIDATION_FIELDS.map(field => [field.key, field.label]));
 
-const emptyNerReference = () => Object.fromEntries(NER_VALIDATION_FIELDS.map(field => [field.key, '']));
+const emptyNerEvaluation = () => Object.fromEntries(NER_VALIDATION_FIELDS.map(field => [field.key, null]));
 
 const formatPercent = (value) => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
@@ -70,7 +69,7 @@ const Audit = () => {
   const [validationMetrics, setValidationMetrics] = useState(null);
   const [validationSummary, setValidationSummary] = useState(null);
   const [ocrReferenceFile, setOcrReferenceFile] = useState(null);
-  const [nerReference, setNerReference] = useState(emptyNerReference());
+  const [nerEvaluation, setNerEvaluation] = useState(emptyNerEvaluation());
   const [isValidationMetricsOpen, setIsValidationMetricsOpen] = useState(false);
   const [isNerDatasetOpen, setIsNerDatasetOpen] = useState(false);
   const [nerDatasetScope, setNerDatasetScope] = useState('global');
@@ -129,11 +128,13 @@ const Audit = () => {
   const fetchValidationMetrics = async (numero) => {
     if (!numero) {
       setValidationMetrics(null);
+      setNerEvaluation(emptyNerEvaluation());
       return;
     }
     const res = await fetch(`/api/v1/validation-metrics/${encodeURIComponent(numero)}`, { headers: getAuthHeaders() });
     const data = await res.json();
     setValidationMetrics(data.metricas || null);
+    if (!data.metricas) setNerEvaluation(emptyNerEvaluation());
   };
 
   useEffect(() => {
@@ -161,11 +162,15 @@ const Audit = () => {
 
   useEffect(() => {
     if (!validationMetrics) return;
-    const refs = validationMetrics?.ner?.referencias || {};
-    setNerReference(Object.fromEntries(NER_VALIDATION_FIELDS.map(({ key }) => [
-      key,
-      Array.isArray(refs[key]) ? refs[key].join('\n') : (refs[key] || '')
-    ])));
+    const detalleCampos = validationMetrics?.detalle?.ner?.detalle_campos || [];
+    const evaluacionGuardada = Object.fromEntries(detalleCampos.map((item) => [
+      item.campo,
+      item.estado === 'correcto'
+    ]));
+    setNerEvaluation({
+      ...emptyNerEvaluation(),
+      ...evaluacionGuardada
+    });
     setBertReference(validationMetrics?.bert?.resumen_referencia || '');
   }, [validationMetrics]);
 
@@ -258,6 +263,13 @@ const Audit = () => {
 
   const handleValidarNER = async () => {
     if (!selectedValidationExp) return;
+    const evaluacionCampos = Object.fromEntries(
+      Object.entries(nerEvaluation).filter(([, value]) => value === true || value === false)
+    );
+    if (!Object.keys(evaluacionCampos).length) {
+      setValidationMessage('Marca al menos un campo NER como correcto o incorrecto.');
+      return;
+    }
     setIsValidatingMetrics(true);
     setValidationMessage('');
     try {
@@ -267,7 +279,7 @@ const Audit = () => {
         body: JSON.stringify({
           numero_expediente: selectedValidationExp,
           usuario: usuarioActivo.username || usuarioActivo.nombre || 'Usuario SIGEJA',
-          entidades_referencia: nerReference
+          evaluacion_campos: evaluacionCampos
         })
       });
       const data = await res.json();
@@ -616,7 +628,7 @@ const Audit = () => {
                   <div className="mb-2">
                     <h5 className="text-sm font-black text-[#1a3059] mb-1">NER Precision / Recall / F1</h5>
                     <p className="text-[11px] text-slate-500">
-                      Compara entidades extraídas contra hallazgos humanos.
+                      Marca con check si la entidad extraída es correcta o con equis si requiere corrección.
                     </p>
                   </div>
 
@@ -627,7 +639,7 @@ const Audit = () => {
                             <tr className="bg-slate-50 text-[10px] uppercase tracking-widest text-slate-500 border-b border-slate-200">
                               <th className="px-3 py-3 w-[170px]">Campo</th>
                               <th className="px-3 py-3">Extraído por SIGEJA</th>
-                              <th className="px-3 py-3">Hallazgo humano</th>
+                              <th className="px-3 py-3 w-[150px] text-center">Validación</th>
                             </tr>
                           </thead>
                           <tbody className="divide-y divide-slate-100">
@@ -645,12 +657,35 @@ const Audit = () => {
                                     </pre>
                                   </td>
                                   <td className="px-3 py-3">
-                                    <input
-                                      value={nerReference[field.key] || ''}
-                                      onChange={(e) => setNerReference(prev => ({ ...prev, [field.key]: e.target.value }))}
-                                      placeholder={`Ingresa ${field.label.toLowerCase()}`}
-                                      className="h-[38px] w-full rounded-lg border border-slate-200 bg-white px-3 text-xs outline-none focus:border-blue-400"
-                                    />
+                                    <div className="flex items-center justify-center gap-2">
+                                      <button
+                                        type="button"
+                                        title="La entidad extraída es correcta"
+                                        onClick={() => setNerEvaluation(prev => ({ ...prev, [field.key]: true }))}
+                                        className={`h-9 w-9 rounded-lg border flex items-center justify-center transition-colors ${
+                                          nerEvaluation[field.key] === true
+                                            ? 'border-emerald-300 bg-emerald-100 text-emerald-700'
+                                            : 'border-slate-200 bg-white text-slate-400 hover:border-emerald-200 hover:text-emerald-600'
+                                        }`}
+                                      >
+                                        <Check size={16} />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        title="La entidad extraída es incorrecta"
+                                        onClick={() => setNerEvaluation(prev => ({ ...prev, [field.key]: false }))}
+                                        className={`h-9 w-9 rounded-lg border flex items-center justify-center transition-colors ${
+                                          nerEvaluation[field.key] === false
+                                            ? 'border-rose-300 bg-rose-100 text-rose-700'
+                                            : 'border-slate-200 bg-white text-slate-400 hover:border-rose-200 hover:text-rose-600'
+                                        }`}
+                                      >
+                                        <X size={16} />
+                                      </button>
+                                    </div>
+                                    <p className="mt-1 text-center text-[10px] font-bold text-slate-400">
+                                      {nerEvaluation[field.key] === true ? 'Correcto' : nerEvaluation[field.key] === false ? 'Incorrecto' : 'Sin evaluar'}
+                                    </p>
                                   </td>
                                 </tr>
                               );

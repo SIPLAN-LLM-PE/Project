@@ -85,11 +85,47 @@ _ANALYSIS_OCR_CACHE_MAX = int(os.getenv("SIGEJA_OCR_CACHE_MAX", "80"))
 _ANALYSIS_PROGRESS: dict[str, dict] = {}
 
 
+def _corriendo_en_docker() -> bool:
+    return os.path.exists("/.dockerenv") or os.getenv("SIGEJA_DOCKER", "").strip().lower() in ("1", "true", "yes", "si")
+
+
+def _ollama_base_url() -> str:
+    return os.getenv("OLLAMA_BASE_URL", "").strip().rstrip("/")
+
+
 def obtener_ollama_generate_urls() -> list[str]:
     urls_configuradas = os.getenv("SIGEJA_OLLAMA_GENERATE_URLS", "").strip()
-    return [u.strip() for u in urls_configuradas.split(",") if u.strip()] or [
+    if urls_configuradas:
+        return [u.strip() for u in urls_configuradas.split(",") if u.strip()]
+    base = _ollama_base_url()
+    if base:
+        return [f"{base}/api/generate"]
+    if _corriendo_en_docker():
+        return [
+            "http://ollama:11434/api/generate",
+            "http://localhost:11434/api/generate",
+        ]
+    return [
         "http://localhost:11434/api/generate",
         "http://ollama:11434/api/generate",
+    ]
+
+
+def obtener_ollama_embed_urls() -> list[str]:
+    urls_configuradas = os.getenv("SIGEJA_OLLAMA_EMBED_URLS", "").strip()
+    if urls_configuradas:
+        return [u.strip() for u in urls_configuradas.split(",") if u.strip()]
+    base = _ollama_base_url()
+    if base:
+        return [f"{base}/api/embeddings"]
+    if _corriendo_en_docker():
+        return [
+            "http://ollama:11434/api/embeddings",
+            "http://localhost:11434/api/embeddings",
+        ]
+    return [
+        "http://localhost:11434/api/embeddings",
+        "http://ollama:11434/api/embeddings",
     ]
 
 
@@ -811,6 +847,7 @@ class AnalysisDraftRequest(BaseModel):
 class ValidationNERRequest(BaseModel):
     numero_expediente: str
     entidades_referencia: dict = Field(default_factory=dict)
+    evaluacion_campos: dict = Field(default_factory=dict)
     usuario: str = "Usuario SIGEJA"
 
 
@@ -4819,11 +4856,7 @@ def generar_embedding(texto: str) -> list:
     if not texto_limpio:
         return []
 
-    urls_configuradas = os.getenv("SIGEJA_OLLAMA_EMBED_URLS", "").strip()
-    urls = [u.strip() for u in urls_configuradas.split(",") if u.strip()] or [
-        "http://localhost:11434/api/embeddings",
-        "http://ollama:11434/api/embeddings",
-    ]
+    urls = obtener_ollama_embed_urls()
     timeout = int(os.getenv("SIGEJA_OLLAMA_EMBED_TIMEOUT", "120"))
     payload = {
         "model": "nomic-embed-text",
@@ -7339,7 +7372,7 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
 def calcular_metricas_ner(referencias: dict, predicciones: dict) -> dict:
     categorias = [
         "nombre_demandante", "nombre_demandado", "menor", "dni_demandante", "dni_demandado",
-        "monto_petitorio", "ingreso_demandado", "monto_fijado_ofrecido",
+        "monto_petitorio", "ingreso_demandado",
         "fecha_presentacion_demanda", "fecha_audiencia_unica", "fecha_resolucion_admisorio"
     ]
     ref_set = set()
@@ -7394,7 +7427,64 @@ def calcular_metricas_ner(referencias: dict, predicciones: dict) -> dict:
     }
 
 
+def calcular_metricas_ner_evaluacion(evaluacion_campos: dict, predicciones: dict) -> dict:
+    categorias = [
+        "nombre_demandante", "nombre_demandado", "menor", "dni_demandante", "dni_demandado",
+        "monto_petitorio", "ingreso_demandado",
+        "fecha_presentacion_demanda", "fecha_audiencia_unica", "fecha_resolucion_admisorio"
+    ]
+    detalle_campos = []
+    tp = 0
+    for categoria in categorias:
+        if categoria not in (evaluacion_campos or {}):
+            continue
+        valor = (evaluacion_campos or {}).get(categoria)
+        if valor is None or valor == "":
+            continue
+        if isinstance(valor, str):
+            valor_norm = valor.strip().lower()
+            if valor_norm in ("true", "1", "si", "sí", "correcto"):
+                correcto = True
+            elif valor_norm in ("false", "0", "no", "incorrecto"):
+                correcto = False
+            else:
+                continue
+        else:
+            correcto = bool(valor)
+        preds = _valores_normalizados_categoria(categoria, (predicciones or {}).get(categoria))
+        if correcto:
+            tp += 1
+        detalle_campos.append({
+            "campo": categoria,
+            "esperado": ["validado por usuario" if correcto else "marcado como incorrecto"],
+            "predicho": preds,
+            "estado": "correcto" if correcto else "faltante",
+            "score": 1.0 if correcto else 0.0,
+            "validacion_manual": True
+        })
+
+    evaluados = len(detalle_campos)
+    score = tp / evaluados if evaluados else 0.0
+    faltantes = [
+        f"{item['campo']}:{' | '.join(item['predicho']) or 'No detectado'}"
+        for item in detalle_campos
+        if item["estado"] != "correcto"
+    ]
+    return {
+        "ner_precision": round(score, 4),
+        "ner_recall": round(score, 4),
+        "ner_f1": round(score, 4),
+        "tp": tp,
+        "predichas": evaluados,
+        "referencia": evaluados,
+        "faltantes": sorted(faltantes),
+        "sobrantes": sorted(faltantes),
+        "detalle_campos": detalle_campos
+    }
+
+
 def consolidar_ner_por_campo(rows) -> list:
+    campos_excluidos = {"monto_fijado_ofrecido"}
     acumulado = {}
     for row in rows or []:
         detalle = cargar_json_bd(row.get("detalle"), {}) or {}
@@ -7407,6 +7497,8 @@ def consolidar_ner_por_campo(rows) -> list:
                 continue
             campo = item.get("campo")
             if not campo:
+                continue
+            if campo in campos_excluidos:
                 continue
             stats = acumulado.setdefault(campo, {"campo": campo, "evaluados": 0, "correctos": 0, "fallidos": 0})
             stats["evaluados"] += 1
@@ -7648,11 +7740,21 @@ async def validar_ner_metricas(payload: ValidationNERRequest, request: Request):
         fila = verificar_acceso_expediente_o_rechazar(conn, request, payload.numero_expediente, "validacion NER")
         data = cargar_json_bd(fila.get("json_resultados"), {}) or {}
         predicciones = _extraer_predicciones_ner(data, payload.numero_expediente)
-        metricas = calcular_metricas_ner(payload.entidades_referencia, predicciones)
+        usa_evaluacion_manual = bool(payload.evaluacion_campos)
+        metricas = (
+            calcular_metricas_ner_evaluacion(payload.evaluacion_campos, predicciones)
+            if usa_evaluacion_manual
+            else calcular_metricas_ner(payload.entidades_referencia, predicciones)
+        )
         detalle = {"ner": {"tp": metricas.pop("tp"), "predichas": metricas.pop("predichas"), "referencia": metricas.pop("referencia"), "faltantes": metricas.pop("faltantes"), "sobrantes": metricas.pop("sobrantes"), "detalle_campos": metricas.pop("detalle_campos", [])}}
+        referencias_guardadas = (
+            {"__modo": "evaluacion_manual", "campos": payload.evaluacion_campos}
+            if usa_evaluacion_manual
+            else payload.entidades_referencia
+        )
         _upsert_metricas_validacion(conn, payload.numero_expediente, payload.usuario, {
             **metricas,
-            "referencias_ner": json.dumps(payload.entidades_referencia, ensure_ascii=False),
+            "referencias_ner": json.dumps(referencias_guardadas, ensure_ascii=False),
             "predicciones_ner": json.dumps(predicciones, ensure_ascii=False),
             "detalle": json.dumps(detalle, ensure_ascii=False)
         })
@@ -7711,7 +7813,10 @@ async def recalcular_metricas_validacion(numero: str, request: Request):
         if val.get("referencias_ner"):
             referencias = cargar_json_bd(val.get("referencias_ner"), {}) or {}
             predicciones = _extraer_predicciones_ner(data, numero)
-            ner = calcular_metricas_ner(referencias, predicciones)
+            if isinstance(referencias, dict) and referencias.get("__modo") == "evaluacion_manual":
+                ner = calcular_metricas_ner_evaluacion(referencias.get("campos", {}) or {}, predicciones)
+            else:
+                ner = calcular_metricas_ner(referencias, predicciones)
             detalle["ner"] = {"tp": ner.pop("tp"), "predichas": ner.pop("predichas"), "referencia": ner.pop("referencia"), "faltantes": ner.pop("faltantes"), "sobrantes": ner.pop("sobrantes"), "detalle_campos": ner.pop("detalle_campos", [])}
             campos.update(ner)
             campos["predicciones_ner"] = json.dumps(predicciones, ensure_ascii=False)

@@ -25,6 +25,8 @@ services:
       SIGEJA_OLLAMA_RAG_TIMEOUT: ${SIGEJA_OLLAMA_RAG_TIMEOUT:-900}
       SIGEJA_OLLAMA_RAG_MAX_CTX: ${SIGEJA_OLLAMA_RAG_MAX_CTX:-32768}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
+      SIGEJA_OLLAMA_GENERATE_URLS: ${SIGEJA_OLLAMA_GENERATE_URLS:-http://ollama:11434/api/generate}
+      SIGEJA_OLLAMA_EMBED_URLS: ${SIGEJA_OLLAMA_EMBED_URLS:-http://ollama:11434/api/embeddings}
       TESSERACT_CMD: tesseract
     volumes:
       - backend_pdfs:/app/pdfs_guardados
