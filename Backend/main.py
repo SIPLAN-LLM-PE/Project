@@ -2224,6 +2224,54 @@ def _parse_fecha_literal(literal: str):
         mes = meses.get(_normalizar_texto_busqueda_pdf(mes_txt))
         if mes:
             return _parse_fecha_texto(int(dia), mes, int(anio))
+    palabras = re.match(
+        r'(?<!\d)([a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+?)\s+de\s+([a-zA-ZáéíóúñÁÉÍÓÚÑ]+)\s+d(?:e|el)\s+(dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+|\d{4})(?!\d)',
+        literal,
+        re.IGNORECASE
+    )
+    if palabras:
+        dia_txt, mes_txt, anio_txt = palabras.groups()
+        dia = _numero_es_a_int(dia_txt)
+        mes = meses.get(_normalizar_texto_busqueda_pdf(mes_txt))
+        anio = _anio_es_a_int(anio_txt)
+        if dia and mes and anio:
+            return _parse_fecha_texto(dia, mes, anio)
+    return None
+
+
+def _numero_es_a_int(texto: str) -> int | None:
+    norm = _normalizar_texto_busqueda_pdf(texto or "")
+    norm = re.sub(r'\s+', ' ', norm).strip()
+    mapa = {
+        "primero": 1, "primer": 1, "uno": 1, "un": 1, "dos": 2, "tres": 3, "cuatro": 4,
+        "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10,
+        "once": 11, "doce": 12, "trece": 13, "catorce": 14, "quince": 15,
+        "dieciseis": 16, "diecisiete": 17, "dieciocho": 18, "diecinueve": 19,
+        "veinte": 20, "veintiuno": 21, "veintiun": 21, "veintidos": 22,
+        "veintitres": 23, "veinticuatro": 24, "veinticinco": 25, "veintiseis": 26,
+        "veintisiete": 27, "veintiocho": 28, "veintinueve": 29, "treinta": 30,
+        "treinta y uno": 31
+    }
+    if norm.isdigit():
+        val = int(norm)
+        return val if 1 <= val <= 31 else None
+    return mapa.get(norm)
+
+
+def _anio_es_a_int(texto: str) -> int | None:
+    norm = _normalizar_texto_busqueda_pdf(texto or "")
+    norm = re.sub(r'\s+', ' ', norm).strip()
+    if norm.isdigit() and len(norm) == 4:
+        return int(norm)
+    mapa = {
+        "diecinueve": 2019, "veinte": 2020, "veintiuno": 2021, "veintidos": 2022,
+        "veintitres": 2023, "veinticuatro": 2024, "veinticinco": 2025,
+        "veintiseis": 2026, "veintisiete": 2027, "veintiocho": 2028,
+        "veintinueve": 2029, "treinta": 2030
+    }
+    if norm.startswith("dos mil "):
+        cola = norm.replace("dos mil ", "", 1).strip()
+        return mapa.get(cola)
     return None
 
 
@@ -2339,7 +2387,8 @@ def _extraer_fecha_contextual(texto_plano: str, patrones_evento: list[str], excl
     texto = texto_plano or ""
     patron_fecha = (
         r'(?P<corta>(?<!\d)\d{1,2}[/-]\d{1,2}[/-]\d{4}(?!\d))|'
-        r'(?P<larga>(?<!\d)\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4}(?!\d))'
+        r'(?P<larga>(?<!\d)\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4}(?!\d))|'
+        r'(?P<letras>(?<!\d)(?:primero|primer|uno|un|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti[uú]n(?:o)?|veintid[oó]s|veintitr[eé]s|veinticuatro|veinticinco|veintis[eé]is|veintisiete|veintiocho|veintinueve|treinta(?:\s+y\s+uno)?)\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+(?:dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+|\d{4})(?!\d))'
     )
     candidatos = []
 
@@ -2403,7 +2452,8 @@ def _extraer_fecha_por_documento(
         return None, None, ""
     patron_fecha = (
         r'(?<!\d)\d{1,2}[/-]\d{1,2}[/-]\d{4}(?!\d)|'
-        r'(?<!\d)\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4}(?!\d)'
+        r'(?<!\d)\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4}(?!\d)|'
+        r'(?<!\d)(?:primero|primer|uno|un|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti[uú]n(?:o)?|veintid[oó]s|veintitr[eé]s|veinticuatro|veinticinco|veintis[eé]is|veintisiete|veintiocho|veintinueve|treinta(?:\s+y\s+uno)?)\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+(?:dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+|\d{4})(?!\d)'
     )
     for sec in candidatas:
         if preferir_patrones:
@@ -2624,6 +2674,56 @@ def modulo_extraccion_plazos(texto_plano: str) -> dict:
                 except ValueError:
                     continue
         return None, None, None
+
+    def fijar_evento_prioritario(tipo: str, fecha_obj, literal: str, contexto: str):
+        if not fecha_obj:
+            return
+        eventos[tipo] = {
+            "fecha": fecha_obj.strftime("%d/%m/%Y"),
+            "literal": literal,
+            "contexto": contexto
+        }
+
+    demanda_obj, demanda_lit, demanda_ctx = _extraer_fecha_contextual(
+        texto_plano,
+        [
+            r'fecha\s+de\s+inicio',
+            r'fecha\s+de\s+presentaci[oó]n',
+            r'presentante\s+[^.\n]{0,120}demandante',
+            r'interpone\s+demanda',
+            r'demanda\s+de\s+aumento\s+de\s+alimentos'
+        ],
+        excluir_contexto=r'\b(?:nulidad|sentencia\s+de\s+vista|acta\s+de\s+vista|c[eé]dula|notificaci[oó]n)\b'
+    )
+    if demanda_obj:
+        fijar_evento_prioritario("demanda", demanda_obj, demanda_lit, demanda_ctx)
+
+    admision_obj, admision_lit, admision_ctx = _extraer_fecha_por_documento(
+        texto_plano,
+        r'admisi[oó]n\s+de\s+demanda|resolucion[_\s-]*2|resoluci[oó]n\s+2\s+admisi[oó]n',
+        [
+            r'resoluci[oó]n\s+nro\.?\s+dos',
+            r'adm[íi]tase\s+a\s+tr[aá]mite',
+            r'admitir\s+a\s+tr[aá]mite\s+la\s+demanda',
+            r'dado\s+cuenta'
+        ],
+        seleccion_fecha="primera"
+    )
+    if admision_obj:
+        fijar_evento_prioritario("admision", admision_obj, admision_lit, admision_ctx)
+
+    audiencia_obj, audiencia_lit, audiencia_ctx = _extraer_fecha_por_documento(
+        texto_plano,
+        r'audiencia\s+[uú]nica\s+y\s+sentencia|audiencia\s+[uú]nica',
+        [
+            r'audiencia\s+[uú]nica',
+            r'siendo\s+la\s+.*?ma[nñ]ana',
+            r'acta\s+de\s+audiencia'
+        ],
+        seleccion_fecha="primera"
+    )
+    if audiencia_obj:
+        fijar_evento_prioritario("audiencia", audiencia_obj, audiencia_lit, audiencia_ctx)
 
     fecha_notificacion_obj, fecha_notificacion_literal, contexto_notificacion = _extraer_fecha_por_documento(
         texto_plano,
@@ -3269,20 +3369,43 @@ def _extraer_dependientes_nativos(texto_plano: str):
         return []
     dependientes = []
     vistos = set()
-    for m in re.finditer(r'([A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,}){0,2})\s*\((\d{1,2})\s*años\)', texto_plano, re.IGNORECASE):
-        nombre = re.sub(r'\s+', ' ', m.group(1)).strip().title()
-        edad = int(m.group(2))
-        key = (nombre.lower(), edad)
+
+    def agregar_dependiente(nombre: str, edad: int, evidencia: str):
+        nombre_limpio = re.sub(r'\s+', ' ', nombre or '').strip().title()
+        if not nombre_limpio or edad <= 0:
+            return
+        key = (nombre_limpio.lower(), int(edad))
         if key in vistos:
-            continue
+            return
         vistos.add(key)
-        tipo = "Hija Alimentista" if nombre.endswith("a") else "Hijo Alimentista"
+        tipo = "Hija Alimentista" if nombre_limpio.endswith("a") else "Hijo Alimentista"
         dependientes.append({
             "tipo": tipo,
-            "detalle": f"{nombre} ({edad} años)",
+            "detalle": f"{nombre_limpio} ({int(edad)} años)",
             "monto_carga": 0.0,
-            "evidencia": m.group(0)
+            "evidencia": evidencia
         })
+
+    for m in re.finditer(r'([A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,}){0,2})\s*\((\d{1,2})\s*años\)', texto_plano, re.IGNORECASE):
+        agregar_dependiente(m.group(1), int(m.group(2)), m.group(0))
+
+    patron_doble = (
+        r'([A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,}){2,4})\s+y\s+'
+        r'([A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,}){2,4})\s+'
+        r'de\s+(\d{1,2})\s+y\s+(\d{1,2})\s+años\s+respectivamente'
+    )
+    for m in re.finditer(patron_doble, texto_plano, re.IGNORECASE):
+        agregar_dependiente(m.group(1), int(m.group(3)), m.group(0))
+        agregar_dependiente(m.group(2), int(m.group(4)), m.group(0))
+
+    patron_lista = (
+        r'(?:alimentistas?|menores?|hijos?)\s+'
+        r'([A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,}){2,4})\s*,?\s+y\s+'
+        r'([A-ZÁÉÍÓÚÑ]{2,}(?:\s+[A-ZÁÉÍÓÚÑ]{2,}){2,4})'
+    )
+    for m in re.finditer(patron_lista, texto_plano, re.IGNORECASE):
+        agregar_dependiente(m.group(1), 0, m.group(0))
+        agregar_dependiente(m.group(2), 0, m.group(0))
     return dependientes
 
 def _oracion_que_contiene_monto(texto_plano: str, monto: float) -> str:
@@ -3328,16 +3451,53 @@ def _prioridad_ingreso_hu14(item: dict, texto_plano: str = "") -> int:
         str(item.get("evidencia_literal", "")),
         oracion_fuente,
     ]).lower()
+    if re.search(r'\b(?:sumatoria|supera(?:n)?|m[aá]s\s+de\s+un\s+ingreso|capacidad\s+instalada|podr[ií]a\s+generar|puede\s+generar\s+mayores)\b', texto):
+        return 15
     if re.search(
         r'(?:el|la)?\s*demandante\s+(?:ha\s+)?(?:se[ñn]ala|indica|refiere|afirma|sostiene|manifiesta|alega|precisa|expresa)\w*\s+que',
         texto
     ) or re.search(r'alegad', texto):
         return 20
+    if re.search(r'\b(?:dijo|declara|declar[oó]|reconoci[oó]|reconoce|percibo|percibe)\b[^.]{0,120}\b(?:suma|monto|ingreso)\s+(?:mensual\s+)?(?:de\s+)?s/?\.?\s*[0-9]', texto):
+        return 90
     if re.search(r'ingreso\s+neto|neto|descuentos?\s+de\s+ley|l[ií]quido', texto):
         return 100
     if re.search(r'boleta|sueldo\s+base|remuneraci[oó]n|empleador|planilla', texto):
         return 80
     return 60
+
+def _monto_es_ingreso_explicito_hu14(texto_plano: str, monto: float, evidencia: str = "") -> bool:
+    """
+    Valida que un monto sea ingreso/remuneracion real, no pension solicitada,
+    deposito historico, deuda, petitorio u otro monto economico del expediente.
+    """
+    if monto <= 0:
+        return False
+    universo = texto_plano or evidencia or ""
+    if not universo:
+        return False
+    apariciones = []
+    for m in re.finditer(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', universo, re.IGNORECASE):
+        val = _normalizar_monto_texto(m.group(1))
+        if val is not None and abs(float(val) - float(monto)) <= 1.0:
+            apariciones.append(universo[max(0, m.start() - 180): min(len(universo), m.end() + 220)])
+    if not apariciones and evidencia:
+        apariciones = [evidencia]
+    patron_ingreso_directo = (
+        r'(?:ingresos?|sueldo|remuneraci[oó]n|haber|renta|percib[eo]|percibir|boleta|planilla)'
+        r'[^.]{0,90}(?:S/|S/\.)\s*[0-9]'
+        r'|(?:S/|S/\.)\s*[0-9][^.]{0,90}'
+        r'(?:ingresos?|sueldo|remuneraci[oó]n|haber|renta|percib[eo]|percibir|boleta|planilla)'
+    )
+    patron_no_ingreso = (
+        r'pensi[oó]n|alimentos?|dep[oó]sitos?|petitorio|solicit[ao]|ofrecid[ao]|'
+        r'fij[aeó]|revocar|reform[aá]ndola|deuda|credi|caja\s+municipal|'
+        r'adjudicaci[oó]n|sentencia|vista|casaci[oó]n'
+    )
+    for contexto in apariciones:
+        if re.search(patron_ingreso_directo, contexto, re.IGNORECASE) and not re.search(patron_no_ingreso, contexto, re.IGNORECASE):
+            return True
+    return False
 
 def _seleccionar_ingreso_base_hu14(ingresos: list, texto_plano: str = "") -> tuple:
     """
@@ -3349,9 +3509,19 @@ def _seleccionar_ingreso_base_hu14(ingresos: list, texto_plano: str = "") -> tup
     enriquecidos = []
     for item in ingresos:
         copia = dict(item)
+        evidencia = " ".join([
+            str(copia.get("tipo", "")),
+            str(copia.get("estado", "")),
+            str(copia.get("evidencia", "")),
+            str(copia.get("evidencia_literal", "")),
+        ])
+        if not _monto_es_ingreso_explicito_hu14(texto_plano, float(copia.get("monto") or 0), evidencia):
+            continue
         copia["_prioridad_hu14"] = _prioridad_ingreso_hu14(copia, texto_plano)
         copia["aplicado_calculo"] = False
         enriquecidos.append(copia)
+    if not enriquecidos:
+        return [], 0.0
     elegido = max(enriquecidos, key=lambda x: (x.get("_prioridad_hu14", 0), float(x.get("monto") or 0)))
     ingreso_base = float(elegido.get("monto") or 0)
     for item in enriquecidos:
@@ -3987,7 +4157,7 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
         # Fallback nativo para ingresos si la IA viene vacía o inconsistente.
         ingresos_nativos = []
         patron_ingresos = re.finditer(
-            r'([^.]{0,90}(?:sueldo|remuneraci[oó]n|ingres[oa]s?|haber|renta)[^.]{0,90}(?:S/|S/\.)\s*([0-9][0-9\.,]*))',
+            r'([^.]{0,90}(?:sueldo|remuneraci[oó]n|ingres[oa]s?|haber|renta|percib[eo]|percibir|reconoce\s+percibir)[^.]{0,90}(?:S/|S/\.)\s*([0-9][0-9\.,]*))',
             texto_plano,
             re.IGNORECASE
         )
@@ -4018,9 +4188,10 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
                 "evidencia": str(item.get("evidencia_literal", "")).strip()
             })
 
-        # Si IA no aporta ingresos válidos, usamos fallback nativo (sin duplicar montos).
-        if not ingresos and ingresos_nativos:
-            vistos = set()
+        # Incorporar fallback nativo sin duplicar montos, incluso si la IA ya aporto
+        # algun ingreso: luego la prioridad decide la base correcta.
+        if ingresos_nativos:
+            vistos = {round(float(ing.get("monto") or 0), 2) for ing in ingresos}
             for ing in ingresos_nativos:
                 key = round(float(ing["monto"]), 2)
                 if key in vistos:
@@ -7339,6 +7510,144 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
                 return fecha
         return None
 
+    texto_completo = str(data.get("texto_completo") or data.get("texto") or "")
+    if not texto_completo.strip() and numero_expediente:
+        try:
+            texto_completo, _detalle_ocr = reconstruir_texto_ocr_expediente(numero_expediente)
+        except Exception:
+            texto_completo = ""
+
+    def fecha_literal_a_str(literal: str):
+        fecha_obj = _parse_fecha_literal(literal or "")
+        return fecha_obj.strftime("%d/%m/%Y") if fecha_obj else None
+
+    def fecha_contextual_ner(patrones_contexto: list[str], excluir_contexto: str = "", seleccion: str = "primera"):
+        if not texto_completo:
+            return None
+        hallazgos = []
+        patron_fecha = (
+            r'(?<!\d)(\d{1,2}[/-]\d{1,2}[/-]\d{4})(?!\d)|'
+            r'(?<!\d)(\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})(?!\d)|'
+            r'(?<!\d)([a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+?\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+)(?!\d)'
+        )
+        for match in re.finditer(patron_fecha, texto_completo, re.IGNORECASE):
+            literal = next((g for g in match.groups() if g), "")
+            fecha_str = fecha_literal_a_str(literal)
+            if not fecha_str:
+                continue
+            contexto = texto_completo[max(0, match.start() - 900): min(len(texto_completo), match.end() + 1400)]
+            if excluir_contexto and re.search(excluir_contexto, contexto, re.IGNORECASE):
+                continue
+            if any(re.search(p, contexto, re.IGNORECASE) for p in patrones_contexto):
+                hallazgos.append((match.start(), fecha_str))
+        if not hallazgos:
+            return None
+        hallazgos.sort(key=lambda item: item[0])
+        return hallazgos[-1][1] if seleccion == "ultima" else hallazgos[0][1]
+
+    def fechas_en_texto_ner(texto: str):
+        if not texto:
+            return []
+        patron_fecha = (
+            r'(?<!\d)(\d{1,2}[/-]\d{1,2}[/-]\d{4})(?!\d)|'
+            r'(?<!\d)(\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})(?!\d)|'
+            r'(?<!\d)([a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+?\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+)(?!\d)'
+        )
+        fechas = []
+        for match in re.finditer(patron_fecha, texto, re.IGNORECASE):
+            literal = next((g for g in match.groups() if g), "")
+            fecha_str = fecha_literal_a_str(literal)
+            if fecha_str:
+                fechas.append((match.start(), fecha_str))
+        fechas.sort(key=lambda item: item[0])
+        return fechas
+
+    def fecha_documento_ner(patron_nombre: str, seleccion: str = "primera"):
+        for doc in _secciones_documentales(texto_completo):
+            nombre = str(doc.get("nombre") or "")
+            if not re.search(patron_nombre, nombre, re.IGNORECASE):
+                continue
+            fechas = fechas_en_texto_ner(str(doc.get("texto") or ""))
+            if fechas:
+                return fechas[-1][1] if seleccion == "ultima" else fechas[0][1]
+        return None
+
+    def fecha_linea_cronologica_ner(patrones_evento: list[str]):
+        if not texto_completo:
+            return None
+        patron_fecha = (
+            r'(?<!\d)(\d{1,2}[/-]\d{1,2}[/-]\d{4})(?!\d)|'
+            r'(?<!\d)(\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})(?!\d)|'
+            r'(?<!\d)([a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+?\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+)(?!\d)'
+        )
+        for linea in (texto_completo or "").splitlines():
+            if not any(re.search(p, linea, re.IGNORECASE) for p in patrones_evento):
+                continue
+            match = re.search(patron_fecha, linea, re.IGNORECASE)
+            if not match:
+                continue
+            literal = next((g for g in match.groups() if g), "")
+            fecha = fecha_literal_a_str(literal)
+            if fecha:
+                return fecha
+        return None
+
+    def monto_es_ingreso_explicito(monto: float, evidencia: str = "") -> bool:
+        if monto <= 0:
+            return False
+        texto_busqueda = texto_completo or evidencia or ""
+        if not texto_busqueda:
+            return False
+        apariciones = []
+        for m in re.finditer(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', texto_busqueda, re.IGNORECASE):
+            val = _normalizar_monto_texto(m.group(1))
+            if val is not None and abs(float(val) - float(monto)) <= 1.0:
+                inicio = max(0, m.start() - 180)
+                fin = min(len(texto_busqueda), m.end() + 220)
+                apariciones.append(texto_busqueda[inicio:fin])
+        if not apariciones and evidencia:
+            apariciones = [evidencia]
+        patron_ingreso_directo = (
+            r'(?:ingresos?|sueldo|remuneraci[oó]n|haber|renta|percib[eo]|percibir|boleta|planilla)'
+            r'[^.]{0,90}(?:S/|S/\.)\s*[0-9]'
+            r'|(?:S/|S/\.)\s*[0-9][^.]{0,90}'
+            r'(?:ingresos?|sueldo|remuneraci[oó]n|haber|renta|percib[eo]|percibir|boleta|planilla)'
+        )
+        patron_no_ingreso = (
+            r'pensi[oó]n|alimentos?|dep[oó]sitos?|petitorio|solicit[ao]|ofrecid[ao]|'
+            r'fij[aeó]|revocar|reform[aá]ndola|deuda|credi|caja\s+municipal|'
+            r'adjudicaci[oó]n|sentencia|vista|casaci[oó]n'
+        )
+        for contexto in apariciones:
+            if re.search(patron_ingreso_directo, contexto, re.IGNORECASE) and not re.search(patron_no_ingreso, contexto, re.IGNORECASE):
+                return True
+        return False
+
+    def ingreso_demandado_ner():
+        ingresos = capacidad.get("ingresos", []) if isinstance(capacidad, dict) else []
+        if isinstance(ingresos, list):
+            candidatos = []
+            for item in ingresos:
+                if not isinstance(item, dict):
+                    continue
+                monto = _float_seguro(item.get("monto"), 0.0)
+                evidencia = " ".join([
+                    str(item.get("tipo", "")),
+                    str(item.get("estado", "")),
+                    str(item.get("evidencia", "")),
+                    str(item.get("evidencia_literal", "")),
+                ])
+                if monto_es_ingreso_explicito(monto, evidencia):
+                    prioridad = 1 if item.get("aplicado_calculo") else 0
+                    candidatos.append((prioridad, monto))
+            if candidatos:
+                candidatos.sort(key=lambda item: (item[0], item[1]), reverse=True)
+                return candidatos[0][1]
+        monto_financiero = _float_seguro(financiera.get("ingreso_demandado"), 0.0) if isinstance(financiera, dict) else 0.0
+        if monto_es_ingreso_explicito(monto_financiero):
+            return monto_financiero
+        return None
+
     monto_fijado = (
         capacidad.get("monto_pension_ordenada_estimado")
         or calculadora.get("monto_estimado")
@@ -7353,6 +7662,27 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
         except Exception:
             return valor
 
+    fecha_demanda = (
+        fecha_linea_cronologica_ner([r'interposici[oó]n\s+de\s+demanda', r'presentaci[oó]n\s+de\s+demanda'])
+        or fecha_documento_ner(r'demanda(?!.*contestaci[oó]n)', seleccion="ultima")
+        or fecha_contextual_ner(
+            [r'interposici[oó]n\s+de\s+demanda', r'presentaci[oó]n\s+de\s+demanda', r'interpuso\s+demanda'],
+            excluir_contexto=r'sentencia\s+de\s+primera\s+instancia|sentencia\s+de\s+vista|casaci[oó]n|apelaci[oó]n'
+        )
+        or fecha_evento("demanda")
+    )
+    fecha_audiencia = (
+        fecha_linea_cronologica_ner([r'audiencia\s+[uú]nica', r'acta\s+de\s+audiencia', r'sentencia\s+de\s+primera\s+instancia'])
+        or fecha_documento_ner(r'audiencia|sentencia[_\s-]*primera|primera[_\s-]*instancia', seleccion="primera")
+        or fecha_evento("audiencia")
+        or fecha_contextual_ner([r'audiencia\s+[uú]nica', r'acta\s+de\s+audiencia'], excluir_contexto=r'sentencia\s+de\s+primera\s+instancia|sentencia\s+de\s+vista')
+    )
+    fecha_admisorio = (
+        fecha_evento("admision")
+        or fecha_contextual_ner([r'admisi[oó]n\s+a\s+tr[aá]mite', r'admitir\s+a\s+tr[aá]mite', r'auto\s+admisorio'], excluir_contexto=r'sentencia|vista|apelaci[oó]n|casaci[oó]n', seleccion="ultima")
+        or fecha_documento_ner(r'admis|resolucion[_\s-]*admisoria|auto', seleccion="primera")
+    )
+
     pred = {
         "nombre_demandante": [demandante.get("nombre")],
         "nombre_demandado": [demandado.get("nombre")],
@@ -7360,11 +7690,11 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
         "dni_demandante": [demandante.get("dni")],
         "dni_demandado": [demandado.get("dni")],
         "monto_petitorio": [monto_ref(financiera.get("petitorio") or financiera.get("monto_petitorio") or (sujetos.get("monto_solicitado") if isinstance(sujetos, dict) else None))],
-        "ingreso_demandado": [monto_ref(capacidad.get("total_ingresos") or financiera.get("ingreso_demandado"))],
+        "ingreso_demandado": [monto_ref(ingreso_demandado_ner())],
         "monto_fijado_ofrecido": [monto_ref(monto_fijado)],
-        "fecha_presentacion_demanda": [fecha_evento("demanda", "presentacion")],
-        "fecha_audiencia_unica": [fecha_evento("audiencia")],
-        "fecha_resolucion_admisorio": [fecha_evento("admision", "sentencia")],
+        "fecha_presentacion_demanda": [fecha_demanda],
+        "fecha_audiencia_unica": [fecha_audiencia],
+        "fecha_resolucion_admisorio": [fecha_admisorio],
     }
     return {categoria: _valores_referencia_lista(valores) for categoria, valores in pred.items()}
 
@@ -7484,7 +7814,9 @@ def calcular_metricas_ner_evaluacion(evaluacion_campos: dict, predicciones: dict
 
 
 def consolidar_ner_por_campo(rows) -> list:
-    campos_excluidos = {"monto_fijado_ofrecido"}
+    campos_excluidos = {
+        "monto_fijado_ofrecido",
+    }
     acumulado = {}
     for row in rows or []:
         detalle = cargar_json_bd(row.get("detalle"), {}) or {}
@@ -7990,10 +8322,10 @@ async def get_f1_details():
             expedientes.append({
                 "expediente": r["numero_expediente"],
                 "fecha": formatear_fecha_corta(r["fecha_analisis"], "—"),
-                "f1_ner": round(r["f1_ner"], 2),
+                "f1_ner": round(float(r["f1_ner"]), 4),
                 "campos": campos
             })
-        promedio = round(sum(e["f1_ner"] for e in expedientes) / len(expedientes), 2) if expedientes else None
+        promedio = round(sum(e["f1_ner"] for e in expedientes) / len(expedientes), 4) if expedientes else None
         return {"expedientes": expedientes, "promedio_global": promedio, "total": len(expedientes)}
     finally:
         conn.close()

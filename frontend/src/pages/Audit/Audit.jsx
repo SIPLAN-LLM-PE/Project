@@ -31,6 +31,11 @@ const formatPercent = (value) => {
   return `${Number(value).toFixed(Number(value) % 1 === 0 ? 0 : 2)}%`;
 };
 
+const formatMetric4 = (value) => {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
+  return Number(value).toFixed(4);
+};
+
 const getNerFieldClass = (value) => {
   if (value === null || value === undefined) return 'text-slate-400 bg-slate-50 border-slate-200';
   if (Number(value) >= 80) return 'text-emerald-700 bg-emerald-50 border-emerald-200';
@@ -251,8 +256,8 @@ const Audit = () => {
         body: formData
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'No se pudo validar OCR.');
-      setValidationMessage(`OCR validado: accuracy ${data.ocr.ocr_accuracy}% · CER ${data.ocr.ocr_cer}`);
+      if (!res.ok) throw new Error(data.detail || 'No se pudo validar el texto extraido.');
+      setValidationMessage(`Texto validado: accuracy ${data.ocr.ocr_accuracy}% · CER ${data.ocr.ocr_cer}`);
       await refrescarValidacionActual();
     } catch (error) {
       setValidationMessage(error.message);
@@ -284,7 +289,7 @@ const Audit = () => {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'No se pudo validar NER.');
-      setValidationMessage(`NER validado: F1 ${data.ner.ner_f1} · precision ${data.ner.ner_precision} · recall ${data.ner.ner_recall}`);
+      setValidationMessage(`NER validado: F1 ${formatMetric4(data.ner.ner_f1)} · precision ${formatMetric4(data.ner.ner_precision)} · recall ${formatMetric4(data.ner.ner_recall)}`);
       await refrescarValidacionActual();
     } catch (error) {
       setValidationMessage(error.message);
@@ -483,13 +488,13 @@ const Audit = () => {
                 </div>
               </div>
 
-              {/* Card 3: Precisión OCR — clickeable para ver detalle por expediente */}
+              {/* Card 3: Texto Accuracy — clickeable para ver detalle por expediente */}
               <div
                 onClick={securityData?.kpis?.docs_ocr > 0 ? handleAbrirOcrDetalle : undefined}
                 className={`bg-white p-5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between transition-all ${securityData?.kpis?.docs_ocr > 0 ? 'cursor-pointer hover:border-amber-300 hover:shadow-md' : ''}`}
               >
                 <div className="flex justify-between items-start mb-4">
-                  <h4 className="text-sm font-bold text-[#1a3059]">Precisión OCR</h4>
+                  <h4 className="text-sm font-bold text-[#1a3059]">Texto Accuracy</h4>
                   {securityData?.kpis?.docs_ocr > 0 && (
                     <span className="text-[9px] font-bold text-amber-500 flex items-center gap-0.5">
                       Ver detalle <ChevronRight size={10} />
@@ -558,7 +563,7 @@ const Audit = () => {
                     <h4 className="text-lg font-bold">Validación de Métricas por Expediente</h4>
                   </div>
                   <p className="text-sm text-slate-500 font-medium mt-1">
-                    Compara OCR, NER y BERTScore contra referencias humanas y consolida resultados del dataset.
+                    Compara texto extraído (PyPDF2/pdfplumber/Tesseract), NER y BERTScore contra referencias humanas y consolida resultados del dataset.
                   </p>
                 </div>
                 <button
@@ -600,8 +605,8 @@ const Audit = () => {
 
               <div className="p-6 grid grid-cols-1 xl:grid-cols-3 gap-5">
                 <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
-                  <h5 className="text-sm font-black text-[#1a3059] mb-1">OCR Accuracy</h5>
-                  <p className="text-[11px] text-slate-500 mb-4">Carga un TXT corregido manualmente para calcular CER.</p>
+                  <h5 className="text-sm font-black text-[#1a3059] mb-1">Texto Accuracy</h5>
+                  <p className="text-[11px] text-slate-500 mb-4">Carga un TXT corregido manualmente para comparar contra el texto extraído por el sistema (PyPDF2/pdfplumber/Tesseract) y calcular CER.</p>
                   <input
                     type="file"
                     accept=".txt,text/plain"
@@ -613,7 +618,7 @@ const Audit = () => {
                     disabled={!ocrReferenceFile || !selectedValidationExp || isValidatingMetrics}
                     className="mt-4 w-full flex items-center justify-center gap-2 rounded-lg bg-amber-500 px-4 py-2.5 text-xs font-black text-white hover:bg-amber-600 disabled:opacity-50"
                   >
-                    <Upload size={14} /> Validar OCR
+                    <Upload size={14} /> Validar texto
                   </button>
                   <div className="mt-4 rounded-lg bg-white border border-slate-200 p-3 text-xs">
                     <p className="font-bold text-slate-500">Resultado guardado</p>
@@ -704,15 +709,15 @@ const Audit = () => {
                   <div className="mt-4 grid grid-cols-3 gap-2 text-center text-xs">
                     <div className="rounded-lg bg-white border border-slate-200 p-2">
                       <p className="text-[10px] text-slate-400 font-bold">Precision</p>
-                      <p className="font-black text-blue-600">{validationMetrics?.ner?.precision ?? '—'}</p>
+                      <p className="font-black text-blue-600">{formatMetric4(validationMetrics?.ner?.precision)}</p>
                     </div>
                     <div className="rounded-lg bg-white border border-slate-200 p-2">
                       <p className="text-[10px] text-slate-400 font-bold">Recall</p>
-                      <p className="font-black text-blue-600">{validationMetrics?.ner?.recall ?? '—'}</p>
+                      <p className="font-black text-blue-600">{formatMetric4(validationMetrics?.ner?.recall)}</p>
                     </div>
                     <div className="rounded-lg bg-white border border-slate-200 p-2">
                       <p className="text-[10px] text-slate-400 font-bold">F1</p>
-                      <p className="font-black text-blue-600">{validationMetrics?.ner?.f1 ?? '—'}</p>
+                      <p className="font-black text-blue-600">{formatMetric4(validationMetrics?.ner?.f1)}</p>
                     </div>
                   </div>
                 </div>
@@ -766,9 +771,9 @@ const Audit = () => {
                       </p>
                     </div>
                     <div className="grid grid-cols-3 gap-2 text-[11px] font-black">
-                      <span className="rounded bg-white border border-slate-200 px-3 py-1">OCR {validationSummary?.global?.ocr_accuracy ?? '—'}%</span>
-                      <span className="rounded bg-white border border-slate-200 px-3 py-1">NER F1 {validationSummary?.global?.ner_f1 ?? '—'}</span>
-                      <span className="rounded bg-white border border-slate-200 px-3 py-1">BERT F1 {validationSummary?.global?.bert_f1 ?? '—'}</span>
+                      <span className="rounded bg-white border border-slate-200 px-3 py-1">Texto {validationSummary?.global?.ocr_accuracy ?? '—'}%</span>
+                      <span className="rounded bg-white border border-slate-200 px-3 py-1">NER F1 {formatMetric4(validationSummary?.global?.ner_f1)}</span>
+                      <span className="rounded bg-white border border-slate-200 px-3 py-1">BERT F1 {formatMetric4(validationSummary?.global?.bert_f1)}</span>
                     </div>
                   </div>
                   <div className="overflow-x-auto">
@@ -862,7 +867,7 @@ const Audit = () => {
                         <tr>
                           <th className="px-4 py-3">Expediente</th>
                           <th className="px-4 py-3">Fecha</th>
-                          <th className="px-4 py-3 text-right">OCR Accuracy</th>
+                          <th className="px-4 py-3 text-right">Texto Accuracy</th>
                           <th className="px-4 py-3 text-right">NER F1</th>
                           <th className="px-4 py-3 text-right">BERT F1</th>
                         </tr>
@@ -873,8 +878,8 @@ const Audit = () => {
                             <td className="px-4 py-3 font-mono font-bold text-slate-700">{item.numero_expediente}</td>
                             <td className="px-4 py-3 text-slate-500">{item.fecha}</td>
                             <td className="px-4 py-3 text-right font-black text-amber-500">{item.ocr_accuracy != null ? `${item.ocr_accuracy}%` : '—'}</td>
-                            <td className="px-4 py-3 text-right font-black text-blue-600">{item.ner_f1 ?? '—'}</td>
-                            <td className="px-4 py-3 text-right font-black text-rose-500">{item.bert_f1 ?? '—'}</td>
+                            <td className="px-4 py-3 text-right font-black text-blue-600">{formatMetric4(item.ner_f1)}</td>
+                            <td className="px-4 py-3 text-right font-black text-rose-500">{formatMetric4(item.bert_f1)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -947,7 +952,7 @@ const Audit = () => {
 
       </main>
 
-      {/* Modal de detalle OCR por expediente */}
+      {/* Modal de detalle de texto extraido por expediente */}
       {isOcrModalOpen && (
         <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col">
@@ -955,9 +960,9 @@ const Audit = () => {
             {/* Header */}
             <div className="flex justify-between items-start p-6 border-b border-slate-100">
               <div>
-                <h3 className="text-lg font-bold text-[#1a3059]">Precisión OCR por Expediente</h3>
+                <h3 className="text-lg font-bold text-[#1a3059]">Texto Accuracy por Expediente</h3>
                 <p className="text-xs text-slate-500 mt-1">
-                  Comparación texto nativo (PyPDF2) vs texto procesado por OCR.
+                  Calidad del texto extraído por documento. Puede provenir de extracción nativa (PyPDF2/pdfplumber) u OCR (Tesseract) cuando el PDF lo requiere.
                   Para PDFs escaneados sin texto nativo se usa una heurística de calidad de caracteres.
                 </p>
               </div>
@@ -1054,7 +1059,7 @@ const Audit = () => {
                 </>
               ) : (
                 <div className="text-center text-slate-500 py-10 text-sm">
-                  No hay expedientes con datos de precisión OCR aún.
+                  No hay expedientes con datos de Texto Accuracy aún.
                 </div>
               )}
             </div>
@@ -1158,7 +1163,7 @@ const Audit = () => {
                   <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-5 flex justify-between items-center">
                     <div>
                       <p className="text-xs font-bold text-blue-700 uppercase tracking-wide">Promedio global</p>
-                      <p className="text-3xl font-extrabold text-blue-600">{f1Details.promedio_global}</p>
+                      <p className="text-3xl font-extrabold text-blue-600">{formatMetric4(f1Details.promedio_global)}</p>
                     </div>
                     <div className="text-right">
                       <p className="text-xs text-slate-500">{f1Details.total} expediente(s)</p>
@@ -1184,7 +1189,7 @@ const Audit = () => {
                               <p className="text-[11px] font-mono font-bold text-slate-700">{exp.expediente}</p>
                               <p className="text-[10px] text-slate-400 mt-0.5">{exp.fecha}</p>
                             </div>
-                            <p className={`text-xl font-extrabold ${colorF1}`}>{exp.f1_ner} / 1.0</p>
+                            <p className={`text-xl font-extrabold ${colorF1}`}>{formatMetric4(exp.f1_ner)} / 1.0</p>
                           </div>
                           <div className="divide-y divide-slate-100">
                             {filas.map((f, fi) => {
