@@ -107,7 +107,6 @@ def obtener_ollama_generate_urls() -> list[str]:
         ]
     return [
         "http://localhost:11434/api/generate",
-        "http://ollama:11434/api/generate",
     ]
 
 
@@ -125,7 +124,6 @@ def obtener_ollama_embed_urls() -> list[str]:
         ]
     return [
         "http://localhost:11434/api/embeddings",
-        "http://ollama:11434/api/embeddings",
     ]
 
 
@@ -536,6 +534,9 @@ def asegurar_tabla_metricas_validacion():
                 ner_precision REAL,
                 ner_recall REAL,
                 ner_f1 REAL,
+                ner_detection_accuracy REAL,
+                ner_assignment_accuracy REAL,
+                ner_integral_accuracy REAL,
                 bert_precision REAL,
                 bert_recall REAL,
                 bert_f1 REAL,
@@ -546,6 +547,12 @@ def asegurar_tabla_metricas_validacion():
                 detalle JSONB
             )
         """)
+        for sql in [
+            "ALTER TABLE metricas_validacion ADD COLUMN IF NOT EXISTS ner_detection_accuracy REAL",
+            "ALTER TABLE metricas_validacion ADD COLUMN IF NOT EXISTS ner_assignment_accuracy REAL",
+            "ALTER TABLE metricas_validacion ADD COLUMN IF NOT EXISTS ner_integral_accuracy REAL",
+        ]:
+            conn.execute(sql)
         conn.commit()
     except Exception as e:
         conn.rollback()
@@ -855,6 +862,24 @@ class ValidationBERTRequest(BaseModel):
     numero_expediente: str
     resumen_referencia: str
     usuario: str = "Usuario SIGEJA"
+
+
+class ValidationRAGItem(BaseModel):
+    pregunta: str = ""
+    respuesta_esperada: str = ""
+    documento_esperado: str = ""
+    pagina_esperada: str = ""
+    posicion_fuente_correcta: int = 0
+    respuesta_correcta: bool = False
+    cita_sustenta: bool = False
+    abstencion_correcta: bool = False
+
+
+class ValidationRAGRequest(BaseModel):
+    numero_expediente: str
+    usuario: str = "Usuario SIGEJA"
+    casos: List[ValidationRAGItem] = Field(default_factory=list)
+    append: bool = False
 
 
 class SensitiveValidationRequest(BaseModel):
@@ -1678,6 +1703,14 @@ def extraer_domicilios_judiciales(texto_plano: str) -> dict:
 
     texto_demanda = _texto_documento_por_nombre(texto_plano, r'demanda|01_') or texto_plano
     texto_demanda_lineal = re.sub(r'\s+', ' ', texto_demanda).strip()
+    for rol, tipo, patron in [
+        ("demandante", "real", r'domicilio\s+real\s+de\s+la\s+demandante\s+(.+?)(?=\b(?:domicilio\s+procesal|contacto\s+procesal|domicilio\s+conocido\s+del\s+demandado|I\.\s*PETITORIO)\b|$)'),
+        ("demandante", "procesal", r'domicilio\s+procesal\s+(.+?)(?=\b(?:contacto\s+procesal|domicilio\s+conocido\s+del\s+demandado|I\.\s*PETITORIO)\b|$)'),
+        ("demandado", "real", r'domicilio\s+conocido\s+del\s+demandado\s+(.+?)(?=\b(?:contacto\s+procesal|I\.\s*PETITORIO)\b|$)'),
+    ]:
+        match = re.search(patron, texto_demanda_lineal, re.IGNORECASE)
+        if match:
+            _registrar_domicilio_resultado(resultado, rol, tipo, match.group(1), match.group(0))
     patrones_demanda = [
         ("demandante", "real", r'(?:demandante|parte\s+actora|accionante)[\s\S]{0,350}?(?:domicilio\s+real|domiciliad[ao]\s+en|con\s+domicilio\s+en)\s*(.*?)(?=\b(?:domicilio\s+procesal|casilla|correo|email|tel[eé]fono|demandado|petitorio)\b|$)'),
         ("demandante", "procesal", r'(?:domicilio\s+procesal|se[nñ]al[ao]\s+domicilio\s+procesal)\s*(?:en|:)?\s*(.*?)(?=\b(?:casilla|correo|email|tel[eé]fono|demandado|petitorio|fundamentos?)\b|$)'),
@@ -1752,6 +1785,21 @@ def extraer_domicilios_judiciales(texto_plano: str) -> dict:
             else:
                 resultado["otros"].append(item)
 
+    def clave_domicilio(valor):
+        sin_acentos = unicodedata.normalize("NFKD", valor or "")
+        return re.sub(r'[^a-z0-9]+', ' ', ''.join(c for c in sin_acentos if not unicodedata.combining(c)).lower()).strip()
+
+    asignados = [clave_domicilio(resultado[rol][tipo]) for rol in ("demandante", "demandado")
+                for tipo in ("real", "procesal", "laboral")]
+    otros_unicos = []
+    vistos_otros = set()
+    for item in resultado["otros"]:
+        clave = clave_domicilio(item.get("valor", ""))
+        if not clave or clave in vistos_otros or any(clave == actual or (len(clave) >= 20 and clave in actual) for actual in asignados):
+            continue
+        vistos_otros.add(clave)
+        otros_unicos.append(item)
+    resultado["otros"] = otros_unicos
     return resultado
 
 
@@ -2898,6 +2946,14 @@ def _normalizar_monto_texto(monto_txt: str):
     s = str(monto_txt).strip().replace(" ", "")
     if not s:
         return None
+    # Cuando el patrón captura después de "S/" o "S/.", puede quedar un punto
+    # inicial de moneda: ".2,992.50" debe leerse como "2,992.50", no como 0.2.
+    if s.startswith(".") and re.match(r"^\.\d", s):
+        s = s[1:]
+    while s and s[-1] in ".,":
+        s = s[:-1]
+    if not s:
+        return None
 
     # Si tiene ambos separadores, inferimos cuál es decimal por la última aparición.
     if "," in s and "." in s:
@@ -3085,12 +3141,22 @@ def _extraer_petitorio_demanda_info(texto_plano: str) -> dict:
     Extrae el petitorio principal y su evidencia desde demanda/sentencia.
     Evita usar la primera aparición numérica del monto como trazabilidad.
     """
-    texto_demanda = re.split(
+    texto_demanda = _texto_documento_por_nombre(
+        texto_plano, r'^(?:0?1[_ -])?DEMANDA(?:[_ .-]|$)'
+    ) or re.split(
         r'CONTESTACI[ÓO]N\s+DE\s+DEMANDA|SUMILLA:\s*CONTESTACI[ÓO]N|ESCRITO:\s*0?2-\d{4}',
         texto_plano,
         maxsplit=1,
         flags=re.IGNORECASE
     )[0]
+
+    def _contexto_monto_no_es_aporte_historico(contexto: str) -> bool:
+        return not re.search(
+            r'\b(?:aportes?|dep[oó]sitos?|pagos?|transferencias?)\b.{0,80}\b(?:entre|fluct[uú]an|aproximad[ao]s?)\b|'
+            r'\bentre\s+(?:S/|S/\.)\s*[0-9][0-9\.,]*\s+y\s+(?:S/|S/\.)\s*[0-9][0-9\.,]*',
+            contexto or '',
+            re.IGNORECASE | re.DOTALL
+        )
 
     seccion_petitorio = re.search(
         r'I\.\s*PETITORIO\s*:?(.*?)(?:\n\s*II\.)',
@@ -3113,11 +3179,13 @@ def _extraer_petitorio_demanda_info(texto_plano: str) -> dict:
 
         fallback = re.search(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', bloque, re.IGNORECASE)
         if fallback:
-            return {
-                "monto": _normalizar_monto_texto(fallback.group(1)) or 0.0,
-                "evidencia": re.sub(r'\s+', ' ', bloque[max(0, fallback.start() - 140): fallback.end() + 180]).strip(),
-                "fuente": "Regex estricto: sección I. PETITORIO de la demanda"
-            }
+            evidencia_fallback = re.sub(r'\s+', ' ', bloque[max(0, fallback.start() - 140): fallback.end() + 180]).strip()
+            if _contexto_monto_no_es_aporte_historico(evidencia_fallback):
+                return {
+                    "monto": _normalizar_monto_texto(fallback.group(1)) or 0.0,
+                    "evidencia": evidencia_fallback,
+                    "fuente": "Regex estricto: sección I. PETITORIO de la demanda"
+                }
 
         fallback_letras = re.search(
             r'(pensi[oó]n\s+alimenticia[\s\S]{0,90}?([A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){0,5})\s+soles)',
@@ -3130,6 +3198,22 @@ def _extraer_petitorio_demanda_info(texto_plano: str) -> dict:
                 "evidencia": re.sub(r'\s+', ' ', fallback_letras.group(1)).strip(),
                 "fuente": "Regex estricto: sección I. PETITORIO de la demanda"
             }
+
+    # La pensión fijada solo es referencia cuando no existe petitorio explícito
+    # en la demanda; no debe reemplazar el monto originalmente solicitado.
+    for patron_pension_principal in [
+        r'((?:se\s+fija|fijar|pensi[oó]n\s+reconstruida|pensi[oó]n\s+alimenticia\s+mensual)'
+        r'[\s\S]{0,120}?(?:pensi[oó]n\s+)?(?:alimenticia\s+)?(?:mensual\s+)?(?:de\s+)?(?:S/|S/\.)\s*([0-9][0-9\.,]*))',
+        r'((?:fijar|fija|ordenar|ordena)[\s\S]{0,90}?pensi[oó]n[\s\S]{0,90}?(?:S/|S/\.)\s*([0-9][0-9\.,]*))',
+    ]:
+        for m in re.finditer(patron_pension_principal, texto_plano or '', re.IGNORECASE):
+            evidencia = re.sub(r'\s+', ' ', m.group(1)).strip()
+            if _contexto_monto_no_es_aporte_historico(evidencia):
+                return {
+                    "monto": _normalizar_monto_texto(m.group(2)) or 0.0,
+                    "evidencia": evidencia,
+                    "fuente": "Regex: pensión mensual principal/fijada"
+                }
 
     sentencia_refiere_petitorio = re.search(
         r'demandante\s+pretende[\s\S]{0,220}?pensi[oó]n\s+alimenticia[\s\S]{0,90}?(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
@@ -3183,7 +3267,10 @@ def _texto_parece_ingreso_hu14(texto: str) -> bool:
     if not texto:
         return False
     return bool(re.search(
-        r'genera\s+ingresos|ingresos?\s+(?:de|mensual|que\s+percibe)|percibe\s+(?:un\s+)?ingreso|remuneraci[oó]n\s+mensual|boleta\s+de\s+pago|empleador|contrato\s+administrativo\s+de\s+servicios|\bCAS\b|descuentos?\s+de\s+ley|sueldo|planilla',
+        r'genera\s+ingresos|ingreso\s+(?:mensual\s+promedio|del\s+obligado|mensual|promedio)'
+        r'|ingresos?\s+(?:de|mensual|que\s+percibe)|percibe\s+(?:un\s+)?ingreso'
+        r'|remuneraci[oó]n\s+mensual|boleta\s+de\s+pago|empleador'
+        r'|contrato\s+administrativo\s+de\s+servicios|\bCAS\b|descuentos?\s+de\s+ley|sueldo|planilla',
         texto,
         re.IGNORECASE
     ))
@@ -3235,6 +3322,12 @@ def _obtener_bloques_demanda_contestacion(texto_plano: str):
     """
     if not texto_plano:
         return "", ""
+    secciones = _secciones_documentales(texto_plano)
+    if len(secciones) > 1:
+        demanda = _texto_documento_por_nombre(texto_plano, r'^(?:0?1[_ -])?DEMANDA(?:[_ .-]|$)')
+        contestacion = _texto_documento_por_nombre(texto_plano, r'CONTESTACI[ÓO]N')
+        if demanda or contestacion:
+            return demanda, contestacion
     partes = re.split(
         r'CONTESTACI[ÓO]N\s+DE\s+DEMANDA|SUMILLA:\s*CONTESTACI[ÓO]N|ESCRITO:\s*0?2-\d{4}',
         texto_plano,
@@ -3244,6 +3337,42 @@ def _obtener_bloques_demanda_contestacion(texto_plano: str):
     demanda = partes[0]
     contestacion = partes[1] if len(partes) > 1 else ""
     return demanda, contestacion
+
+
+def _extraer_puntos_controvertidos_acta(texto_plano: str) -> list:
+    acta = _texto_documento_por_nombre(texto_plano, r'ACTA[_ -]AUDIENCIA|AUDIENCIA[_ -]UNICA')
+    if not acta:
+        return []
+    match = re.search(
+        r'se\s+tienen\s+como\s+puntos\s+controvertidos\s*:\s*([\s\S]{0,1200}?)(?=\n\s*[IVX]+\.\s+[A-ZÁÉÍÓÚÑ]|$)',
+        acta, re.IGNORECASE
+    )
+    if not match:
+        return []
+    puntos = []
+    for fragmento in re.split(r';\s*(?=(?:y\s+)?\d+\))', match.group(1)):
+        texto_punto = re.sub(r'^(?:y\s+)?\d+\)\s*', '', fragmento.strip(), flags=re.IGNORECASE).strip(' .;')
+        if texto_punto:
+            puntos.append({"tema": "Punto controvertido del acta", "sugerencia": texto_punto, "fuente": "acta"})
+    return puntos
+
+
+def _integrar_oferta_contestacion(postura: dict, texto_plano: str) -> dict:
+    _, contestacion = _obtener_bloques_demanda_contestacion(texto_plano)
+    oferta = re.search(
+        r'\b(?:ofrezco|ofrece|ofreci[oó]|ofrecimiento)\b[^.]{0,160}?(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
+        contestacion, re.IGNORECASE
+    )
+    monto = _normalizar_monto_texto(oferta.group(1)) if oferta else None
+    if not monto or not isinstance(postura, dict):
+        return postura
+    frase = f"En la contestación, el demandado ofreció S/ {monto:.2f} mensuales."
+    for tono in ("tecnico", "estandar"):
+        texto = str(postura.get(tono) or "").strip()
+        if texto and not re.search(rf'\b{monto:.0f}(?:[.,]00)?\b', texto):
+            postura[tono] = f"{frase} {texto}"
+    return postura
+
 
 def _extraer_carga_especie_desde_texto(texto_plano: str, montos_reales: list) -> dict:
     """
@@ -3299,6 +3428,7 @@ def _extraer_gastos_nativos(texto_plano: str, montos_reales: list, pa: float) ->
     categorias = [
         ("Educación", r'(?:pensi[oó]n\s+escolar|colegio|matr[ií]cula|educaci[oó]n|mensualidad\s+escolar)'),
         ("Alimentación", r'(?:alimentaci[oó]n|comida|gastos\s+(?:conjuntos\s+de\s+)?alimentaci[oó]n|supermercado)'),
+        ("Movilidad del menor", r'(?:movilidad\s+(?:del\s+menor|del\s+alimentista|escolar|atribuible\s+al\s+menor)|transporte\s+del\s+menor)'),
         ("Salud", r'(?:terapia|tratamiento|m[eé]dico|salud|medicinas|consulta)'),
         ("Vivienda", r'(?:alquiler|vivienda|arriendo|renta\s+de\s+casa)'),
     ]
@@ -3333,16 +3463,23 @@ def _extraer_gastos_nativos(texto_plano: str, montos_reales: list, pa: float) ->
         })
 
     for concepto, patron_cat in categorias:
-        for m in re.finditer(
-            rf'{patron_cat}[\s\S]{{0,140}}?(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
-            texto_plano,
-            re.IGNORECASE
-        ):
-            val = _normalizar_monto_texto(m.group(1))
+        for linea in texto_plano.splitlines():
+            categoria = re.search(patron_cat, linea, re.IGNORECASE)
+            if not categoria:
+                continue
+            if re.search(r'(?:S/|S/\.)\s*[0-9]', linea[:categoria.start()], re.IGNORECASE):
+                continue
+            if concepto == "Vivienda" and not re.search(r'(?:del|atribuible\s+al)\s+(?:menor|alimentista)', linea, re.IGNORECASE):
+                continue
+            monto_literal = re.search(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', linea[categoria.end():], re.IGNORECASE)
+            if not monto_literal:
+                continue
+            val = _normalizar_monto_texto(monto_literal.group(1))
             val_validado = _validar_monto_con_texto(val or 0, montos_reales, tolerancia=1.0)
             if not val_validado:
                 continue
-            if _texto_parece_petitorio_o_oferta(m.group(0)) or _monto_tiene_contexto_excluido(texto_plano, val_validado):
+            evidencia = linea[categoria.start():categoria.end() + monto_literal.end()].strip()
+            if _texto_parece_petitorio_o_oferta(evidencia) or _monto_tiene_contexto_excluido(texto_plano, val_validado):
                 continue
             if abs(val_validado - pa) <= 10:
                 continue
@@ -3350,11 +3487,10 @@ def _extraer_gastos_nativos(texto_plano: str, montos_reales: list, pa: float) ->
             if clave in montos_usados:
                 continue
             montos_usados.add(clave)
-            ctx = m.group(0)[:120].strip()
             gastos.append({
                 "concepto": concepto,
                 "monto": val_validado,
-                "observacion": ctx,
+                "observacion": evidencia[:120],
                 "tipo_documento": "texto nativo"
             })
 
@@ -3397,6 +3533,15 @@ def _extraer_dependientes_nativos(texto_plano: str):
     for m in re.finditer(patron_doble, texto_plano, re.IGNORECASE):
         agregar_dependiente(m.group(1), int(m.group(3)), m.group(0))
         agregar_dependiente(m.group(2), int(m.group(4)), m.group(0))
+
+    patron_menores_hijas = (
+        r'menores\s+hijas?\s+'
+        r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ]+){1,4})\s+y\s+'
+        r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ]+(?:\s+[A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑa-záéíóúñ]+){1,4})'
+    )
+    for m in re.finditer(patron_menores_hijas, texto_plano, re.IGNORECASE):
+        agregar_dependiente(m.group(1), 0, m.group(0))
+        agregar_dependiente(m.group(2), 0, m.group(0))
 
     patron_lista = (
         r'(?:alimentistas?|menores?|hijos?)\s+'
@@ -3443,7 +3588,20 @@ def _prioridad_ingreso_hu14(item: dict, texto_plano: str = "") -> int:
     como la IA pueden recortar o parafrasear la evidencia y perder la frase
     de alegato si esta queda lejos del monto dentro de la misma oración.
     """
-    oracion_fuente = _oracion_que_contiene_monto(texto_plano, float(item.get("monto") or 0)) if texto_plano else ""
+    monto_item = float(item.get("monto") or 0)
+    oracion_fuente = _oracion_que_contiene_monto(texto_plano, monto_item) if texto_plano else ""
+    if texto_plano:
+        for m in re.finditer(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', texto_plano, re.IGNORECASE):
+            monto_literal = _normalizar_monto_texto(m.group(1))
+            if monto_literal is None or abs(monto_literal - monto_item) > 1:
+                continue
+            prefijo = texto_plano[max(0, m.start() - 65):m.start()].lower()
+            marcadores = list(re.finditer(r'\b(?:neto|neta|bruto|bruta)\b', prefijo))
+            if marcadores:
+                marcador = marcadores[-1].group(0)
+                if marcador in ("neto", "neta"):
+                    return 110 if re.search(r'boleta|mostrado|acreditad', oracion_fuente, re.IGNORECASE) else 95
+                return 70
     texto = " ".join([
         str(item.get("tipo", "")),
         str(item.get("estado", "")),
@@ -3480,13 +3638,23 @@ def _monto_es_ingreso_explicito_hu14(texto_plano: str, monto: float, evidencia: 
     for m in re.finditer(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', universo, re.IGNORECASE):
         val = _normalizar_monto_texto(m.group(1))
         if val is not None and abs(float(val) - float(monto)) <= 1.0:
+            prefijo = universo[max(0, m.start() - 150):m.start()]
+            marcador_gasto = list(re.finditer(r'\b(?:gasto|costos?|necesidades?|presupuesto|cifra\s+total)\b', prefijo, re.IGNORECASE))
+            marcador_ingreso = list(re.finditer(r'\b(?:ingresos?|sueldo|remuneraci[oó]n|haber(?:es)?|renta)\b', prefijo, re.IGNORECASE))
+            if marcador_gasto and (not marcador_ingreso or marcador_gasto[-1].start() > marcador_ingreso[-1].start()):
+                continue
             apariciones.append(universo[max(0, m.start() - 180): min(len(universo), m.end() + 220)])
-    if not apariciones and evidencia:
+    if not apariciones and not texto_plano and evidencia:
         apariciones = [evidencia]
+    patron_ingreso_fuerte = (
+        r'(?:mi\s+)?ingreso\s+(?:mensual\s+referencial|mensual\s+promedio|del\s+obligado|mensual|promedio|referencial)?'
+        r'[^.]{0,80}(?:asciende\s+a|es|de)?\s*(?:S/|S/\.)\s*[0-9]'
+        r'|ingreso\s+del\s+obligado\s*(?:S/|S/\.)\s*[0-9]|ingreso\s+mensual\s+referencial\s+de?\s*(?:S/|S/\.)\s*[0-9]'
+    )
     patron_ingreso_directo = (
         r'(?:ingresos?|sueldo|remuneraci[oó]n|haber|renta|percib[eo]|percibir|boleta|planilla)'
-        r'[^.]{0,90}(?:S/|S/\.)\s*[0-9]'
-        r'|(?:S/|S/\.)\s*[0-9][^.]{0,90}'
+        r'[^.]{0,120}(?:S/|S/\.)\s*[0-9]'
+        r'|(?:S/|S/\.)\s*[0-9][^.]{0,120}'
         r'(?:ingresos?|sueldo|remuneraci[oó]n|haber|renta|percib[eo]|percibir|boleta|planilla)'
     )
     patron_no_ingreso = (
@@ -3495,6 +3663,10 @@ def _monto_es_ingreso_explicito_hu14(texto_plano: str, monto: float, evidencia: 
         r'adjudicaci[oó]n|sentencia|vista|casaci[oó]n'
     )
     for contexto in apariciones:
+        # Si el propio fragmento formula el monto como ingreso mensual/base del obligado,
+        # se acepta aunque alrededor aparezcan palabras de alimentos o pension.
+        if re.search(patron_ingreso_fuerte, contexto, re.IGNORECASE):
+            return True
         if re.search(patron_ingreso_directo, contexto, re.IGNORECASE) and not re.search(patron_no_ingreso, contexto, re.IGNORECASE):
             return True
     return False
@@ -3509,6 +3681,11 @@ def _seleccionar_ingreso_base_hu14(ingresos: list, texto_plano: str = "") -> tup
     enriquecidos = []
     for item in ingresos:
         copia = dict(item)
+        oracion = _oracion_que_contiene_monto(texto_plano, float(copia.get("monto") or 0)) if texto_plano else ""
+        if re.search(r'\b(?:demandante|progenitora|accionante)\b', oracion, re.IGNORECASE) and not re.search(
+            r'\b(?:demandado|obligado)\b', oracion, re.IGNORECASE
+        ):
+            continue
         evidencia = " ".join([
             str(copia.get("tipo", "")),
             str(copia.get("estado", "")),
@@ -3526,7 +3703,9 @@ def _seleccionar_ingreso_base_hu14(ingresos: list, texto_plano: str = "") -> tup
     ingreso_base = float(elegido.get("monto") or 0)
     for item in enriquecidos:
         item["aplicado_calculo"] = item is elegido
-        estado_base = item.get("estado", "Validado por texto")
+        estado_base = re.sub(r'\s*\(referencial\)\s*$', '', str(item.get("estado") or "Validado por texto"), flags=re.IGNORECASE).strip()
+        if estado_base == "Base de cálculo HU14":
+            estado_base = "Validado por texto"
         item["estado"] = "Base de cálculo HU14" if item is elegido else f"{estado_base} (referencial)"
         item.pop("_prioridad_hu14", None)
     return enriquecidos, ingreso_base
@@ -3556,7 +3735,7 @@ def _extraer_cargas_familiares_nativas(texto_plano: str, montos_reales: list) ->
             if any(round(float(c.get("monto_carga") or 0), 2) == clave for c in cargas):
                 continue
             cargas.append({
-                "tipo": "Carga familiar acreditada",
+                "tipo": "Carga familiar declarada",
                 "detalle": "Apoyo familiar declarado del demandado" if re.search(r'madre|padre|adult[ao]\s+mayor|persona\s+mayor', evidencia, re.IGNORECASE) else "Otros dependientes del demandado",
                 "monto_carga": clave,
                 "evidencia": evidencia
@@ -3639,9 +3818,8 @@ def _extraer_contexto_social_hu14(texto_plano: str, ingresos: list, dependientes
 
     texto = texto_plano or ""
     reglas_vulnerabilidad = [
-        ("Salud", r'([^.]{0,120}(?:enfermedad|discapacidad|tratamiento|terapia|medicina|salud|diagn[oó]stico)[^.]{0,180})'),
-        ("Educacion", r'([^.]{0,120}(?:colegio|matr[ií]cula|pensi[oó]n\s+escolar|educaci[oó]n|estudios)[^.]{0,180})'),
-        ("Primera infancia", r'([^.]{0,120}(?:menor\s+de\s+\d+\s+a[nñ]os|lactante|primera\s+infancia|ni[nñ]o|ni[nñ]a)[^.]{0,180})'),
+        ("Salud", r'([^.]{0,120}(?:enfermedad\s+(?:cr[oó]nica|grave)|discapacidad|diagn[oó]stico\s+de\s+\w+|tratamiento\s+(?:m[eé]dico|continuo)|terapia\s+\w+)[^.]{0,180})'),
+        ("Primera infancia", r'([^.]{0,120}(?:lactante|primera\s+infancia|menor\s+de\s+[123]\s+a[nñ]os)[^.]{0,180})'),
         ("Precariedad economica", r'([^.]{0,120}(?:escasos\s+recursos|no\s+cuenta\s+con|sin\s+trabajo|desemplead[oa]|pobreza|vulnerabilidad)[^.]{0,180})')
     ]
     for tipo, patron in reglas_vulnerabilidad:
@@ -4027,7 +4205,7 @@ def _extraer_pension_ordenada_sentencia(texto_plano: str) -> dict:
 
         # 2) Monto fijo ordenado en el fallo
         m_fijo = re.search(
-            r'(?:pension(?:es)?\s+alimenticia|acuda\s+con\s+(?:la\s+)?(?:suma|pension|cantidad))'
+            r'(?:pensi[oó]n(?:es)?\s+alimenticia|acuda\s+(?:a\s+favor\s+de[^.]{0,80}?)?\s+con\s+(?:la\s+)?(?:suma|pensi[oó]n|cantidad))'
             r'[^$]{0,120}?(?:S/|S/\.)\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)',
             universo, re.IGNORECASE | re.DOTALL
         )
@@ -4157,7 +4335,7 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
         # Fallback nativo para ingresos si la IA viene vacía o inconsistente.
         ingresos_nativos = []
         patron_ingresos = re.finditer(
-            r'([^.]{0,90}(?:sueldo|remuneraci[oó]n|ingres[oa]s?|haber|renta|percib[eo]|percibir|reconoce\s+percibir)[^.]{0,90}(?:S/|S/\.)\s*([0-9][0-9\.,]*))',
+            r'([^.]{0,120}(?:sueldo|remuneraci[oó]n|ingres[oa]s?|ingreso\s+del\s+obligado|haber|renta|percib[eo]|percibir|reconoce\s+percibir|asciende\s+a)[^.]{0,120}(?:S/|S/\.)\s*([0-9][0-9\.,]*))',
             texto_plano,
             re.IGNORECASE
         )
@@ -4212,12 +4390,13 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
             if monto_carga > 0:
                 if _texto_parece_petitorio_o_oferta(texto_fuente_dep):
                     print(f"Alerta HU14: carga descartada por parecer petitorio/oferta (S/ {monto_carga}).")
-                    monto_carga = 0.0
+                    continue
                 else:
-                    monto_validado = _validar_monto_con_texto(monto_carga, montos_reales_en_texto, tolerancia=1.0)
+                    montos_evidencia = _extraer_montos_reales(evidencia_dep)
+                    monto_validado = _validar_monto_con_texto(monto_carga, montos_evidencia, tolerancia=1.0)
                     if not monto_validado:
-                        print(f"Alerta HU14: carga IA descartada por no existir en el texto (S/ {monto_carga}).")
-                        monto_carga = 0.0
+                        print(f"Alerta HU14: carga IA descartada por no estar respaldada en su evidencia (S/ {monto_carga}).")
+                        continue
                     else:
                         monto_carga = monto_validado
             dependientes.append({
@@ -4251,10 +4430,16 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
         carga_especie = _extraer_carga_especie_desde_texto(texto_plano, montos_reales_en_texto)
         carga_especie_ia = data.get("carga_especie", {}) if isinstance(data, dict) else {}
         ia_monto_especie = _normalizar_monto_texto(carga_especie_ia.get("monto", 0)) or 0.0
-        ia_monto_validado = _validar_monto_con_texto(ia_monto_especie, montos_reales_en_texto, tolerancia=1.0) if ia_monto_especie > 0 else None
         ia_estado = str(carga_especie_ia.get("estado_acreditacion", "")).strip().lower()
         ia_evidencia = str(carga_especie_ia.get("evidencia_literal", "")).strip()
-        if carga_especie["estado"] == "no detectada" and ia_monto_validado:
+        ia_monto_validado = _validar_monto_con_texto(
+            ia_monto_especie, _extraer_montos_reales(ia_evidencia), tolerancia=1.0
+        ) if ia_monto_especie > 0 else None
+        evidencia_especie = bool(re.search(
+            r'v[ií]veres|alimentos?\s+en\s+especie|compras?\s+directas?|entrega\s+de\s+alimentos',
+            ia_evidencia, re.IGNORECASE
+        ))
+        if carga_especie["estado"] == "no detectada" and ia_monto_validado and evidencia_especie:
             carga_especie = {
                 "monto_reportado": round(float(ia_monto_validado), 2),
                 "monto_acreditado": round(float(ia_monto_validado), 2) if ia_estado == "probada" else 0.0,
@@ -4363,21 +4548,44 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
 
     except Exception as e:
         print(f"Error en módulo de cargas: {e}")
+        ingresos_fallback = []
+        dependientes_fallback = []
+        total_ingresos_fallback = 0.0
+        try:
+            montos_reales_en_texto = _extraer_montos_reales(texto_plano)
+            for m in re.finditer(
+                r'([^.]{0,140}(?:sueldo|remuneraci[oó]n|ingres[oa]s?|ingreso\s+del\s+obligado|ingreso\s+mensual\s+promedio|haber|renta|percib[eo]|percibir|reconoce\s+percibir|asciende\s+a)[^.]{0,140}(?:S/|S/\.)\s*([0-9][0-9\.,]*))',
+                texto_plano or '',
+                re.IGNORECASE
+            ):
+                val = _normalizar_monto_texto(m.group(2))
+                val_validado = _validar_monto_con_texto(val or 0, montos_reales_en_texto, tolerancia=1.0)
+                if val_validado:
+                    ingresos_fallback.append({
+                        "tipo": "Ingreso detectado en texto",
+                        "monto": val_validado,
+                        "estado": "Fallback nativo por texto",
+                        "evidencia": m.group(1).strip()
+                    })
+            ingresos_fallback, total_ingresos_fallback = _seleccionar_ingreso_base_hu14(ingresos_fallback, texto_plano)
+            dependientes_fallback = _extraer_dependientes_nativos(texto_plano)
+        except Exception as fallback_error:
+            print(f"Error en fallback nativo HU14: {fallback_error}")
         return {
-            "ingresos": [], "dependientes": [], "total_ingresos": 0, "total_cargas": 0,
+            "ingresos": ingresos_fallback, "dependientes": dependientes_fallback, "total_ingresos": total_ingresos_fallback, "total_cargas": 0,
             "tope_legal_60": 0, "margen_libre": 0, "ratio_disponibilidad": 0,
             "pension_ordenada": {"tipo": "no_detectado", "valor": 0.0, "evidencia": ""},
             "monto_pension_ordenada_estimado": 0,
-            "carga_nivel": "Error", "mensaje": "Error de análisis",
+            "carga_nivel": "Fallback nativo" if total_ingresos_fallback > 0 or dependientes_fallback else "Error", "mensaje": "Analisis nativo aplicado tras falla IA" if total_ingresos_fallback > 0 or dependientes_fallback else "Error de análisis",
             "carga_especie_reportada": 0, "carga_especie_acreditada": 0,
             "carga_especie_aplicada": 0,
             "carga_especie_estado": "no detectada", "carga_especie_evidencia": "",
-            "ingreso_disponible_neto": 0, "alerta_revision_hu14": True,
+            "ingreso_disponible_neto": total_ingresos_fallback, "alerta_revision_hu14": True,
             "contexto_social": {
                 "empleador": {"nombre": "No detectado", "evidencia": ""},
                 "condiciones_familiares": [],
                 "vulnerabilidades": [],
-                "resumen": "Error de analisis"
+                "resumen": "Fallback nativo aplicado tras falla IA" if total_ingresos_fallback > 0 or dependientes_fallback else "Error de analisis"
             }
         }
 
@@ -4503,6 +4711,52 @@ def _construir_contexto_rag_rapido(texto_plano: str, max_chars: int = 24000) -> 
     return contexto[:max_chars] if contexto else (texto_plano or "")[:max_chars]
 
 
+def _rag_fallback_extractivo(texto_plano: str, entidades: dict, error: Exception = None) -> dict:
+    texto = re.sub(r'\s+', ' ', texto_plano or '').strip()
+    demandante = ((entidades or {}).get("demandante") or {}).get("nombre") or "No detectado"
+    demandado = ((entidades or {}).get("demandado") or {}).get("nombre") or "No detectado"
+    monto = (entidades or {}).get("monto_solicitado") or 0
+    fechas = []
+    for etiqueta, patron in [
+        ("demanda", r'(?:fecha\s+de\s+demanda|presentaci[oó]n\s+de\s+demanda|interposici[oó]n\s+de\s+demanda)[^0-9]{0,80}(\d{1,2}[/-]\d{1,2}[/-]\d{4})'),
+        ("admisorio", r'(?:auto\s+admisorio|admisi[oó]n|admisorio)[^0-9]{0,100}(\d{1,2}[/-]\d{1,2}[/-]\d{4})'),
+        ("audiencia", r'(?:audiencia\s+[uú]nica|audiencia\s+de\s+pruebas|acta\s+de\s+audiencia)[^0-9]{0,100}(\d{1,2}[/-]\d{1,2}[/-]\d{4})'),
+        ("sentencia", r'(?:sentencia\s+de\s+primera\s+instancia|sentencia)[^0-9]{0,120}(\d{1,2}[/-]\d{1,2}[/-]\d{4})'),
+    ]:
+        m = re.search(patron, texto, re.IGNORECASE)
+        if m:
+            fechas.append(f"{etiqueta}: {m.group(1)}")
+    materia = "No detectada"
+    m_materia = re.search(r'(?:Materia|Materia\s+principal)\s*[:\-]?\s*([^\.\n]{8,120})', texto, re.IGNORECASE)
+    if m_materia:
+        materia = m_materia.group(1).strip()
+    estado = "Se genero una sintesis extractiva porque el motor local de IA no respondio correctamente."
+    if re.search(r'casaci[oó]n\s+(?:infundad|improcedente)|sentencia\s+de\s+vista|ejecuci[oó]n|consentida', texto, re.IGNORECASE):
+        estado = "El expediente contiene actuaciones avanzadas como sentencia, vista, casacion o ejecucion; revisar la ultima resolucion para confirmar el estado vigente."
+    resumen_tecnico = (
+        f"Expediente analizado por modo extractivo. Materia: {materia}. "
+        f"Demandante: {demandante}. Demandado: {demandado}. "
+        f"Fechas detectadas: {', '.join(fechas) if fechas else 'sin fechas procesales claras en el contexto compacto'}. "
+        f"Monto registrado: {formato_monto(monto)}. {estado}"
+    )
+    resumen_estandar = (
+        f"El sistema pudo leer datos principales del expediente, pero el motor local de IA fallo durante la generacion del resumen. "
+        f"Se identifico a {demandante} como demandante y a {demandado} como parte demandada. "
+        f"{estado}"
+    )
+    return {
+        "resumen": {"tecnico": resumen_tecnico, "estandar": resumen_estandar},
+        "postura": {
+            "tecnico": "No se genero postura completa por indisponibilidad temporal del motor Ollama. Revise el fallo, audiencia o sentencia en el expediente para validar acuerdos y obligaciones.",
+            "estandar": "La IA local no pudo redactar los acuerdos completos. Los datos extraidos siguen disponibles para revision manual."
+        },
+        "puntos_controvertidos": [
+            {"tema": "Validacion manual del estado procesal", "sugerencia": "Confirmar la ultima actuacion del expediente porque el resumen fue generado en modo extractivo."},
+            {"tema": "Revision de montos", "sugerencia": "Contrastar petitorio, ingresos, monto referencial u obligacion fijada directamente en los documentos fuente."},
+            {"tema": "Disponibilidad de Ollama", "sugerencia": f"Revisar el servicio local de Ollama. Error observado: {str(error)[:180] if error else 'no disponible'}."}
+        ]
+    }
+
 def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
     import json, requests
 
@@ -4527,6 +4781,7 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
     - NUNCA describas el caso como "pendiente de sentencia" o "a la espera de resolución" si el expediente contiene una sentencia o una resolución de consentida.
     - ASIGNACIÓN ANTICIPADA NUNCA ES LA PENSIÓN VIGENTE (CRÍTICO, REGLA ABSOLUTA): cualquier monto descrito como "asignación anticipada", "medida cautelar" o "pago provisional" es SIEMPRE temporal y queda automáticamente reemplazado en cuanto existe SENTENCIA — sin importar si ese texto en particular menciona o no la palabra "sin efecto" cerca. NUNCA reportes una asignación anticipada como la pensión vigente si el expediente ya tiene sentencia. La ÚNICA pensión vigente es la que aparece en el FALLO/ORDENO de la SENTENCIA (monto fijo o porcentaje de ingresos, tal como está escrito ahí) — ese es el único monto que corresponde citar como "la pensión" en el resumen y la postura.
     - ASISTENCIA A AUDIENCIA: si el acta indica que el demandado participó, asistió, estuvo presente o incrementó/ofreció un monto durante la audiencia, PROHIBIDO afirmar que "no se presentó a la audiencia" o que estuvo ausente. En ese caso redacta que compareció y dejó constancia de su oferta.
+    - CONCILIACIÓN: una reducción del pedido o un aumento de la oferta NO implica acuerdo sobre la pensión. Si el acta dice que no hubo acuerdo sobre el monto y la sentencia lo fija después, describe ambas ofertas como propuestas rechazadas y atribuye la pensión final exclusivamente a la sentencia. Un acuerdo parcial sobre forma de pago u otros extremos no es acuerdo sobre el monto.
     - OBLIGATORIO: el ÚLTIMO párrafo de 'resumen.tecnico' y 'resumen.estandar' DEBE empezar textualmente con una de estas frases, la que corresponda al estado real detectado (complétala con los datos del expediente, no la dejes genérica):
       · Si hay oficios de retención/ejecución: "Actualmente el proceso se encuentra en etapa de EJECUCIÓN, habiendo quedado consentida la sentencia..."
       · Si hay resolución de consentida sin oficios de ejecución: "El proceso cuenta con sentencia firme y consentida..."
@@ -4542,7 +4797,7 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
        - NO des respuestas de pocas palabras. Explica siempre el contexto de tu sugerencia.
        - Las sugerencias deben ser prácticas y accionables para mejorar el expediente o la redacción del mismo.
        - Las sugerencias deben ser reales y basadas en el texto, NO inventes problemas que no existan.
-       - Una sugerencia deber ser especificamente centrado en los nombres de las partes, deben estar correctamente escritos y similares a los nombres y apellidos comunes del Perú, si sospechas de algun caso, no dudes y colocalo como sugerencia.
+       - No cuestiones la ortografía de nombres propios por ser inusuales; señala un error solo si dos documentos del expediente presentan variantes verificables.
        - NO sugieras "falta especificar el monto de la pensión" ni "falta información de capacidad económica" si el expediente ya contiene una sentencia con esos datos — verifica el expediente completo antes de sugerir vacíos de información.
        - NO sugieras que una oferta en soles requiere aclarar si es monto fijo o porcentaje cuando el texto dice "S/.", "soles" o "mensuales"; eso ya identifica un monto fijo.
 
@@ -4601,15 +4856,29 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
             )
             return post_ollama_generate(payload, timeout=OLLAMA_RAG_TIMEOUT_SECONDS)
 
-        try:
-            techo_principal = OLLAMA_RAG_MAX_CTX if RAG_ANALYZE_MODE == "full" else min(OLLAMA_RAG_MAX_CTX, 16384)
-            response = ejecutar_rag_con_limites(techo_principal, NUM_PREDICT_RESUMEN, "principal")
-        except requests.HTTPError as http_error:
-            status = getattr(http_error.response, "status_code", None)
-            if status not in (500, 502, 503, 504):
-                raise
-            print(f"⚠ RAG principal falló con HTTP {status}; reintentando con contexto compacto...")
-            response = ejecutar_rag_con_limites(16384, 4500, "compacto")
+        techo_principal = OLLAMA_RAG_MAX_CTX if RAG_ANALYZE_MODE == "full" else min(OLLAMA_RAG_MAX_CTX, 12288)
+        intentos_rag = [
+            (techo_principal, min(NUM_PREDICT_RESUMEN, 2600), "principal"),
+            (8192, 1800, "compacto"),
+            (6144, 1200, "minimo"),
+        ]
+        response = None
+        ultimo_http_error = None
+        for techo_ctx, salida, etiqueta in intentos_rag:
+            try:
+                response = ejecutar_rag_con_limites(techo_ctx, salida, etiqueta)
+                break
+            except requests.HTTPError as http_error:
+                status = getattr(http_error.response, "status_code", None)
+                ultimo_http_error = http_error
+                if status not in (500, 502, 503, 504):
+                    raise
+                print(f"⚠ RAG {etiqueta} falló con HTTP {status}; reintentando con menor contexto...")
+            except requests.RequestException as req_error:
+                ultimo_http_error = req_error
+                print(f"⚠ RAG {etiqueta} falló por conexión; reintentando con menor contexto: {req_error}")
+        if response is None:
+            raise ultimo_http_error or RuntimeError("RAG no pudo obtener respuesta del motor local")
         
         analisis_json = cargar_json_llm(response.json().get("response", "{}"), {})
         texto_norm = _normalizar_texto_busqueda_pdf(texto_plano or "")
@@ -4661,24 +4930,36 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
                     }
                 ]
         
+        puntos_acta = _extraer_puntos_controvertidos_acta(texto_plano)
         return {
             "resumen": analisis_json.get("resumen", {"estandar": "Error de generación.", "tecnico": "Error de generación."}),
-            "postura": analisis_json.get("postura", {"estandar": "Error.", "tecnico": "Error."}),
-            "puntos_controvertidos": analisis_json.get("puntos_controvertidos", [])
+            "postura": _integrar_oferta_contestacion(
+                analisis_json.get("postura", {"estandar": "Error.", "tecnico": "Error."}), texto_plano
+            ),
+            "puntos_controvertidos": puntos_acta or analisis_json.get("puntos_controvertidos", [])
         }
 
     except Exception as e:
         print(f"Error crítico en RAG: {e}")
-        return {
-            "resumen": {"estandar": "Error de conexión.", "tecnico": "Fallo en motor local."}, 
-            "postura": {"estandar": "Error.", "tecnico": "Fallo de conexión."}, 
-            "puntos_controvertidos": []
-        }
+        fallback = _rag_fallback_extractivo(texto_plano, entidades, e)
+        fallback["postura"] = _integrar_oferta_contestacion(fallback.get("postura"), texto_plano)
+        fallback["puntos_controvertidos"] = _extraer_puntos_controvertidos_acta(texto_plano) or fallback["puntos_controvertidos"]
+        return fallback
 
 
 def clasificar_documento_judicial(filename: str, texto: str) -> dict:
     nombre = _normalizar_texto_busqueda_pdf(filename)
     contenido = _normalizar_texto_busqueda_pdf((texto or "")[:9000])
+    # Un nombre documental explícito tiene más valor que menciones incidentales
+    # de otras actuaciones dentro del índice o de una contestación.
+    for patron, tipo, categoria in [
+        (r'(?:^|[_\W])indice(?:[_\W]|$)', "Indice", "Organizacion del expediente"),
+        (r'(?:^|[_\W])contestacion(?:[_\W]|$)', "Contestacion", "Escrito principal"),
+        (r'(?:^|[_\W])resolucion[_ -]?admisoria(?:[_\W]|$)|(?:^|[_\W])auto[_ -]?admisorio(?:[_\W]|$)', "Auto admisorio", "Resolucion judicial"),
+        (r'(?:^|[_\W])sentencia(?:[_\W]|$)', "Sentencia", "Resolucion judicial"),
+    ]:
+        if re.search(patron, nombre, re.IGNORECASE):
+            return {"tipo": tipo, "categoria": categoria, "confianza": 0.95, "senales": ["nombre del archivo"]}
     universo = f"{nombre} {contenido}"
     reglas = [
         {
@@ -5608,7 +5889,7 @@ def _documentos_chat(texto_expediente: str) -> list:
     return [doc for doc in documentos if doc["texto"]]
 
 
-def _fragmentos_chat(documentos: list, query: str, documento_activo: str = "", max_chars: int = 7200) -> str:
+def _fragmentos_chat_detallados(documentos: list, query: str, documento_activo: str = "", max_chars: int = 7200) -> tuple[str, list]:
     query_tokens = _tokens_chat(query)
     activo_norm = _normalizar_texto_chat(documento_activo)
     fragmentos = []
@@ -5635,6 +5916,7 @@ def _fragmentos_chat(documentos: list, query: str, documento_activo: str = "", m
 
     fragmentos.sort(key=lambda item: item[0], reverse=True)
     seleccionados = []
+    evidencias = []
     total = 0
     vistos = set()
     for score, nombre, bloque in fragmentos:
@@ -5646,6 +5928,12 @@ def _fragmentos_chat(documentos: list, query: str, documento_activo: str = "", m
         if total + len(texto_bloque) > max_chars and seleccionados:
             break
         seleccionados.append(texto_bloque)
+        evidencias.append({
+            "rank": len(evidencias) + 1,
+            "documento": nombre,
+            "fragmento": bloque[:420],
+            "score": score,
+        })
         total += len(texto_bloque)
         if len(seleccionados) >= 8:
             break
@@ -5653,8 +5941,19 @@ def _fragmentos_chat(documentos: list, query: str, documento_activo: str = "", m
     if not seleccionados and documentos:
         doc = documentos[0]
         seleccionados.append(f"[{doc['nombre']}]\n{doc['texto'][:max_chars]}")
+        evidencias.append({
+            "rank": 1,
+            "documento": doc["nombre"],
+            "fragmento": doc["texto"][:420],
+            "score": 0,
+        })
 
-    return "\n\n".join(seleccionados)
+    return "\n\n".join(seleccionados), evidencias
+
+
+def _fragmentos_chat(documentos: list, query: str, documento_activo: str = "", max_chars: int = 7200) -> str:
+    contexto, _evidencias = _fragmentos_chat_detallados(documentos, query, documento_activo, max_chars)
+    return contexto
 
 
 def _resumen_datos_chat(datos: dict, resumen_por_pdf: list) -> str:
@@ -5784,7 +6083,24 @@ async def chat_expediente_contextual(request: ChatRequest):
         prompt_conversacion += f"{prefijo}{contenido[:700]}\n"
 
     documentos = _documentos_chat(request.texto_expediente)
-    contexto_relevante = _fragmentos_chat(documentos, request.query, request.documento_activo)
+    contexto_relevante, evidencias_chat = _fragmentos_chat_detallados(documentos, request.query, request.documento_activo)
+    if request.numero_expediente:
+        for evidencia in evidencias_chat[:5]:
+            try:
+                ubicacion = _localizar_evidencia_pdf(
+                    request.numero_expediente,
+                    _texto_plano_seguro(evidencia.get("fragmento") or request.query),
+                    _texto_plano_seguro(evidencia.get("documento") or request.documento_activo)
+                )
+                evidencia.update({
+                    "archivo": _texto_plano_seguro(ubicacion.get("archivo") or evidencia.get("documento")),
+                    "pagina": ubicacion.get("pagina"),
+                    "found": ubicacion.get("found"),
+                    "search_term": ubicacion.get("search_term"),
+                    "metodo_ubicacion": ubicacion.get("metodo"),
+                })
+            except Exception:
+                evidencia.update({"archivo": _texto_plano_seguro(evidencia.get("documento")), "pagina": None, "found": False})
     datos_resumidos = _resumen_datos_chat(request.datos_extraidos, request.resumen_por_pdf)
 
     sujetos = request.datos_extraidos.get("sujetos_procesales", request.datos_extraidos)
@@ -5852,8 +6168,9 @@ SIGEJA-Chat:
             "contexto_usado": {
                 "expediente": request.numero_expediente,
                 "documento_activo": request.documento_activo,
-                "fragmentos": contexto_relevante.count("["),
-                "chars_contexto": len(contexto_relevante)
+                "fragmentos": len(evidencias_chat),
+                "chars_contexto": len(contexto_relevante),
+                "evidencias": evidencias_chat
             }
         }
 
@@ -7353,6 +7670,13 @@ def _normalizar_texto_ocr_metricas(texto: str) -> str:
     return texto.strip()
 
 
+def _normalizar_texto_ocr_metricas_comparacion(texto: str) -> str:
+    texto = _normalizar_texto_ocr_metricas(texto)
+    texto = texto.replace("\ufeff", "")
+    texto = re.sub(r'\s+', ' ', texto)
+    return texto.strip()
+
+
 def _muestras_texto_metricas(texto: str, sample_chars: int = 6000, bloques: int = 6) -> str:
     texto = texto or ""
     if len(texto) <= sample_chars:
@@ -7368,10 +7692,19 @@ def _muestras_texto_metricas(texto: str, sample_chars: int = 6000, bloques: int 
 
 def calcular_metricas_ocr_cer(texto_referencia: str, texto_ocr: str) -> dict:
     import difflib
-    ref = _normalizar_texto_ocr_metricas(texto_referencia)
-    hyp = _normalizar_texto_ocr_metricas(texto_ocr)
+    ref = _normalizar_texto_ocr_metricas_comparacion(texto_referencia)
+    hyp = _normalizar_texto_ocr_metricas_comparacion(texto_ocr)
     if not ref.strip():
         raise HTTPException(status_code=400, detail="El texto de referencia OCR esta vacio.")
+    if ref == hyp:
+        return {
+            "ocr_accuracy": 100.0,
+            "ocr_cer": 0.0,
+            "ocr_ref_chars": len(ref),
+            "ocr_generated_chars": len(hyp),
+            "distancia_edicion": 0,
+            "metodo": "coincidencia_normalizada"
+        }
     max_exact_chars = int(os.getenv("SIGEJA_OCR_CER_EXACT_MAX_CHARS", "5000"))
     if len(ref) <= max_exact_chars and len(hyp) <= max_exact_chars:
         distancia = _distancia_levenshtein(ref, hyp)
@@ -7381,7 +7714,7 @@ def calcular_metricas_ocr_cer(texto_referencia: str, texto_ocr: str) -> dict:
         sample_chars = int(os.getenv("SIGEJA_OCR_CER_SAMPLE_CHARS", "12000"))
         ref_m = _muestras_texto_metricas(ref, sample_chars=sample_chars)
         hyp_m = _muestras_texto_metricas(hyp, sample_chars=sample_chars)
-        ratio = difflib.SequenceMatcher(None, ref_m, hyp_m, autojunk=True).ratio()
+        ratio = difflib.SequenceMatcher(None, ref_m, hyp_m, autojunk=False).ratio()
         cer = max(0.0, min(1.0, 1.0 - ratio))
         distancia = int(cer * len(ref))
         metodo = "sequence_matcher_muestreado"
@@ -7409,14 +7742,35 @@ def _rutas_pdf_expediente(numero_expediente: str) -> list[str]:
 def reconstruir_texto_ocr_expediente(numero_expediente: str) -> tuple[str, list]:
     conn = get_db_connection()
     try:
+        numero_raw = str(numero_expediente or "").strip()
+        variantes = []
+        for valor in [
+            numero_raw,
+            numero_raw.replace("-", "_"),
+            numero_raw.replace("_", "-"),
+            re.sub(r'[^A-Za-z0-9]', '_', numero_raw),
+            re.sub(r'[^A-Za-z0-9]', '-', numero_raw),
+        ]:
+            valor = valor.strip("_-")
+            if valor and valor not in variantes:
+                variantes.append(valor)
         rows = conn.execute("""
             SELECT nombre_archivo, texto_ocr, ocr_precision, metodo, chars
             FROM ocr_documentos
-            WHERE numero_expediente = %s AND modo_ocr = 'std'
+            WHERE modo_ocr = 'std'
+              AND (
+                    numero_expediente = ANY(%s)
+                 OR regexp_replace(numero_expediente, '[^A-Za-z0-9]', '', 'g') = regexp_replace(%s, '[^A-Za-z0-9]', '', 'g')
+              )
             ORDER BY documento_index ASC, id ASC
-        """, (numero_expediente,)).fetchall()
+        """, (variantes, numero_raw)).fetchall()
         if rows:
-            textos = [r.get("texto_ocr") or "" for r in rows]
+            textos = []
+            for idx, r in enumerate(rows, 1):
+                nombre_doc = (r.get("nombre_archivo") or f"Documento {idx}").replace("_", " ")
+                texto_doc = r.get("texto_ocr") or ""
+                if texto_doc.strip():
+                    textos.append(f"--- [DOCUMENTO {idx}: {nombre_doc}] ---\n\n{texto_doc.strip()}")
             detalle = [
                 {
                     "archivo": (r.get("nombre_archivo") or "").replace("_", " "),
@@ -7511,15 +7865,541 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
         return None
 
     texto_completo = str(data.get("texto_completo") or data.get("texto") or "")
-    if not texto_completo.strip() and numero_expediente:
+    if numero_expediente:
         try:
-            texto_completo, _detalle_ocr = reconstruir_texto_ocr_expediente(numero_expediente)
+            texto_ocr_bd, _detalle_ocr = reconstruir_texto_ocr_expediente(numero_expediente)
+            if texto_ocr_bd and texto_ocr_bd not in texto_completo:
+                texto_completo = (texto_completo + "\n\n" + texto_ocr_bd).strip()
         except Exception:
-            texto_completo = ""
+            if not texto_completo.strip():
+                texto_completo = ""
 
+    def documentos_ner_filtrados(patron_nombre: str = ""):
+        docs = _documentos_texto_expediente(texto_completo)
+        if not patron_nombre:
+            return docs
+        return [d for d in docs if re.search(patron_nombre, str(d.get("nombre") or ""), re.IGNORECASE)]
+
+    def primer_fecha_en_segmento_ner(segmento: str):
+        fechas = fechas_en_texto_ner(segmento or "")
+        return fechas[0][1] if fechas else None
+
+    def fecha_demanda_documento_principal_ner():
+        # En cargos posteriores suele repetirse la fecha real de inicio del expediente.
+        # Es más estable que tomar la última fecha dentro del PDF de demanda.
+        fechas_inicio = []
+        for m in re.finditer(r'Fecha\s+de\s+Inicio\s+([^\n]{6,80})', texto_completo or '', re.IGNORECASE):
+            fecha = primer_fecha_en_segmento_ner(m.group(1))
+            if fecha:
+                fechas_inicio.append(fecha)
+        if fechas_inicio:
+            return sorted(fechas_inicio, key=lambda f: tuple(map(int, f.split('/')[::-1])))[0]
+
+        docs_demanda = documentos_ner_filtrados(r'(?<!contestacion[_\s-])demanda|subsanaci[oó]n')
+        for doc in docs_demanda:
+            nombre_doc = str(doc.get("nombre") or "")
+            if re.search(r'contestaci[oó]n|notificada|sentencia|vista|liquidaci[oó]n|cargo', nombre_doc, re.IGNORECASE):
+                continue
+            texto_doc = str(doc.get("texto") or "")
+            m_cargo = re.search(r'Fecha\s+de\s+Presentaci[oó]n\s+([^\n]{6,80})', texto_doc, re.IGNORECASE)
+            if m_cargo:
+                fecha = primer_fecha_en_segmento_ner(m_cargo.group(1))
+                if fecha:
+                    return fecha
+            m_escrito = re.search(r'ESCRITO\s*:?\s*0?1[\s\S]{0,900}?(?:DEMANDA|PETITORIO|SE[ÑN]OR\s+JUEZ)', texto_doc, re.IGNORECASE)
+            if m_escrito:
+                fecha = primer_fecha_en_segmento_ner(texto_doc[:1200])
+                if fecha:
+                    return fecha
+        return None
+
+    def fecha_audiencia_unica_documento_ner():
+        for doc in documentos_ner_filtrados(r'audiencia|acta'):
+            nombre_doc = str(doc.get("nombre") or "")
+            if re.search(r'vista', nombre_doc, re.IGNORECASE):
+                continue
+            texto_doc = str(doc.get("texto") or "")
+            m = re.search(r'AUDIENCIA\s+[UÚ]NICA[\s\S]{0,260}?((?:\d{1,2}[/-]\d{1,2}[/-]\d{4})|(?:\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})|(?:[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+?\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+))', texto_doc, re.IGNORECASE)
+            if m:
+                fecha = fecha_literal_a_str(m.group(1))
+                if fecha:
+                    return fecha
+            if re.search(r'AUDIENCIA\s+[UÚ]NICA', texto_doc[:1200], re.IGNORECASE):
+                fecha = primer_fecha_en_segmento_ner(texto_doc[:1200])
+                if fecha:
+                    return fecha
+                m_letras = re.search(
+                    r'((?:primero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veintiuno|veintid[oó]s|veintitr[eé]s|veinticuatro|veinticinco|veintis[eé]is|veintisiete|veintiocho|veintinueve|treinta|treinta\s+y\s+uno)\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+)',
+                    texto_doc[:1200],
+                    re.IGNORECASE
+                )
+                if m_letras:
+                    fecha_obj = _parse_fecha_literal(m_letras.group(1))
+                    if fecha_obj:
+                        return fecha_obj.strftime("%d/%m/%Y")
+            for linea in texto_doc.splitlines()[:80]:
+                if re.search(r'audiencia\s+[uú]nica', linea, re.IGNORECASE):
+                    fecha = primer_fecha_en_segmento_ner(linea)
+                    if fecha:
+                        return fecha
+        return None
+
+    def fecha_admisorio_documento_ner():
+        for doc in documentos_ner_filtrados(r'admisi[oó]n[_\s-]*de[_\s-]*demanda|resoluci[oó]n[_\s-]*(?:nro\.?\s*)?0?2|admisoria'):
+            nombre_doc = str(doc.get("nombre") or "")
+            if re.search(r'sentencia|vista|casaci[oó]n|liquidaci[oó]n|cargo', nombre_doc, re.IGNORECASE):
+                continue
+            texto_doc = str(doc.get("texto") or "")
+            for patron in [
+                r'Callao,?\s+([^\n]{3,100}(?:\n[^\n]{3,100})?)',
+                r'Resoluci[oó]n\s*(?:Nro\.?|N[°º])?\s*0?2[\s\S]{0,260}?((?:\d{1,2}[/-]\d{1,2}[/-]\d{4})|(?:[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+?\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+))'
+            ]:
+                m = re.search(patron, texto_doc[:1200], re.IGNORECASE)
+                if not m:
+                    continue
+                fecha = fecha_literal_a_str(m.group(1))
+                if fecha:
+                    return fecha
+        return None
+
+    def petitorio_demanda_documento_ner():
+        for doc in documentos_ner_filtrados(r'(?<!contestacion[_\s-])demanda|subsanaci[oó]n'):
+            nombre_doc = str(doc.get("nombre") or "")
+            if re.search(r'contestaci[oó]n|notificada|sentencia|vista|liquidaci[oó]n|cargo', nombre_doc, re.IGNORECASE):
+                continue
+            texto_doc = str(doc.get("texto") or "")
+            patrones = [
+                r'(?:se\s+le\s+aumente|aumente|increment[ea]r?)[^.\n]{0,180}?(?:de\s+S/\.?\s*[0-9][0-9\.,]*\s+[^.\n]{0,80}?\s+a\s+)?(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
+                r'MONTO\s+DEL\s+PETITORIO[\s\S]{0,260}?(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
+                r'ascendiente\s+a\s*(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
+                r'(?:pensi[oó]n\s+alimenticia|alimentos)[^.\n]{0,180}?a\s+(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
+            ]
+            candidatos = []
+            for patron in patrones:
+                for m in re.finditer(patron, texto_doc, re.IGNORECASE):
+                    monto = _normalizar_monto_texto(m.group(1))
+                    contexto = texto_doc[max(0, m.start() - 120): min(len(texto_doc), m.end() + 160)]
+                    if not monto or monto <= 0:
+                        continue
+                    if re.search(r'ingreso|remuneraci[oó]n|sueldo|costo|gasto|cuotas\s+dobles|anual', contexto, re.IGNORECASE):
+                        continue
+                    candidatos.append(monto)
+                if candidatos:
+                    return max(candidatos)
+        return None
+
+    def _limpiar_nombre_menor_ner(valor: str) -> str:
+        lineas = [linea.strip() for linea in re.split(r'[\r\n]+', valor or '') if linea.strip()]
+        if len(lineas) > 1:
+            nombres = []
+            vistos_linea = set()
+            for linea in lineas:
+                limpio = _limpiar_nombre_menor_ner(linea)
+                key = _normalizar_valor_metrica(limpio)
+                if limpio and key and key not in vistos_linea:
+                    vistos_linea.add(key)
+                    nombres.append(limpio)
+            return "\n".join(nombres[:5])
+        valor = re.sub(r'^\s*(?:menores?\s+)?(?:hijos?|hijas?|alimentistas?)\s+', ' ', valor or '', flags=re.IGNORECASE)
+        if re.search(r'\b(?:todos\s+mayores\s+de\s+edad|mayores\s+de\s+edad|sin\s+menores)\b', valor, re.IGNORECASE):
+            return ''
+        if re.search(r'\b(?:se[nñ]ora|adult[ao]\s+mayor|madre\s+adult[ao]\s+mayor|carga\s+familiar|ficticia)\b', valor, re.IGNORECASE):
+            return ''
+        iniciales = re.search(r'(?i)\b(?:[A-ZÁÉÍÓÚÜÑ]\.){2,}[A-ZÁÉÍÓÚÜÑ]?\.?', valor)
+        if iniciales:
+            return iniciales.group(0).upper().rstrip('.')
+        valor = re.sub(r'\bpara\s+determinar\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\b(?:nacid[oa]|acta\s+de|partida\s+de|certificado\s+de)\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\b(?:de\s+)?\d{1,2}\s*a[nñ]os(?:\s+de\s+edad)?\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\ba[nñ]os(?:\s+respectivamente)?\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\b(?:iniciales?|DNI|CUI|documento)\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\([^)]*(?:[A-ZÁÉÍÓÚÜÑ]\.){2,}[^)]*\)', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\b(?:solicita|refiere|se[nñ]ala|indica|alega|expone|afirma|declara|manifiesta)\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\.\s]', ' ', valor)
+        valor = re.sub(r'\s+', ' ', valor).strip()
+        valor = re.sub(r'\b(?:de|del|y)\s*$', ' ', valor, flags=re.IGNORECASE).strip()
+        cortes = r'\b(?:Órgano|Datos|Ingreso|Aportes|Pensión|Pension|Cronología|Solicito|Durante|quienes|actualmente|bajo|cuidado|madre|hijas|menores|se\s+fije|fije|alimenticia|proporcional|petitorio|monto|solicitad[oa]|para\s+determinar|determinar)\b'
+        valor = re.split(cortes, valor, flags=re.IGNORECASE)[0].strip()
+        if re.search(r'\b(?:CORTE|SUPREMA|JUSTICIA|REP[ÚU]BLICA|SALA|CIVIL|PERMANENTE|JUZGADO|JUEZ|DEMANDANTE|DEMANDADA|DEMANDADO)\b', valor, re.IGNORECASE):
+            return ''
+        partes = valor.split()
+        if len(partes) < 2 or len(partes) > 8:
+            return ''
+        tokens_norm = set(_tokenizar_metricas(valor))
+        palabras_no_menor = {
+            "se", "segun", "situacion", "fije", "pension", "alimenticia", "alimentario", "alimentaria", "proporcional",
+            "petitorio", "monto", "solicitado", "solicitada", "favor", "regimen", "visitas",
+            "tenencia", "custodia", "demanda", "demandante", "demandado", "juzgado", "sentencia",
+            "para", "determinar", "solicita", "refiere", "senala", "señala", "indica",
+            "alega", "expone", "afirma", "declara", "manifiesta", "cargas", "acreditadas", "establecer"
+        }
+        if tokens_norm & palabras_no_menor:
+            return ''
+        return valor.title()
+
+    def limpiar_menores_guardados_ner(valores: list) -> list:
+        salida = []
+        vistos = set()
+        for valor in valores or []:
+            texto_valor = str(valor or "")
+            segmentos = re.split(r'[\r\n;]+', texto_valor)
+            for segmento in segmentos:
+                segmento = re.split(r'\s*/\s*(?:[A-ZÁÉÍÓÚÜÑ]\.){2,}', segmento, maxsplit=1, flags=re.IGNORECASE)[0]
+                limpio = _limpiar_nombre_menor_ner(segmento)
+                for item in re.split(r'[\r\n]+', limpio or ''):
+                    key = _normalizar_valor_metrica(item)
+                    if item and key and key not in vistos:
+                        vistos.add(key)
+                        salida.append(item)
+        if any(not re.fullmatch(r'(?:[A-ZÁÉÍÓÚÜÑ]\.?){2,}', item.strip(), re.IGNORECASE) for item in salida):
+            salida = [item for item in salida if not re.fullmatch(r'(?:[A-ZÁÉÍÓÚÜÑ]\.?){2,}', item.strip(), re.IGNORECASE)]
+        return salida[:5]
+
+    def menores_desde_texto_ner() -> list:
+        if not texto_completo:
+            return []
+
+        def agregar_desde_segmento(segmento: str, salida: list, vistos: set):
+            if not segmento:
+                return
+            segmento = re.sub(r'\s+', ' ', segmento).strip()
+            partes_segmento = []
+            for bloque in re.split(r'\s*;\s*', segmento):
+                bloque = re.split(r'\s*/\s*(?:[A-ZÁÉÍÓÚÜÑ]\.){2,}', bloque, maxsplit=1, flags=re.IGNORECASE)[0]
+                if re.search(r'\s+y\s+', bloque, re.IGNORECASE) and not re.search(r'\b(?:Ram[oó]n|De|Del|La|Las|Los)\b', bloque):
+                    partes_segmento.extend(re.split(r'\s+y\s+', bloque, flags=re.IGNORECASE))
+                else:
+                    partes_segmento.append(bloque)
+            for parte in partes_segmento:
+                nombre = _limpiar_nombre_menor_ner(parte)
+                key = _normalizar_valor_metrica(nombre)
+                if not nombre or not key or key in vistos:
+                    continue
+                if any(key in existente or existente in key for existente in vistos):
+                    continue
+                vistos.add(key)
+                salida.append(nombre)
+
+        hallazgos = []
+        vistos = set()
+
+        for m in re.finditer(r'menores\s+hijos?\s+([\s\S]{12,260}?)(?=\s+de\s+\d{1,2}\s+a[nñ]os|\.|\n\s*(?:III|IV|V)\.)', texto_completo, re.IGNORECASE):
+            agregar_desde_segmento(m.group(1), hallazgos, vistos)
+            if len(hallazgos) >= 2:
+                return hallazgos[:5]
+
+        # Primero priorizar ficha/resumen tabular: "Menores Nombre / iniciales; Nombre / iniciales".
+        patrones_ficha = [
+            r'(?im)^\s*Alimentista\s+([\s\S]{2,260}?)(?=\n\s*(?:Domicilio|Contacto|DNI|CUI|Ingreso|Pensi[oó]n|Monto|Pretensi[oó]n|Demanda|Fecha|Auto|Informe|Audiencia|Sentencia|Recurso|Casaci[oó]n|Decisi[oó]n|Órgano|Organo)\b)',
+            r'(?im)^\s*Menor(?:es)?\s+([\s\S]{4,320}?)(?=\n\s*(?:Ingreso|Pensi[oó]n|Monto|Pretensi[oó]n|Demanda|Fecha|Auto|Informe|Audiencia|Sentencia|Recurso|Casaci[oó]n|Decisi[oó]n|Órgano|Organo)\b)',
+            r'(?im)^\s*Nombre\s+o\s+iniciales\s+del\s+menor\s+([\s\S]{8,260}?)(?=\n\s*(?:DNI|Petitorio|Ingreso|Pensi[oó]n|Monto|Demanda|Fecha|Auto|Audiencia|Sentencia)\b)',
+        ]
+        for patron in patrones_ficha:
+            for m in re.finditer(patron, texto_completo, re.IGNORECASE):
+                agregar_desde_segmento(m.group(1), hallazgos, vistos)
+                if len(hallazgos) >= 2:
+                    return hallazgos[:5]
+
+        for m in re.finditer(r'menores\s+hijos?\s+([\s\S]{12,260}?)(?=\s+de\s+\d{1,2}\s+a[nñ]os|\.|\n\s*(?:III|IV|V)\.)', texto_completo, re.IGNORECASE):
+            agregar_desde_segmento(m.group(1), hallazgos, vistos)
+            if len(hallazgos) >= 2:
+                return hallazgos[:5]
+
+        patrones = [
+            r'menor\s+alimentista\s+((?:[A-ZÁÉÍÓÚÜÑ]\.){2,}[A-ZÁÉÍÓÚÜÑ]?\.?)',
+            r'alimentista\s+((?:[A-ZÁÉÍÓÚÜÑ]\.){2,}[A-ZÁÉÍÓÚÜÑ]?\.?)',
+            r'menores\s+hijas?\s+([^\.\n]{8,220}?)(?=\.|\n|Solicito|Durante|Datos|Órgano|Organo)',
+            r'menores\s+hijos?\s+([^\.\n]{8,220}?)(?=\.|\n|Solicito|Durante|Datos|Órgano|Organo|;)',
+            r'hijos?\s+menores\s+([^\.\n]{8,220}?)(?=\.|\n|Solicito|Durante|Datos|Órgano|Organo)',
+            r'hijas?\s+([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){1,5})\s+y\s+([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){1,5})',
+            r'hijos?\s+([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,5})\s+y\s+([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,5})(?=\s+de\s+\d|\s*,|\.|;|\n)',
+        ]
+        for patron in patrones:
+            for m in re.finditer(patron, texto_completo, re.IGNORECASE):
+                grupos = [g for g in m.groups() if g]
+                for grupo in grupos:
+                    agregar_desde_segmento(grupo, hallazgos, vistos)
+                if len(hallazgos) >= 2:
+                    return hallazgos[:5]
+        if any(not re.fullmatch(r'(?:[A-ZÁÉÍÓÚÜÑ]\.?){2,}', item.strip(), re.IGNORECASE) for item in hallazgos):
+            hallazgos = [item for item in hallazgos if not re.fullmatch(r'(?:[A-ZÁÉÍÓÚÜÑ]\.?){2,}', item.strip(), re.IGNORECASE)]
+        return hallazgos[:5]
+    def _limpiar_nombre_parte_plural(valor: str) -> str:
+        lineas = [linea.strip() for linea in re.split(r'[\r\n]+', valor or '') if linea.strip()]
+        if len(lineas) > 1:
+            candidatos_linea = []
+            for linea in lineas:
+                limpio = _limpiar_nombre_parte_plural(linea)
+                if limpio:
+                    tokens_limpios = _tokenizar_metricas(limpio)
+                    puntaje = len(tokens_limpios)
+                    if len(tokens_limpios) in (3, 4):
+                        puntaje += 3
+                    candidatos_linea.append((puntaje, limpio))
+            if candidatos_linea:
+                candidatos_linea.sort(key=lambda item: item[0], reverse=True)
+                return candidatos_linea[0][1]
+            return ''
+        valor = re.sub(r'\bDNI\b\s*(?:N\.?\s*[°º]?|NRO\.?|NO\.?)?\s*\d{8}', ' ', valor or '', flags=re.IGNORECASE)
+        valor = re.sub(r'\bidentificad[oa]s?\s+con\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\ben\s+representaci[oó]n\s+de\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\ben\s+calidad\s+de\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bespecificado\s+en\s+el\s+escrito\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bla\s+suma\s+de\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bcomo\s+causa\s+de\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bes\s+el\s+c[oó]nyuge\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bser[ií]a\s+su\s+padre\s+biol[oó]gico\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bpara\s+lograr\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bacercamiento\s+familiar\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bsu\s+disposici[oó]n\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\b(?:ha|han|habr[ií]a|habrian|habrían)\s+desarrollado\s+labores\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\ba\s+seguir\s+acudiendo\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\ben\s+reuniones\s+con\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bpor\s+el\s+matrimonio\s+civil\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bpara\s+disponer\s+recursos\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bel\s+(?:uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|treinta)\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\btom[oó]\s+la\s+decisi[oó]n\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bsali[oó]\s+del\s+pa[ií]s\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\by\s+no\s+cas[oó]\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bno\s+justifica\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\by\s+las\s+circunstancias\s+acreditadas\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bel\s+importe\s+de\s+s\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\ble\s+parece\s+insuficiente\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bapela\s+la\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\blucro\s+cesante\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\b(?:manifiesta|solicita|refiere|se[nñ]ala|indica|alega|expone|afirma|declara)\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bpresente\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bredujo\s+su\s+propuesta\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bo\s+que\s+haya\s+dejado\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bcontrajo\s+una\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\bpor\s+(?:concepto|causa)\s+de\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ\s]', ' ', valor)
+        valor = re.sub(r'\bDNI\b.*$', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\b(?:Demandados?|Demandadas?|Demandante|Obligad[oa]|Parte\s+accionante|Menor|Fecha|Materia|Expediente)\b', ' ', valor, flags=re.IGNORECASE)
+        valor = re.sub(r'\s+', ' ', valor).strip()
+        if not valor:
+            return ''
+        partes = valor.split()
+        if len(partes) < 2 or len(partes) > 8:
+            return ''
+        palabras_vetadas = {
+            "abogado", "abogada", "defensor", "defensora", "juzgado", "resolucion", "resolución", "auto", "autos", "supremo", "suprema", "vista", "vistas", "sala", "corte", "recurso", "casacion", "casación", "vistos", "considerando", "petitorio",
+            "plazo", "dia", "dias", "treinta", "edictos", "notificado", "notificada",
+            "conceder", "cumpla", "habia", "habria", "reconocido", "reconocida",
+            "sido", "declarado", "declarada", "emplazado", "emplazada", "mediante",
+            "acreditado", "acreditada", "senalado", "senalada", "indicado", "indicada",
+            "manifestado", "manifestada", "sostenido", "sostenida", "tenia", "tenian",
+            "presente", "redujo", "propuesta", "obligado", "obligada", "derecho", "contradiccion", "contradicción", "simulado", "legal", "pagina", "página", "jp", "fc", "marzo", "abril", "mayo", "enero", "febrero", "contabilidad", "carrera", "dejado", "apela", "lucro", "cesante", "circunstancias", "acreditadas", "importe", "insuficiente", "adquirio", "adquirió", "nacionalidad", "espanola", "española", "probado", "hecho", "aquel", "acudiendo", "reuniones", "matrimonio", "civil", "disponer", "recursos", "requieren", "dieciseis", "dieciséis", "junio", "mil", "tomo", "tomó", "decision", "decisión", "salio", "salió", "pais", "país", "mantuvo", "caso", "casó", "conocimiento", "procedimiento", "proceso", "demanda", "demandado", "demandada", "mantiene", "contacto", "hijos", "hijas", "percibe", "aproximadamente", "ingreso", "ingresos", "mensual", "mensuales", "soles", "pero", "sus", "cuenta", "labora", "trabaja", "trabajador", "trabajadora", "ofrece", "ofrecio", "ofreció", "ofrecida", "ofrecido", "inicialmente", "pension", "pensión", "regimen", "régimen", "visitas", "lapso", "mes", "meses", "un",
+            "parte", "partes", "menor", "respecto", "reconocer", "filiacion", "paternidad", "identificada", "identificado", "identificadas", "identificados", "suma", "causa", "ruptura", "matrimonial", "concepto", "conyuge", "cónyuge", "culpable", "contrajo", "seria", "sería", "biologico", "biológico", "lograr", "acercamiento", "familiar", "manifiesta", "solicita", "refiere", "senala", "señala", "indica", "alega", "expone", "afirma", "declara", "disposicion", "disposición", "desarrollado", "labores", "labor", "laboral", "justifica", "razones", "contra", "hija", "hijo", "hijas", "hijos", "familia", "familiar", "recurso", "auto", "supremo", "suprema"
+        }
+        tokens_norm = set(_tokenizar_metricas(valor))
+        palabras_no_persona = palabras_vetadas | {
+            "no", "se", "viene", "vienen", "cumple", "cumplen", "cumpliendo", "incumple", "incumplimiento",
+            "reconoce", "reconocen", "obligacion", "obligación", "alimentaria", "alimentario", "cuestiona",
+            "porcentaje", "solicitado", "solicitada", "monto", "cuota", "pago", "pagos", "deuda", "favor",
+            "devengados", "asistencia", "tenencia", "custodia", "conciliacion", "conciliación", "audiencia",
+            "sentencia", "apela", "apelacion", "apelación", "casacion", "casación", "resuelve", "fundada", "infundada",
+            "improcedente", "ordenar", "ordena", "dispone", "fija", "fijar", "incrementa", "reduce",
+            "requiere", "requiere", "acude", "acudio", "acudió", "asiste", "asistio", "asistió"
+        }
+        if tokens_norm & palabras_no_persona:
+            return ''
+        tokens_debil_nombre = {"la", "el", "lo", "los", "las", "o", "u", "y", "e", "su", "sus", "contra", "para", "por", "de", "del", "al"}
+        if any(t in tokens_debil_nombre for t in tokens_norm) and len(tokens_norm - tokens_debil_nombre) < 2:
+            return ''
+        if re.search(r'\b(?:ABOGAD[OA]|DEFENSOR[AO]?|JUZGADO|RESOLUCI[OÓ]N|AUTO\s+SUPREMO|AUTOS?|SALA|CORTE|RECURSO|CASACI[OÓ]N|VISTOS|CONSIDERANDO|PETITORIO|PLAZO|DIAS?|TREINTA|EDICTOS?|NOTIFICAD[OA]|CONCEDER|CUMPLA|HAB[IÍ]A|HABR[IÍ]A|RECONOC[EI][A-ZÁÉÍÓÚÑ]*|OBLIGACI[OÓ]N|ALIMENTARI[AO]|CUESTIONA|PORCENTAJE|SOLICITAD[OA]|CUMPLIENDO|INCUMPL|SIDO|DECLARAD[OA]|EMPLAZAD[OA]|MEDIANTE|ACREDITAD[OA]|SEÑALAD[OA]|INDICAD[OA]|MANIFESTAD[OA]|SOSTENID[OA]|TEN[IÍ]AN?|CONOCIMIENTO|CONTRA\s+SU\s+HIJ[AO])\b', valor, re.IGNORECASE):
+            return ''
+        if re.match(r'^(?:a\\s+favor|a\\s+seguir|en\\s+reuniones|favor\\s+de|no|se|por\\s+el\\s+matrimonio|por|para\\s+disponer|para|bajo|con|sin|el\\s+(?:uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|treinta)|el|la|al|del|tom[oó]|adquiri[oó]|no\\s+ha\\s+probado|sal[ií]o|y\\s+no|y\\s+abogad[oa]|abogad[oa]|defensor[ao]?|habia|había|habria|habría|tenia|tenía|tenian|tenían|reconoce|reconocido|reconocida|mantiene|percibe|labora|trabaja|ofrece|cuestiona|cumple|viene)\\b', valor, re.IGNORECASE):
+            return ''
+        return valor.title()
+
+    def demandados_desde_texto_ner() -> list:
+        if not texto_completo:
+            return []
+
+        def agregar_segmento(segmento: str, hallazgos: list, vistos: set):
+            import difflib
+            partes = re.split(r'\s*/\s*|\s+;\s+|\s+ y (?=[A-ZÁÉÍÓÚÜÑ])', segmento or '')
+            for parte in partes:
+                nombre = _limpiar_nombre_parte_plural(parte)
+                key = _normalizar_valor_metrica(nombre)
+                if not nombre or not key or key in vistos:
+                    continue
+                tokens = set(_tokenizar_metricas(nombre))
+                duplicado_por_tokens = False
+                for existente in hallazgos:
+                    key_existente = _normalizar_valor_metrica(existente)
+                    tokens_existente = set(_tokenizar_metricas(existente))
+                    if tokens_existente and tokens_existente.issubset(tokens):
+                        duplicado_por_tokens = True
+                        break
+                    if tokens and tokens.issubset(tokens_existente):
+                        duplicado_por_tokens = True
+                        break
+                    if key_existente and difflib.SequenceMatcher(None, key, key_existente, autojunk=False).ratio() >= 0.94:
+                        duplicado_por_tokens = True
+                        break
+                if duplicado_por_tokens:
+                    continue
+                vistos.add(key)
+                hallazgos.append(nombre)
+
+        # Prioridad alta: filas formales de ficha/resumen. Si existen, no mezclar con narración.
+        hallazgos_formales = []
+        vistos_formales = set()
+        patron_formal = r'(?im)^\s*Demandad[oa]s?(?:\s*/\s*obligad[oa])?\s+([^\n]{8,260}?)(?=\n|\s+(?:DNI|Menores?|Materia|Ingreso|Pensi[oó]n|Demanda|Auto|Audiencia|Sentencia|Pretensi[oó]n|Organo|Órgano)\b)'
+        patrones_extra_demandado = [
+            r'demanda\s+(?:de\s+alimentos\s+)?contra\s+([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6})\s*,\s*identificad[oa]' ,
+            r'contra\s+([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6})\s*,\s*identificad[oa]\s+con\s+DNI',
+            r'(?im)^\s*([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6})\s+-\s+Parte\s+demandad[oa]\b',
+        ]
+        for patron_extra in patrones_extra_demandado:
+            for m in re.finditer(patron_extra, texto_completo, re.IGNORECASE):
+                agregar_segmento(m.group(1), hallazgos_formales, vistos_formales)
+            if hallazgos_formales:
+                return hallazgos_formales[:3]
+        for m in re.finditer(patron_formal, texto_completo, re.IGNORECASE):
+            agregar_segmento(m.group(1), hallazgos_formales, vistos_formales)
+        if hallazgos_formales:
+            return hallazgos_formales[:3]
+
+        hallazgos = []
+        vistos = set()
+        patrones_narrativos = [
+            r'Demandad[oa]s?\s+(.{8,260}?)(?=\s+(?:Menor|Fecha\s+de|SE[ÑN]OR|AUTOS|Y\s+VISTOS|I\.|II\.|EXPEDIENTE|Materia|RESUMEN)|\n|$)',
+            r'demanda\s+[^.]{0,80}?contra\s+(.{8,220}?)(?=,\s*respecto|\s+respecto|\.|\n|$)',
+        ]
+        for patron in patrones_narrativos:
+            for m in re.finditer(patron, texto_completo, re.IGNORECASE):
+                agregar_segmento(m.group(1), hallazgos, vistos)
+        return hallazgos[:3]
+
+    def demandados_json_limpios_ner() -> list:
+        valor = demandado.get("nombre") if isinstance(demandado, dict) else None
+        if not valor:
+            return []
+        salida = []
+        vistos_json = set()
+        partes_json = re.split(r'[\n;,]+|\s*/\s*', str(valor))
+        for parte in partes_json:
+            nombre = _limpiar_nombre_parte_plural(parte)
+            key = _normalizar_valor_metrica(nombre)
+            if not nombre or not key or key in vistos_json:
+                continue
+            vistos_json.add(key)
+            salida.append(nombre)
+        return salida[:3]
+
+    def demandantes_desde_texto_ner() -> list:
+        if not texto_completo:
+            return []
+        salida = []
+        vistos = set()
+        patrones_formales = [
+            r'Yo,\s+([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6})\s*,\s*identificad[oa]\s+con\s+DNI',
+            r'(?im)^\s*([A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6})\s+-\s+Parte\s+demandante\b',
+            r'(?im)^\s*Parte\s+accionante\s*/\s*demandante\s+([^\n]{8,220}?)(?=\n|\s+(?:DNI|Demandad[oa]|Menores?|Alimentista|Materia|Ingreso|Pensi[oó]n|Demanda|Auto|Audiencia|Sentencia|Pretensi[oó]n)\b)',
+            r'(?im)^\s*Demandante\s*$\s*([^\n]{8,220}?)(?=\n|\s+(?:DNI|Demandad[oa]|Menores?|Materia|Ingreso|Pensi[oó]n|Demanda|Auto|Audiencia|Sentencia|Pretensi[oó]n|Organo|Órgano)\b)',
+            r'(?im)^\s*Demandante\s+([^\n]{8,220}?)(?=\n|\s+(?:DNI|Demandad[oa]|Menores?|Materia|Ingreso|Pensi[oó]n|Demanda|Auto|Audiencia|Sentencia|Pretensi[oó]n|Organo|Órgano)\b)',
+            r'(?im)^\s*Parte\s+demandante\s*$\s*([^\n]{8,220}?)(?=\n|\s+(?:DNI|Demandad[oa]|Menores?|Materia|Ingreso|Pensi[oó]n|Demanda|Auto|Audiencia|Sentencia|Pretensi[oó]n)\b)',
+            r'(?im)^\s*Parte\s+demandante\s+([^\n]{8,220}?)(?=\n|\s+(?:DNI|Demandad[oa]|Menores?|Materia|Ingreso|Pensi[oó]n|Demanda|Auto|Audiencia|Sentencia|Pretensi[oó]n)\b)',
+        ]
+        for patron in patrones_formales:
+            for m in re.finditer(patron, texto_completo, re.IGNORECASE):
+                nombre = _limpiar_nombre_parte_plural(m.group(1))
+                key = _normalizar_valor_metrica(nombre)
+                if nombre and key and key not in vistos:
+                    vistos.add(key)
+                    salida.append(nombre)
+            if salida:
+                return salida[:2]
+        return salida[:2]
+
+    def demandante_fallback_limpio_ner() -> list:
+        valor = demandante.get("nombre") if isinstance(demandante, dict) else None
+        nombre = _limpiar_nombre_parte_plural(str(valor or ""))
+        return [nombre] if nombre else []
+    def dnis_demandantes_desde_texto_ner() -> list:
+        if not texto_completo:
+            return []
+        dnis = []
+        vistos = set()
+        patrones = [
+            r'Yo,\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6}\s*,\s*identificad[oa]\s+con\s+DNI[^0-9]{0,25}(\d{8})',
+            r'Parte\s+accionante\s*/\s*demandante[^\n]{0,260}?\bDNI\b[^0-9]{0,25}(\d{8})',
+            r'Demandante[^\n]{0,260}?\bDNI\b[^0-9]{0,25}(\d{8})',
+            r'DNI\s+(?:ficticio\s+)?(?:de\s+la\s+)?demandante[^0-9]{0,25}(\d{8})',
+        ]
+        for patron in patrones:
+            for m in re.finditer(patron, texto_completo, re.IGNORECASE):
+                dni = m.group(1)
+                if dni not in vistos:
+                    vistos.add(dni)
+                    dnis.append(dni)
+            if dnis:
+                return dnis[:2]
+        return dnis[:2]
+
+    def dnis_demandados_desde_texto_ner() -> list:
+        if not texto_completo:
+            return []
+        dnis = []
+        vistos = set()
+
+        dni_demandante_guardado = str(demandante.get("dni") or "") if isinstance(demandante, dict) else ""
+
+        def agregar_dnis(segmento: str):
+            for dni in re.findall(r'\b(?:DNI|D\.N\.I\.)\b[^0-9]{0,18}(\d{8})', segmento or '', re.IGNORECASE):
+                if dni == dni_demandante_guardado:
+                    continue
+                if dni not in vistos:
+                    vistos.add(dni)
+                    dnis.append(dni)
+
+        for m in re.finditer(r'Demandad[oa]s?\s+[^\n]{0,260}?\bDNI\b[^0-9]{0,18}(\d{8})', texto_completo, re.IGNORECASE):
+            dni = m.group(1)
+            if dni != dni_demandante_guardado and dni not in vistos:
+                vistos.add(dni)
+                dnis.append(dni)
+        if dnis:
+            return dnis[:3]
+
+        patrones_directos_demandado = [
+            r'demanda\s+(?:de\s+alimentos\s+)?contra\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6}\s*,\s*identificad[oa]\s+con\s+DNI[^0-9]{0,25}(\d{8})',
+            r'contra\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6}\s*,\s*identificad[oa]\s+con\s+DNI[^0-9]{0,25}(\d{8})',
+            r'DNI\s+(?:ficticio\s+)?(?:del\s+)?demandad[oa][^0-9]{0,25}(\d{8})',
+        ]
+        for patron_dni in patrones_directos_demandado:
+            for m in re.finditer(patron_dni, texto_completo, re.IGNORECASE):
+                dni = m.group(1)
+                if dni != dni_demandante_guardado and dni not in vistos:
+                    vistos.add(dni)
+                    dnis.append(dni)
+            if dnis:
+                return dnis[:3]
+
+        for m in re.finditer(r'Demandados?\s+(.{8,420}?)(?=\s+(?:Menor|Fecha\s+de|SE[ÑN]OR|AUTOS|Y\s+VISTOS|I\.|II\.|EXPEDIENTE|Materia)|\n|$)', texto_completo, re.IGNORECASE):
+            agregar_dnis(m.group(1))
+
+        if len(dnis) < 2:
+            for m in re.finditer(r'Demandados?.{0,520}?(?=Menor|Fecha\s+de|SE[ÑN]OR|AUTOS|Y\s+VISTOS|I\.|II\.|EXPEDIENTE|Materia|$)', texto_completo, re.IGNORECASE | re.DOTALL):
+                agregar_dnis(m.group(0))
+                if len(dnis) >= 2:
+                    break
+        return dnis[:3]
     def fecha_literal_a_str(literal: str):
         fecha_obj = _parse_fecha_literal(literal or "")
         return fecha_obj.strftime("%d/%m/%Y") if fecha_obj else None
+
+    def fecha_indice_documento_ner(orden: str, etiqueta: str):
+        if not texto_completo:
+            return None
+        patron = rf'\b{re.escape(orden)}\s+{etiqueta}\s+((?:\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{4}})|(?:\d{{1,2}}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{{4}}))'
+        m = re.search(patron, texto_completo, re.IGNORECASE | re.DOTALL)
+        if not m:
+            return None
+        literal = re.sub(r'\s+', ' ', m.group(1)).strip()
+        return fecha_literal_a_str(literal)
 
     def fecha_contextual_ner(patrones_contexto: list[str], excluir_contexto: str = "", seleccion: str = "primera"):
         if not texto_completo:
@@ -7592,6 +8472,32 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
                 return fecha
         return None
 
+    def fecha_etiqueta_directa_ner(patrones_etiqueta: list[str], seleccion: str = "ultima"):
+        if not texto_completo:
+            return None
+        hallazgos = []
+        patron_fecha = (
+            r'(?<!\d)(\d{1,2}[/-]\d{1,2}[/-]\d{4})(?!\d)|'
+            r'(?<!\d)(\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})(?!\d)'
+        )
+        for linea in (texto_completo or "").splitlines():
+            for patron in patrones_etiqueta:
+                etiqueta = re.search(patron, linea, re.IGNORECASE)
+                if not etiqueta:
+                    continue
+                segmento = linea[etiqueta.end(): etiqueta.end() + 90]
+                match = re.search(patron_fecha, segmento, re.IGNORECASE)
+                if not match:
+                    match = re.search(patron_fecha, linea, re.IGNORECASE)
+                if not match:
+                    continue
+                literal = next((g for g in match.groups() if g), "")
+                fecha = fecha_literal_a_str(literal)
+                if fecha:
+                    hallazgos.append(fecha)
+        if not hallazgos:
+            return None
+        return hallazgos[0] if seleccion == "primera" else hallazgos[-1]
     def monto_es_ingreso_explicito(monto: float, evidencia: str = "") -> bool:
         if monto <= 0:
             return False
@@ -7607,10 +8513,15 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
                 apariciones.append(texto_busqueda[inicio:fin])
         if not apariciones and evidencia:
             apariciones = [evidencia]
+        patron_ingreso_fuerte = (
+            r'(?:mi\s+)?ingreso\s+(?:mensual\s+referencial|mensual\s+promedio|del\s+obligado|mensual|promedio|referencial)?'
+            r'[^.]{0,100}(?:asciende\s+a|es|de)?\s*(?:S/|S/\.)\s*[0-9]'
+            r'|ingreso\s+del\s+obligado\s*(?:S/|S/\.)\s*[0-9]|ingreso\s+mensual\s+referencial\s+de?\s*(?:S/|S/\.)\s*[0-9]'
+        )
         patron_ingreso_directo = (
             r'(?:ingresos?|sueldo|remuneraci[oó]n|haber|renta|percib[eo]|percibir|boleta|planilla)'
-            r'[^.]{0,90}(?:S/|S/\.)\s*[0-9]'
-            r'|(?:S/|S/\.)\s*[0-9][^.]{0,90}'
+            r'[^.]{0,120}(?:S/|S/\.)\s*[0-9]'
+            r'|(?:S/|S/\.)\s*[0-9][^.]{0,120}'
             r'(?:ingresos?|sueldo|remuneraci[oó]n|haber|renta|percib[eo]|percibir|boleta|planilla)'
         )
         patron_no_ingreso = (
@@ -7618,11 +8529,34 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
             r'fij[aeó]|revocar|reform[aá]ndola|deuda|credi|caja\s+municipal|'
             r'adjudicaci[oó]n|sentencia|vista|casaci[oó]n'
         )
+        patron_rol_demandado = r'ingreso\s+(?:del|de\s+la|de\s+el)\s+(?:obligad[oa]|demandad[oa]|emplazad[oa]|padre|madre)|(?:demandad[oa]|obligad[oa]|emplazad[oa]|padre|madre)[^.]{0,160}(?:ingreso|sueldo|remuneraci[oó]n|S/|S/\.)'
+        patron_rol_demandante = r'ingreso\s+referencial\s+del\s+demandante|ingreso\s+del\s+demandante|(?:demandante|recurrente|accionante)[^.]{0,120}(?:ingreso|S/|S/\.)|declaro\s+percibir|mi\s+ingreso'
         for contexto in apariciones:
+            if re.search(patron_rol_demandante, contexto, re.IGNORECASE) and not re.search(patron_rol_demandado, contexto, re.IGNORECASE):
+                continue
+            if not re.search(patron_rol_demandado, contexto, re.IGNORECASE):
+                continue
+            if re.search(patron_ingreso_fuerte, contexto, re.IGNORECASE):
+                return True
             if re.search(patron_ingreso_directo, contexto, re.IGNORECASE) and not re.search(patron_no_ingreso, contexto, re.IGNORECASE):
                 return True
         return False
 
+    def monto_en_contexto_demandante_exclusivo(monto: float) -> bool:
+        if not monto or not texto_completo:
+            return False
+        encontro_demandante = False
+        encontro_demandado = False
+        for m in re.finditer(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', texto_completo, re.IGNORECASE):
+            val = _normalizar_monto_texto(m.group(1))
+            if val is None or abs(float(val) - float(monto)) > 1.0:
+                continue
+            contexto = texto_completo[max(0, m.start() - 260): min(len(texto_completo), m.end() + 180)]
+            if re.search(r'ingreso\s+referencial\s+(?:del|de\s+la)\s+demandante[^\n\r.]{0,80}(?:S/|S/\.)\s*[0-9]|ingreso\s+(?:del|de\s+la)\s+demandante|(?:demandante|recurrente|accionante)[^.]{0,140}(?:ingreso|percibir|S/|S/\.)|declaro\s+percibir|mi\s+ingreso', contexto, re.IGNORECASE):
+                encontro_demandante = True
+            if re.search(r'ingreso\s+(?:del|de\s+la|de\s+el)\s+(?:obligad[oa]|demandad[oa]|emplazad[oa]|padre|madre)[^\n\r.]{0,100}(?:S/|S/\.)\s*[0-9]|(?:demandad[oa]|obligad[oa]|emplazad[oa]|padre|madre)[^.]{0,160}(?:ingreso|sueldo|remuneraci[oó]n|S/|S/\.)', contexto, re.IGNORECASE):
+                encontro_demandado = True
+        return encontro_demandante and not encontro_demandado
     def ingreso_demandado_ner():
         ingresos = capacidad.get("ingresos", []) if isinstance(capacidad, dict) else []
         if isinstance(ingresos, list):
@@ -7637,17 +8571,136 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
                     str(item.get("evidencia", "")),
                     str(item.get("evidencia_literal", "")),
                 ])
-                if monto_es_ingreso_explicito(monto, evidencia):
-                    prioridad = 1 if item.get("aplicado_calculo") else 0
+                evidencia_es_demandante = re.search(
+                    r'\b(?:demandante|accionante|recurrente)\b',
+                    evidencia,
+                    re.IGNORECASE
+                ) and not re.search(r'\b(?:demandad[oa]|obligad[oa]|emplazad[oa]|padre|madre)\b', evidencia, re.IGNORECASE)
+                if evidencia_es_demandante:
+                    continue
+                evidencia_es_ingreso = re.search(
+                    r'ingreso\s+mensual\s+referencial|ingreso\s+mensual|declara\s+percibir|percibe|ingreso\s+(?:del|de\s+la|de\s+el)?\s*(?:demandad[oa]|obligad[oa]|emplazad[oa])|remuneraci[oó]n|sueldo|actividad\s+laboral',
+                    evidencia,
+                    re.IGNORECASE
+                )
+                if (monto_es_ingreso_explicito(monto, evidencia) or evidencia_es_ingreso) and not monto_en_contexto_demandante_exclusivo(monto):
+                    prioridad = 2 if evidencia_es_ingreso else (1 if item.get("aplicado_calculo") else 0)
                     candidatos.append((prioridad, monto))
             if candidatos:
                 candidatos.sort(key=lambda item: (item[0], item[1]), reverse=True)
                 return candidatos[0][1]
+
+        candidatos_texto_ingreso = []
+        for m in re.finditer(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', texto_completo or '', re.IGNORECASE):
+            monto_texto = _normalizar_monto_texto(m.group(1)) or 0.0
+            if 0 < monto_texto <= 20000 and monto_es_ingreso_explicito(monto_texto) and not monto_en_contexto_demandante_exclusivo(monto_texto):
+                contexto_monto = texto_completo[max(0, m.start() - 180): min(len(texto_completo), m.end() + 220)]
+                if not re.search(r'\b(?:aporte|aportes|transferencia|transferencias|oferta|ofrecimiento|pensi[oó]n|gastos?|petitorio)\b', contexto_monto, re.IGNORECASE):
+                    candidatos_texto_ingreso.append(monto_texto)
+        if candidatos_texto_ingreso:
+            return max(candidatos_texto_ingreso)
+
+        patrones_ingreso_directo = [
+            r'((?:ingreso\s+(?:neto\s+declarado|mensual\s+referencial|mensual\s+promedio|aproximado)?\s+(?:del|de\s+la|de\s+el)\s+)?(?:demandad[oa]|obligad[oa]|emplazad[oa]|padre|madre)[^.\n]{0,220}?(?:ingreso|remuneraci[oó]n|sueldo|percib[ei]|percibir|haber|renta)[^.\n]{0,120}?(?:S/|S/\.)\s*([0-9][0-9\.,]*))',
+            r'((?:demandad[oa]|obligad[oa]|emplazad[oa]|padre|madre)[^.]{0,260}?(?:declara\s+percibir|percibe|ingreso\s+mensual|remuneraci[oó]n|sueldo)[^.]{0,120}?(?:S/|S/\.)\s*([0-9][0-9\.,]*))',
+        ]
+        for patron in patrones_ingreso_directo:
+            for m in re.finditer(patron, texto_completo or '', re.IGNORECASE):
+                contexto = m.group(1)
+                if re.search(r'ingreso\s+(?:del|de\s+la|de\s+el)\s+demandante|(?:demandante|accionante|recurrente)[^.]{0,120}(?:ingreso|percibir|S/|S/\.)', contexto, re.IGNORECASE):
+                    continue
+                monto_directo = _normalizar_monto_texto(m.group(2)) or 0.0
+                if monto_directo > 0:
+                    return monto_directo
         monto_financiero = _float_seguro(financiera.get("ingreso_demandado"), 0.0) if isinstance(financiera, dict) else 0.0
-        if monto_es_ingreso_explicito(monto_financiero):
+        if monto_es_ingreso_explicito(monto_financiero) and not monto_en_contexto_demandante_exclusivo(monto_financiero):
             return monto_financiero
+        for m in re.finditer(
+            r'([^.]{0,140}(?:ingreso\s+mensual\s+referencial|ingreso\s+mensual\s+promedio|ingreso\s+del\s+obligado|remuneraci[oó]n\s+mensual|sueldo)[^.]{0,140}(?:S/|S/\.)\s*([0-9][0-9\.,]*))',
+            texto_completo or '',
+            re.IGNORECASE
+        ):
+            monto = _normalizar_monto_texto(m.group(2)) or 0.0
+            if monto > 0 and monto_es_ingreso_explicito(monto, m.group(1)) and not monto_en_contexto_demandante_exclusivo(monto):
+                return monto
         return None
 
+    def monto_petitorio_o_referencial_ner():
+        def monto_en_contexto_ingreso(monto: float) -> bool:
+            if not monto or not texto_completo:
+                return False
+            for m in re.finditer(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', texto_completo, re.IGNORECASE):
+                val = _normalizar_monto_texto(m.group(1))
+                if val is None or abs(float(val) - float(monto)) > 1.0:
+                    continue
+                contexto = texto_completo[max(0, m.start() - 220): min(len(texto_completo), m.end() + 220)]
+                if re.search(r'ingreso\s+(?:mensual\s+referencial|referencial|mensual|del\s+demandante|del\s+demandado|del\s+obligado)|remuneraci[oó]n|sueldo|actividad\s+laboral', contexto, re.IGNORECASE):
+                    return True
+            return False
+
+        def monto_es_ingreso_guardado(monto: float) -> bool:
+            ingresos = capacidad.get("ingresos", []) if isinstance(capacidad, dict) else []
+            if not monto or not isinstance(ingresos, list):
+                return False
+            for item in ingresos:
+                if not isinstance(item, dict):
+                    continue
+                item_monto = _float_seguro(item.get("monto"), 0.0)
+                if abs(float(item_monto) - float(monto)) > 1.0:
+                    continue
+                evidencia = " ".join([
+                    str(item.get("tipo", "")),
+                    str(item.get("estado", "")),
+                    str(item.get("evidencia", "")),
+                    str(item.get("evidencia_literal", "")),
+                ])
+                if re.search(r'ingreso|sueldo|remuneraci[oó]n|actividad\s+laboral', evidencia, re.IGNORECASE):
+                    return True
+            return False
+
+        def buscar_referencial():
+            if not texto_completo:
+                return None
+            patrones_referenciales = [
+                r'(?:reconvenci[oó]n|aumento\s+de\s+alimentos|pensi[oó]n\s+solicitada\s+v[ií]a\s+reconvenci[oó]n)[^.\n]{0,180}?(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
+                r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)[^.\n]{0,160}(?:reconvenci[oó]n|aumento\s+de\s+alimentos)',
+                r'(?:fijar|fija|fij[oó]|establecer|establece|ordenar|ordena|aprobar|aprueba)[^.\n]{0,180}?(?:pensi[oó]n|alimentos?|alimenticia|alimentaria)[^.\n]{0,140}?(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
+                r'(?:pensi[oó]n|alimentos?|alimenticia|alimentaria)[^.\n]{0,180}?(?:mensual|mensuales)?[^.\n]{0,80}?(?:de|por)?\s*(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
+                r'(?:monto\s+referencial\s+posterior|monto\s+referencial|pensi[oó]n\s+referencial|obligaci[oó]n\s+alimentaria\s+posterior)[^.\n]{0,140}?(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
+                r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)[^.\n]{0,140}(?:monto\s+referencial\s+posterior|monto\s+referencial|pensi[oó]n\s+referencial|obligaci[oó]n\s+alimentaria\s+posterior)',
+                r'(?:alimentos?|alimentaria)[^.\n]{0,140}?(?:posterior|referencial)[^.\n]{0,120}?(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
+            ]
+            for patron in patrones_referenciales:
+                for m in re.finditer(patron, texto_completo, re.IGNORECASE):
+                    contexto_monto = texto_completo[max(0, m.start() - 25): min(len(texto_completo), m.end() + 140)]
+                    if re.search(r'ingreso\s+referencial|ingreso\s+del\s+demandante|ingreso\s+del\s+obligado|remuneraci[oó]n|sueldo|indemnizaci[oó]n|da[nñ]o\s+moral', contexto_monto, re.IGNORECASE):
+                        continue
+                    monto = _normalizar_monto_texto(m.group(1))
+                    if monto and monto > 0:
+                        return monto
+            return None
+
+        directo = (
+            financiera.get("petitorio")
+            or financiera.get("monto_petitorio")
+            or (sujetos.get("monto_solicitado") if isinstance(sujetos, dict) else None)
+        )
+        petitorio_doc = petitorio_demanda_documento_ner()
+        if petitorio_doc:
+            return petitorio_doc
+        referencial = buscar_referencial()
+        if referencial:
+            return referencial
+        try:
+            directo_float = float(directo or 0)
+            if directo_float > 0 and not monto_en_contexto_ingreso(directo_float) and not monto_es_ingreso_guardado(directo_float):
+                return directo
+        except Exception:
+            if directo:
+                return directo
+        if referencial:
+            return referencial
+        return None
     monto_fijado = (
         capacidad.get("monto_pension_ordenada_estimado")
         or calculadora.get("monto_estimado")
@@ -7663,33 +8716,68 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
             return valor
 
     fecha_demanda = (
-        fecha_linea_cronologica_ner([r'interposici[oó]n\s+de\s+demanda', r'presentaci[oó]n\s+de\s+demanda'])
+        fecha_demanda_documento_principal_ner()
+        or fecha_indice_documento_ner("01", r'Demanda(?:\s+de\s+alimentos)?')
+        or fecha_linea_cronologica_ner([
+            r'interposici[oó]n\s+de\s+demanda',
+            r'presentaci[oó]n\s+de\s+demanda',
+            r'fecha\s+(?:de\s+)?demanda',
+            r'fecha\s+ingreso\s+demanda',
+            r'^\s*demanda\b',
+            r'demanda\s+se\s+presenta'
+        ])
         or fecha_documento_ner(r'demanda(?!.*contestaci[oó]n)', seleccion="ultima")
         or fecha_contextual_ner(
-            [r'interposici[oó]n\s+de\s+demanda', r'presentaci[oó]n\s+de\s+demanda', r'interpuso\s+demanda'],
+            [r'audiencia\s+[uú]nica', r'audiencia\s+de\s+pruebas?', r'acta\s+de\s+audiencia', r'fijaci[oó]n\s+de\s+puntos\s+controvertidos', r'puntos\s+controvertidos'],
             excluir_contexto=r'sentencia\s+de\s+primera\s+instancia|sentencia\s+de\s+vista|casaci[oó]n|apelaci[oó]n'
         )
         or fecha_evento("demanda")
     )
     fecha_audiencia = (
-        fecha_linea_cronologica_ner([r'audiencia\s+[uú]nica', r'acta\s+de\s+audiencia', r'sentencia\s+de\s+primera\s+instancia'])
-        or fecha_documento_ner(r'audiencia|sentencia[_\s-]*primera|primera[_\s-]*instancia', seleccion="primera")
+        fecha_audiencia_unica_documento_ner()
+        or fecha_etiqueta_directa_ner([r'\baudiencia\s*[:\-]'])
+        or fecha_linea_cronologica_ner([
+            r'audiencia\s+[uú]nica',
+            r'acta\s+de\s+audiencia',
+            r'fecha\s+audiencia\s*/\s*prueba',
+            r'audiencia\s+de\s+pruebas?',
+            r'fijaci[oó]n\s+de\s+puntos\s+controvertidos',
+            r'puntos\s+controvertidos'
+        ])
+        or fecha_documento_ner(r'audiencia|acta[_\s-]*de[_\s-]*audiencia', seleccion="primera")
+        or fecha_contextual_ner(
+            [r'audiencia\s+[uú]nica', r'audiencia\s+de\s+pruebas?', r'acta\s+de\s+audiencia', r'fijaci[oó]n\s+de\s+puntos\s+controvertidos', r'puntos\s+controvertidos'],
+            excluir_contexto=r'fecha\s+ingreso\s+demanda|presentaci[oó]n\s+de\s+demanda|sentencia\s+de\s+vista'
+        )
         or fecha_evento("audiencia")
-        or fecha_contextual_ner([r'audiencia\s+[uú]nica', r'acta\s+de\s+audiencia'], excluir_contexto=r'sentencia\s+de\s+primera\s+instancia|sentencia\s+de\s+vista')
     )
     fecha_admisorio = (
-        fecha_evento("admision")
-        or fecha_contextual_ner([r'admisi[oó]n\s+a\s+tr[aá]mite', r'admitir\s+a\s+tr[aá]mite', r'auto\s+admisorio'], excluir_contexto=r'sentencia|vista|apelaci[oó]n|casaci[oó]n', seleccion="ultima")
-        or fecha_documento_ner(r'admis|resolucion[_\s-]*admisoria|auto', seleccion="primera")
+        fecha_admisorio_documento_ner()
+        or fecha_indice_documento_ner("02", r'Resoluci[oó]n\s+admisoria')
+        or fecha_documento_ner(r'resoluci[oó]n[_\s-]*admisoria|admisoria|admisi[oó]n[_\s-]*de[_\s-]*demanda|calificaci[oó]n[_\s-]*de[_\s-]*demanda', seleccion="primera")
+        or fecha_linea_cronologica_ner([
+            r'auto\s+admisorio',
+            r'resoluci[oó]n\s+admisoria',
+            r'calificaci[oó]n\s+de\s+la\s+demanda',
+            r'admitir\s+a\s+tr[aá]mite',
+            r'admisi[oó]n\s+a\s+tr[aá]mite'
+        ])
+        or fecha_contextual_ner([r'resoluci[oó]n\s+admisoria', r'calificaci[oó]n\s+de\s+la\s+demanda', r'admisi[oó]n\s+a\s+tr[aá]mite', r'admitir\s+a\s+tr[aá]mite', r'auto\s+admisorio'], excluir_contexto=r'fecha\s+de\s+matrimonio|fecha\s+de\s+separaci[oó]n|matrimonio\s+civil|sentencia\s+de\s+(?:primera|vista)|sentencia\s+suprema|recurso\s+de\s+casaci[oó]n', seleccion="primera")
+        or fecha_evento("admision")
     )
 
+    def demandado_fallback_limpio_ner() -> list:
+        valor = demandado.get("nombre") if isinstance(demandado, dict) else None
+        nombre = _limpiar_nombre_parte_plural(str(valor or ""))
+        return [nombre] if nombre else []
+
     pred = {
-        "nombre_demandante": [demandante.get("nombre")],
-        "nombre_demandado": [demandado.get("nombre")],
-        "menor": menores,
-        "dni_demandante": [demandante.get("dni")],
-        "dni_demandado": [demandado.get("dni")],
-        "monto_petitorio": [monto_ref(financiera.get("petitorio") or financiera.get("monto_petitorio") or (sujetos.get("monto_solicitado") if isinstance(sujetos, dict) else None))],
+        "nombre_demandante": (demandantes_desde_texto_ner() or demandante_fallback_limpio_ner())[:1],
+        "nombre_demandado": demandados_desde_texto_ner() or demandados_json_limpios_ner() or demandado_fallback_limpio_ner(),
+        "menor": limpiar_menores_guardados_ner(menores) or menores_desde_texto_ner(),
+        "dni_demandante": dnis_demandantes_desde_texto_ner() or [demandante.get("dni")],
+        "dni_demandado": dnis_demandados_desde_texto_ner() or [demandado.get("dni")],
+        "monto_petitorio": [monto_ref(monto_petitorio_o_referencial_ner())],
         "ingreso_demandado": [monto_ref(ingreso_demandado_ner())],
         "monto_fijado_ofrecido": [monto_ref(monto_fijado)],
         "fecha_presentacion_demanda": [fecha_demanda],
@@ -7757,6 +8845,22 @@ def calcular_metricas_ner(referencias: dict, predicciones: dict) -> dict:
     }
 
 
+def _bool_validacion_manual(valor):
+    if valor is None or valor == "":
+        return None
+    if isinstance(valor, bool):
+        return valor
+    if isinstance(valor, (int, float)):
+        return bool(valor)
+    if isinstance(valor, str):
+        valor_norm = valor.strip().lower()
+        if valor_norm in ("true", "1", "si", "sí", "correcto", "ok"):
+            return True
+        if valor_norm in ("false", "0", "no", "incorrecto", "x"):
+            return False
+    return None
+
+
 def calcular_metricas_ner_evaluacion(evaluacion_campos: dict, predicciones: dict) -> dict:
     categorias = [
         "nombre_demandante", "nombre_demandado", "menor", "dni_demandante", "dni_demandado",
@@ -7764,47 +8868,67 @@ def calcular_metricas_ner_evaluacion(evaluacion_campos: dict, predicciones: dict
         "fecha_presentacion_demanda", "fecha_audiencia_unica", "fecha_resolucion_admisorio"
     ]
     detalle_campos = []
-    tp = 0
+    deteccion_ok = 0
+    asignacion_ok = 0
+    integral_ok = 0
     for categoria in categorias:
         if categoria not in (evaluacion_campos or {}):
             continue
         valor = (evaluacion_campos or {}).get(categoria)
-        if valor is None or valor == "":
-            continue
-        if isinstance(valor, str):
-            valor_norm = valor.strip().lower()
-            if valor_norm in ("true", "1", "si", "sí", "correcto"):
-                correcto = True
-            elif valor_norm in ("false", "0", "no", "incorrecto"):
-                correcto = False
-            else:
-                continue
+        if isinstance(valor, dict):
+            dato_detectado = _bool_validacion_manual(valor.get("dato_detectado"))
+            campo_correcto = _bool_validacion_manual(valor.get("campo_correcto"))
         else:
-            correcto = bool(valor)
+            legacy = _bool_validacion_manual(valor)
+            dato_detectado = legacy
+            campo_correcto = legacy
+        if dato_detectado is None and campo_correcto is None:
+            continue
+        dato_detectado = bool(dato_detectado) if dato_detectado is not None else False
+        campo_correcto = bool(campo_correcto) if campo_correcto is not None else False
+        integral_correcto = dato_detectado and campo_correcto
         preds = _valores_normalizados_categoria(categoria, (predicciones or {}).get(categoria))
-        if correcto:
-            tp += 1
+        if dato_detectado:
+            deteccion_ok += 1
+        if campo_correcto:
+            asignacion_ok += 1
+        if integral_correcto:
+            integral_ok += 1
         detalle_campos.append({
             "campo": categoria,
-            "esperado": ["validado por usuario" if correcto else "marcado como incorrecto"],
+            "esperado": [
+                "dato detectado" if dato_detectado else "dato no detectado/no corresponde",
+                "campo correcto" if campo_correcto else "campo incorrecto"
+            ],
             "predicho": preds,
-            "estado": "correcto" if correcto else "faltante",
-            "score": 1.0 if correcto else 0.0,
+            "estado": "correcto" if integral_correcto else "faltante",
+            "score": 1.0 if integral_correcto else 0.0,
+            "dato_detectado": dato_detectado,
+            "campo_correcto": campo_correcto,
             "validacion_manual": True
         })
 
     evaluados = len(detalle_campos)
-    score = tp / evaluados if evaluados else 0.0
+    detection_accuracy = deteccion_ok / evaluados if evaluados else 0.0
+    assignment_accuracy = asignacion_ok / evaluados if evaluados else 0.0
+    integral_accuracy = integral_ok / evaluados if evaluados else 0.0
+    ner_f1 = (
+        (2 * detection_accuracy * assignment_accuracy) / (detection_accuracy + assignment_accuracy)
+        if (detection_accuracy + assignment_accuracy) else 0.0
+    )
     faltantes = [
         f"{item['campo']}:{' | '.join(item['predicho']) or 'No detectado'}"
         for item in detalle_campos
         if item["estado"] != "correcto"
     ]
     return {
-        "ner_precision": round(score, 4),
-        "ner_recall": round(score, 4),
-        "ner_f1": round(score, 4),
-        "tp": tp,
+        "ner_precision": round(detection_accuracy, 4),
+        "ner_recall": round(assignment_accuracy, 4),
+        "ner_f1": round(ner_f1, 4),
+        "ner_detection_accuracy": round(detection_accuracy, 4),
+        "ner_assignment_accuracy": round(assignment_accuracy, 4),
+        "ner_integral_accuracy": round(integral_accuracy, 4),
+        "tp": integral_ok,
         "predichas": evaluados,
         "referencia": evaluados,
         "faltantes": sorted(faltantes),
@@ -7845,6 +8969,67 @@ def consolidar_ner_por_campo(rows) -> list:
         stats["accuracy"] = round((correctos / evaluados) * 100, 2) if evaluados else None
         resumen.append(stats)
     return sorted(resumen, key=lambda item: (-1 if item["accuracy"] is None else -item["accuracy"], item["campo"]))
+
+
+def calcular_metricas_rag_validacion(casos: list) -> dict:
+    casos_limpios = []
+    for item in casos or []:
+        item = item.dict() if hasattr(item, "dict") else dict(item or {})
+        pregunta = str(item.get("pregunta") or "").strip()
+        if not pregunta:
+            continue
+        try:
+            rank = int(float(item.get("posicion_fuente_correcta") or 0))
+        except (TypeError, ValueError):
+            rank = 0
+        if rank < 0:
+            rank = 0
+        casos_limpios.append({
+            "pregunta": pregunta,
+            "respuesta_esperada": str(item.get("respuesta_esperada") or "").strip(),
+            "documento_esperado": str(item.get("documento_esperado") or "").strip(),
+            "pagina_esperada": str(item.get("pagina_esperada") or "").strip(),
+            "posicion_fuente_correcta": rank,
+            "respuesta_correcta": bool(item.get("respuesta_correcta")),
+            "cita_sustenta": bool(item.get("cita_sustenta")),
+            "abstencion_correcta": bool(item.get("abstencion_correcta")),
+        })
+    total = len(casos_limpios)
+    if not total:
+        raise HTTPException(status_code=400, detail="Registra al menos una pregunta RAG para validar.")
+
+    casos_recuperables = [c for c in casos_limpios if not c["abstencion_correcta"]]
+    total_recuperables = len(casos_recuperables)
+
+    def recall_at(k: int) -> float:
+        if not total_recuperables:
+            return 0
+        return sum(1 for c in casos_recuperables if 0 < c["posicion_fuente_correcta"] <= k) / total_recuperables
+
+    mrr = (
+        sum((1 / c["posicion_fuente_correcta"]) for c in casos_recuperables if c["posicion_fuente_correcta"] > 0) / total_recuperables
+        if total_recuperables else 0
+    )
+    respuesta_correcta = sum(1 for c in casos_limpios if c["respuesta_correcta"])
+    cita_correcta = sum(1 for c in casos_recuperables if c["cita_sustenta"])
+    abstencion_correcta = sum(1 for c in casos_limpios if c["abstencion_correcta"])
+    respuesta_valida = sum(1 for c in casos_limpios if c["respuesta_correcta"] or c["abstencion_correcta"])
+    no_sustentadas = sum(1 for c in casos_limpios if not c["cita_sustenta"] and not c["abstencion_correcta"])
+    return {
+        "rag_total_preguntas": total,
+        "rag_retrievable_questions": total_recuperables,
+        "rag_recall_at_1": round(recall_at(1), 4),
+        "rag_recall_at_3": round(recall_at(3), 4),
+        "rag_recall_at_5": round(recall_at(5), 4),
+        "rag_recall_at_10": round(recall_at(10), 4),
+        "rag_mrr": round(mrr, 4),
+        "rag_answer_accuracy": round(respuesta_correcta / total, 4),
+        "rag_valid_response_accuracy": round(respuesta_valida / total, 4),
+        "rag_citation_accuracy": round(cita_correcta / total_recuperables, 4) if total_recuperables else 0,
+        "rag_unsupported_rate": round(no_sustentadas / total, 4),
+        "rag_correct_abstention_rate": round(abstencion_correcta / total, 4),
+        "casos": casos_limpios,
+    }
 
 
 def calcular_metricas_bertscore_validacion(resumen_referencia: str, resumen_generado: str) -> dict:
@@ -7898,6 +9083,20 @@ def _upsert_metricas_validacion(conn, numero: str, usuario: str, campos: dict):
         conn.execute(f"INSERT INTO metricas_validacion ({cols_sql}) VALUES ({placeholders})", tuple([numero] + valores))
 
 
+def _normalizar_metricas_rag_guardadas(rag: dict) -> dict:
+    if not isinstance(rag, dict):
+        return {}
+    casos = rag.get("casos") or []
+    if not casos:
+        return rag
+    try:
+        recalculadas = calcular_metricas_rag_validacion(casos)
+        casos_recalculados = recalculadas.pop("casos", casos)
+        return {**rag, **recalculadas, "casos": casos_recalculados}
+    except Exception:
+        return rag
+
+
 def _fila_validacion_dict(row, predicciones_actuales: dict = None) -> dict:
     predicciones_actuales = predicciones_actuales or {}
     if not row:
@@ -7934,6 +9133,7 @@ def _fila_validacion_dict(row, predicciones_actuales: dict = None) -> dict:
             "resumen_referencia": row.get("resumen_referencia") or "",
             "resumen_generado": row.get("resumen_generado") or "",
         },
+        "rag": (cargar_json_bd(row.get("detalle"), {}) or {}).get("rag", {}),
         "detalle": cargar_json_bd(row.get("detalle"), {}) or {}
     }
 
@@ -7986,6 +9186,19 @@ async def resumen_metricas_validacion(request: Request):
             ORDER BY fecha_actualizacion DESC
         """).fetchall()
         ner_por_campo = consolidar_ner_por_campo(rows)
+        rag_items = []
+        for r in rows:
+            detalle_rag = _normalizar_metricas_rag_guardadas((cargar_json_bd(r.get("detalle"), {}) or {}).get("rag", {}))
+            if isinstance(detalle_rag, dict) and detalle_rag.get("rag_total_preguntas"):
+                rag_items.append(detalle_rag)
+        rag_total = sum(int(item.get("rag_total_preguntas") or 0) for item in rag_items)
+
+        def rag_avg(campo, peso="rag_total_preguntas"):
+            total_peso = sum(int(item.get(peso) or 0) for item in rag_items)
+            if not total_peso:
+                return None
+            return round(sum(float(item.get(campo) or 0) * int(item.get(peso) or 0) for item in rag_items) / total_peso, 4)
+
         return {
             "status": "success",
             "global": {
@@ -7997,6 +9210,14 @@ async def resumen_metricas_validacion(request: Request):
                 "bert_precision": round(float(stats["avg_bert_precision"]), 4) if stats.get("avg_bert_precision") is not None else None,
                 "bert_recall": round(float(stats["avg_bert_recall"]), 4) if stats.get("avg_bert_recall") is not None else None,
                 "bert_f1": round(float(stats["avg_bert_f1"]), 4) if stats.get("avg_bert_f1") is not None else None,
+                "rag_total_preguntas": rag_total,
+                "rag_recall_at_5": rag_avg("rag_recall_at_5", "rag_retrievable_questions"),
+                "rag_mrr": rag_avg("rag_mrr", "rag_retrievable_questions"),
+                "rag_citation_accuracy": rag_avg("rag_citation_accuracy", "rag_retrievable_questions"),
+                "rag_answer_accuracy": rag_avg("rag_answer_accuracy"),
+                "rag_valid_response_accuracy": rag_avg("rag_valid_response_accuracy"),
+                "rag_unsupported_rate": rag_avg("rag_unsupported_rate"),
+                "rag_correct_abstention_rate": rag_avg("rag_correct_abstention_rate"),
             },
             "expedientes": [
                 {
@@ -8005,6 +9226,8 @@ async def resumen_metricas_validacion(request: Request):
                     "ocr_accuracy": r.get("ocr_accuracy"),
                     "ner_f1": r.get("ner_f1"),
                     "bert_f1": r.get("bert_f1"),
+                    "rag_mrr": _normalizar_metricas_rag_guardadas(((cargar_json_bd(r.get("detalle"), {}) or {}).get("rag", {}) or {})).get("rag_mrr"),
+                    "rag_recall_at_5": _normalizar_metricas_rag_guardadas(((cargar_json_bd(r.get("detalle"), {}) or {}).get("rag", {}) or {})).get("rag_recall_at_5"),
                 }
                 for r in rows
             ],
@@ -8078,7 +9301,17 @@ async def validar_ner_metricas(payload: ValidationNERRequest, request: Request):
             if usa_evaluacion_manual
             else calcular_metricas_ner(payload.entidades_referencia, predicciones)
         )
-        detalle = {"ner": {"tp": metricas.pop("tp"), "predichas": metricas.pop("predichas"), "referencia": metricas.pop("referencia"), "faltantes": metricas.pop("faltantes"), "sobrantes": metricas.pop("sobrantes"), "detalle_campos": metricas.pop("detalle_campos", [])}}
+        detalle = {"ner": {
+            "tp": metricas.pop("tp"),
+            "predichas": metricas.pop("predichas"),
+            "referencia": metricas.pop("referencia"),
+            "faltantes": metricas.pop("faltantes"),
+            "sobrantes": metricas.pop("sobrantes"),
+            "detalle_campos": metricas.pop("detalle_campos", []),
+            "detection_accuracy": metricas.get("ner_detection_accuracy"),
+            "assignment_accuracy": metricas.get("ner_assignment_accuracy"),
+            "integral_accuracy": metricas.get("ner_integral_accuracy"),
+        }}
         referencias_guardadas = (
             {"__modo": "evaluacion_manual", "campos": payload.evaluacion_campos}
             if usa_evaluacion_manual
@@ -8127,6 +9360,79 @@ async def validar_bert_metricas(payload: ValidationBERTRequest, request: Request
     except Exception as e:
         conn.rollback()
         raise HTTPException(status_code=500, detail=f"No se pudo validar BERTScore: {e}")
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/validation-metrics/rag")
+async def validar_rag_metricas(payload: ValidationRAGRequest, request: Request):
+    conn = get_db_connection()
+    try:
+        verificar_acceso_expediente_o_rechazar(conn, request, payload.numero_expediente, "validacion RAG")
+        casos_payload = list(payload.casos or [])
+        if payload.append:
+            existente = conn.execute("SELECT detalle FROM metricas_validacion WHERE numero_expediente = %s", (payload.numero_expediente,)).fetchone()
+            detalle_existente = cargar_json_bd(existente.get("detalle"), {}) if existente else {}
+            casos_previos = ((detalle_existente or {}).get("rag", {}) or {}).get("casos", [])
+            casos_payload = list(casos_previos or []) + casos_payload
+        metricas = calcular_metricas_rag_validacion(casos_payload)
+        casos = metricas.pop("casos")
+        detalle = {"rag": {**metricas, "casos": casos}}
+        _upsert_metricas_validacion(conn, payload.numero_expediente, payload.usuario, {
+            "detalle": json.dumps(detalle, ensure_ascii=False)
+        })
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "VALIDACION_METRICAS",
+            usuario=payload.usuario,
+            expediente=payload.numero_expediente,
+            detalle=f"RAG validado preguntas={metricas['rag_total_preguntas']} recall@5={metricas['rag_recall_at_5']} mrr={metricas['rag_mrr']}",
+            severidad="INFO"
+        )
+        conn.commit()
+        return {"status": "success", "rag": detalle["rag"]}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"No se pudo validar RAG: {e}")
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/validation-metrics/{numero}/rag/reset")
+async def resetear_metricas_rag(numero: str, request: Request):
+    conn = get_db_connection()
+    try:
+        verificar_acceso_expediente_o_rechazar(conn, request, numero, "reset de validacion RAG")
+        row = conn.execute("SELECT detalle FROM metricas_validacion WHERE numero_expediente = %s", (numero,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="No hay metricas guardadas para este expediente.")
+        detalle = cargar_json_bd(row.get("detalle"), {}) or {}
+        if isinstance(detalle, dict):
+            detalle.pop("rag", None)
+        conn.execute(
+            "UPDATE metricas_validacion SET detalle = %s, fecha_actualizacion = %s WHERE numero_expediente = %s",
+            (json.dumps(detalle, ensure_ascii=False), datetime.now(), numero)
+        )
+        registrar_evento_auditoria(
+            conn,
+            request,
+            "VALIDACION_METRICAS",
+            expediente=numero,
+            detalle="Reset de trazabilidad y metricas RAG",
+            severidad="ADVERTENCIA"
+        )
+        conn.commit()
+        return {"status": "success", "message": "Metricas RAG reiniciadas."}
+    except HTTPException:
+        conn.rollback()
+        raise
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"No se pudo reiniciar RAG: {e}")
     finally:
         conn.close()
 
@@ -8588,6 +9894,183 @@ async def obtener_lista_expedientes(request: Request, username: str = None, rol:
     finally:
         conn.close()
 
+def reconciliar_analisis_ia_guardado(resultados: dict, texto_plano: str) -> dict:
+    """Actualiza campos derivados de OCR sin volver a ejecutar el modelo ni alterar la validación."""
+    if not isinstance(resultados, dict) or not texto_plano:
+        return resultados
+
+    sujetos = resultados.get("sujetos_procesales") or {}
+    financiera = resultados.get("revision_financiera") or {}
+    capacidad = resultados.get("capacidad_cargas") or {}
+    if not isinstance(sujetos, dict) or not isinstance(financiera, dict) or not isinstance(capacidad, dict):
+        return resultados
+
+    texto_sentencia = _texto_documento_por_nombre(texto_plano, r'(?:^|[_ -])SENTENCIA(?:[_ .-]|$)') or texto_plano
+    pension = _extraer_pension_ordenada_sentencia(texto_sentencia)
+    ingresos_preparados, ingreso_base_preparado = _seleccionar_ingreso_base_hu14(
+        capacidad.get("ingresos") or [], texto_plano
+    )
+    if pension["tipo"] == "no_detectado" or ingreso_base_preparado <= 0:
+        return resultados
+
+    sujetos["domicilios"] = extraer_domicilios_judiciales(texto_plano)
+    texto_demanda, _ = _obtener_bloques_demanda_contestacion(texto_plano)
+    detalles = financiera.get("detalles_gastos") or []
+    if isinstance(detalles, list):
+        montos_existentes = {round(float(item.get("monto") or 0), 2) for item in detalles if isinstance(item, dict)}
+        montos_texto = _extraer_montos_reales(texto_plano)
+        for gasto in _extraer_gastos_nativos(texto_demanda or texto_plano, montos_texto, float(financiera.get("petitorio") or 0)):
+            monto_gasto = round(float(gasto.get("monto") or 0), 2)
+            if gasto.get("concepto") == "Movilidad del menor" and monto_gasto not in montos_existentes:
+                detalles.append({**gasto, "validado_en_texto": True, "fuente_validacion": "Regex nativo en la demanda"})
+                montos_existentes.add(monto_gasto)
+        financiera["detalles_gastos"] = detalles
+        suma_gastos = round(sum(float(item.get("monto") or 0) for item in detalles if isinstance(item, dict)), 2)
+        financiera["suma_gastos_sustentados"] = financiera["suma_gastos"] = suma_gastos
+        traza_gastos = financiera.setdefault("trazabilidad_financiera", {}).setdefault("gastos", {})
+        traza_gastos["items_aceptados"] = len(detalles)
+        traza_gastos["suma"] = suma_gastos
+    petitorio_info = _extraer_petitorio_demanda_info(texto_plano)
+    petitorio = float(petitorio_info.get("monto") or 0)
+    if petitorio > 0:
+        sujetos["monto_solicitado"] = petitorio
+        financiera["petitorio"] = petitorio
+        financiera["monto_petitorio"] = petitorio
+        gastos = float(financiera.get("suma_gastos_sustentados") or financiera.get("suma_gastos") or 0)
+        brecha = max(0.0, petitorio - gastos)
+        financiera["brecha"] = financiera["brecha_valor"] = round(brecha, 2)
+        financiera["porcentaje_brecha"] = round(brecha / petitorio * 100, 1)
+        financiera["alerta"] = brecha > 10
+        traza = financiera.setdefault("trazabilidad_financiera", {})
+        traza["petitorio"] = {
+            "monto": petitorio,
+            "fuente": petitorio_info.get("fuente", ""),
+            "evidencia": petitorio_info.get("evidencia", ""),
+            "validado_en_texto": True,
+        }
+
+    capacidad["pension_ordenada"] = pension
+
+    montos_reales = _extraer_montos_reales(texto_plano)
+    dependientes = []
+    montos_incluidos = set()
+    for dep in capacidad.get("dependientes") or []:
+        if not isinstance(dep, dict):
+            continue
+        monto = float(dep.get("monto_carga") or 0)
+        evidencia = str(dep.get("evidencia") or "")
+        if monto > 0 and not _validar_monto_con_texto(monto, _extraer_montos_reales(evidencia), tolerancia=1.0):
+            continue
+        if monto > 0 and round(monto, 2) in montos_incluidos:
+            continue
+        dep = dict(dep)
+        if dep.get("tipo") == "Carga familiar acreditada" and re.search(r'\b(?:declar\w*|afirm\w*|manifiest\w*|indic\w*)\b', evidencia + " " + str(dep.get("detalle") or ""), re.IGNORECASE):
+            dep["tipo"] = "Carga familiar declarada"
+        dependientes.append(dep)
+        if monto > 0:
+            montos_incluidos.add(round(monto, 2))
+    for dep in _extraer_cargas_familiares_nativas(texto_plano, montos_reales):
+        monto = round(float(dep.get("monto_carga") or 0), 2)
+        if monto > 0 and monto not in montos_incluidos:
+            dependientes.append(dep)
+            montos_incluidos.add(monto)
+    capacidad["dependientes"] = dependientes
+    capacidad["validaciones_dependientes"] = {
+        "n_detectados_patron_nombre_edad": len(_extraer_dependientes_nativos(texto_plano)),
+        "n_cargas_familiares_monetarias": sum(1 for dep in dependientes if float(dep.get("monto_carga") or 0) > 0),
+        "n_dependientes_final": len(dependientes),
+        "estado": "ok",
+    }
+
+    carga_especie = _extraer_carga_especie_desde_texto(texto_plano, montos_reales)
+    capacidad["carga_especie_reportada"] = float(carga_especie.get("monto_reportado") or 0)
+    capacidad["carga_especie_acreditada"] = float(carga_especie.get("monto_acreditado") or 0)
+    capacidad["carga_especie_aplicada"] = capacidad["carga_especie_reportada"] if carga_especie.get("estado") in ("probada", "alegada") else 0.0
+    capacidad["carga_especie_estado"] = carga_especie.get("estado", "no detectada")
+    capacidad["carga_especie_evidencia"] = carga_especie.get("evidencia", "")
+    ingresos, ingreso_base = ingresos_preparados, ingreso_base_preparado
+    capacidad["ingresos"] = ingresos
+    capacidad["total_ingresos"] = ingreso_base
+    carga_familiar = sum(float(dep.get("monto_carga") or 0) for dep in dependientes)
+    total_cargas = carga_familiar + capacidad["carga_especie_aplicada"]
+    capacidad["cargas_monetarias_dependientes"] = round(carga_familiar, 2)
+    capacidad["total_cargas"] = round(total_cargas, 2)
+    capacidad["tope_legal_60"] = round(ingreso_base * 0.6, 2)
+    capacidad["margen_libre"] = round(max(0, capacidad["tope_legal_60"] - total_cargas), 2)
+    capacidad["ingreso_disponible_neto"] = round(max(0, ingreso_base - total_cargas), 2)
+    ratio = (capacidad["ingreso_disponible_neto"] / ingreso_base * 100) if ingreso_base > 0 else 0
+    capacidad["ratio_disponibilidad"] = round(ratio, 1)
+    capacidad["carga_nivel"] = (
+        "Desconocida" if not ingreso_base else
+        "Carga Baja" if ratio >= 90 else "Carga Media" if ratio >= 75 else
+        "Carga Alta" if ratio >= 60 else "Carga Crítica"
+    )
+    capacidad["mensaje"] = (
+        f"Ratio HU14 de {ratio:.1f}%. Cargas familiares: S/ {carga_familiar:.2f}; "
+        f"carga en especie: S/ {capacidad['carga_especie_aplicada']:.2f}."
+        if ingreso_base else "No se detectaron ingresos para calcular el ratio."
+    )
+    capacidad["monto_pension_ordenada_estimado"] = round(
+        pension["valor"] * ingreso_base / 100 if pension["tipo"] == "porcentaje" else
+        pension["valor"] if pension["tipo"] == "monto_fijo" else 0, 2
+    )
+    capacidad["contexto_social"] = _extraer_contexto_social_hu14(
+        texto_plano, ingresos, dependientes, carga_especie, ratio, capacidad["carga_nivel"]
+    )
+    capacidad["trazabilidad_hu14"] = {
+        "criterio_ingreso": "Ingreso neto acreditado antes que bruto o declarado.",
+        "criterio_cargas": "Solo importes de cargas familiares y en especie respaldados por su propia evidencia.",
+        "ingreso_base": round(ingreso_base, 2),
+        "cargas_aplicadas": round(total_cargas, 2),
+    }
+    resultados["calculadora_economica"] = modulo_calculadora_economica(financiera, capacidad)
+
+    textos_por_archivo = {
+        sec["archivo"]: sec["texto"] for sec in _secciones_documentales(texto_plano)
+    }
+    for doc in resultados.get("resumen_por_pdf") or []:
+        if isinstance(doc, dict) and doc.get("archivo") in textos_por_archivo:
+            clasificacion = clasificar_documento_judicial(doc["archivo"], textos_por_archivo[doc["archivo"]])
+            doc["tipo_documental"] = clasificacion["tipo"]
+            doc["categoria_documental"] = clasificacion["categoria"]
+            doc["confianza_clasificacion"] = clasificacion["confianza"]
+
+    if re.search(r'no\s+se\s+alcanza?o?\s+acuerdo\s+sobre\s+el\s+monto', _normalizar_texto_busqueda_pdf(texto_plano)):
+        if pension["tipo"] == "monto_fijo":
+            aclaracion = f"No hubo acuerdo sobre el monto; la sentencia fijó S/ {pension['valor']:.2f} mensuales."
+        else:
+            aclaracion = "No hubo acuerdo sobre el monto; la decisión corresponde a la sentencia."
+        for clave in ("sintesis_rag", "postura_defensa"):
+            bloque = resultados.get(clave)
+            if not isinstance(bloque, dict):
+                continue
+            for tono in ("tecnico", "estandar"):
+                texto = str(bloque.get(tono) or "")
+                oraciones = re.split(r'(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])', texto)
+                limpias = [oracion for oracion in oraciones if not re.search(
+                    r'acept[oó]\s+una\s+pensi[oó]n|t[eé]rminos\s+del\s+acuerdo|'
+                    r'ambos\s+padres\s+llegaron\s+a\s+un\s+acuerdo|'
+                    r'acuerdo\s+parcial.{0,100}pensi[oó]n', oracion, re.IGNORECASE
+                )]
+                if len(limpias) != len(oraciones):
+                    cierre = aclaracion
+                    if re.search(r'\bconsentid[ao]\b', texto_plano, re.IGNORECASE):
+                        cierre += " La sentencia consta como consentida."
+                    if re.search(r'(?:^|[_ -])OFICIO(?:[_ .-]|$)', " ".join(textos_por_archivo), re.IGNORECASE):
+                        cierre += " El expediente incluye un oficio de retención posterior."
+                    bloque[tono] = " ".join(limpias).strip() + " " + cierre
+    resultados["postura_defensa"] = _integrar_oferta_contestacion(resultados.get("postura_defensa"), texto_plano)
+    puntos_actuales = [
+        punto for punto in resultados.get("puntos_sugeridos") or []
+        if isinstance(punto, dict) and not re.search(r'podr[ií]a\s+haber\s+alg[uú]n\s+error\s+en\s+la\s+transcripci[oó]n',
+                         str(punto.get("sugerencia", "")), re.IGNORECASE)
+    ]
+    puntos_acta = _extraer_puntos_controvertidos_acta(texto_plano)
+    revisados = any(punto.get("estado_revision") in ("accepted", "edited", "discarded") for punto in puntos_actuales)
+    resultados["puntos_sugeridos"] = puntos_actuales if revisados else (puntos_acta or puntos_actuales)
+    return resultados
+
+
 @app.get("/api/v1/expedientes/{numero}")
 async def obtener_detalle_expediente(numero: str, request: Request):
     """
@@ -8601,6 +10084,21 @@ async def obtener_detalle_expediente(numero: str, request: Request):
             
         # Postgres puede devolver json_resultados como dict; SQLite lo devolvía como texto.
         resultados_dict = normalizar_sujetos_procesales_json(cargar_json_bd(fila["json_resultados"]))
+        if isinstance(resultados_dict, dict) and resultados_dict:
+            documentos_ocr = conn.execute("""
+                SELECT documento_index, nombre_archivo, texto_ocr
+                FROM ocr_documentos WHERE numero_expediente = %s
+                ORDER BY documento_index
+            """, (numero,)).fetchall()
+            if documentos_ocr and any(
+                "EXPEDIENTE SIMULADO" in str(doc.get("texto_ocr") or "")[:700].upper()
+                for doc in documentos_ocr
+            ):
+                texto_guardado = "\n".join(
+                    f"--- [DOCUMENTO {idx}: {doc['nombre_archivo']}] ---\n{doc['texto_ocr']}"
+                    for idx, doc in enumerate(documentos_ocr, 1)
+                )
+                resultados_dict = reconciliar_analisis_ia_guardado(resultados_dict, texto_guardado)
         if isinstance(resultados_dict, dict) and "calculadora_economica" not in resultados_dict:
             resultados_dict["calculadora_economica"] = modulo_calculadora_economica(
                 resultados_dict.get("revision_financiera", {}),
@@ -9128,8 +10626,25 @@ async def listar_pdfs_expediente(numero: str, request: Request):
         return {"status": "success", "files": [f"{nombre_seguro}.pdf"]}
     return {"status": "success", "files": []}
 
+def _texto_plano_seguro(valor) -> str:
+    if valor is None:
+        return ""
+    if isinstance(valor, str):
+        return valor
+    if isinstance(valor, (int, float, bool)):
+        return str(valor)
+    if isinstance(valor, dict):
+        for clave in ("texto", "fragmento", "evidencia", "contenido", "valor", "nombre", "archivo", "documento"):
+            if valor.get(clave):
+                return _texto_plano_seguro(valor.get(clave))
+        return json.dumps(valor, ensure_ascii=False)
+    if isinstance(valor, list):
+        return " ".join(_texto_plano_seguro(item) for item in valor if item is not None)
+    return str(valor)
+
+
 def _normalizar_texto_busqueda_pdf(texto: str) -> str:
-    texto = unicodedata.normalize("NFKD", str(texto or ""))
+    texto = unicodedata.normalize("NFKD", _texto_plano_seguro(texto))
     texto = "".join(c for c in texto if not unicodedata.combining(c))
     texto = re.sub(r'\s+', ' ', texto).strip().lower()
     return texto
@@ -9138,7 +10653,7 @@ def _terminos_candidatos_evidencia(term: str) -> list:
     base = re.sub(r'\s+', ' ', str(term or "")).strip()
     candidatos = []
     if base:
-        candidatos.append(base)
+        candidatos.append(base[:420])
     fecha = re.match(r'^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$', base)
     if fecha:
         meses = {
@@ -9161,30 +10676,24 @@ def _terminos_candidatos_evidencia(term: str) -> list:
         candidatos.append(palabras[0])
     return list(dict.fromkeys(candidatos))
 
-@app.get("/api/v1/expedientes/{numero}/buscar-evidencia")
-async def buscar_evidencia_pdf(numero: str, request: Request, term: str):
-    """Ubica en que PDF y pagina aparece una evidencia textual."""
-    if not term or not term.strip():
-        raise HTTPException(status_code=400, detail="Termino de busqueda requerido.")
-
-    conn = get_db_connection()
-    try:
-        verificar_acceso_expediente_o_rechazar(conn, request, numero, "busqueda de evidencia documental")
-    finally:
-        conn.close()
-
-    nombre_seguro = re.sub(r'[^a-zA-Z0-9-]', '_', numero)
-    carpeta = f"pdfs_guardados/{nombre_seguro}"
-    rutas = []
+def _rutas_pdf_guardados_expediente(numero: str) -> list:
+    nombre_seguro = re.sub(r'[^a-zA-Z0-9-]', '_', numero or "")
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    carpeta = os.path.join(base_dir, "pdfs_guardados", nombre_seguro)
     if os.path.exists(carpeta):
-        rutas = [os.path.join(carpeta, f) for f in sorted(os.listdir(carpeta)) if f.lower().endswith(".pdf")]
-    else:
-        ruta_antigua = f"pdfs_guardados/{nombre_seguro}.pdf"
-        if os.path.exists(ruta_antigua):
-            rutas = [ruta_antigua]
+        return [os.path.join(carpeta, f) for f in sorted(os.listdir(carpeta)) if f.lower().endswith(".pdf")]
+    ruta_antigua = os.path.join(base_dir, "pdfs_guardados", f"{nombre_seguro}.pdf")
+    return [ruta_antigua] if os.path.exists(ruta_antigua) else []
 
+
+def _localizar_evidencia_pdf(numero: str, term: str, documento_preferido: str = "") -> dict:
+    rutas = _rutas_pdf_guardados_expediente(numero)
     if not rutas:
         raise HTTPException(status_code=404, detail="No hay PDFs guardados para este expediente.")
+
+    preferido_norm = _normalizar_texto_busqueda_pdf(documento_preferido)
+    if preferido_norm:
+        rutas.sort(key=lambda ruta: 0 if preferido_norm in _normalizar_texto_busqueda_pdf(os.path.basename(ruta)) else 1)
 
     candidatos = _terminos_candidatos_evidencia(term)
     candidatos_norm = [_normalizar_texto_busqueda_pdf(c) for c in candidatos if c]
@@ -9207,7 +10716,7 @@ async def buscar_evidencia_pdf(numero: str, request: Request, term: str):
                             "found": True,
                             "archivo": os.path.basename(ruta),
                             "pagina": idx + 1,
-                            "search_term": candidatos[0],
+                            "search_term": candidatos[0] if candidatos else term,
                             "metodo": "texto_nativo"
                         }
         except Exception as e:
@@ -9218,9 +10727,24 @@ async def buscar_evidencia_pdf(numero: str, request: Request, term: str):
         "found": False,
         "archivo": os.path.basename(rutas[0]),
         "pagina": 1,
-        "search_term": candidatos[0],
+        "search_term": candidatos[0] if candidatos else term,
         "metodo": "no_encontrado"
     }
+
+
+@app.get("/api/v1/expedientes/{numero}/buscar-evidencia")
+async def buscar_evidencia_pdf(numero: str, request: Request, term: str):
+    """Ubica en que PDF y pagina aparece una evidencia textual."""
+    if not term or not term.strip():
+        raise HTTPException(status_code=400, detail="Termino de busqueda requerido.")
+
+    conn = get_db_connection()
+    try:
+        verificar_acceso_expediente_o_rechazar(conn, request, numero, "busqueda de evidencia documental")
+    finally:
+        conn.close()
+
+    return _localizar_evidencia_pdf(numero, term)
 
 @app.get("/api/v1/expedientes/{numero}/pdf/{filename}")
 async def obtener_pdf_especifico(numero: str, filename: str, request: Request):
@@ -9298,3 +10822,71 @@ async def debug_extraer_texto(files: List[UploadFile] = File(...)):
 # Punto de entrada para levantar el servidor localmente
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

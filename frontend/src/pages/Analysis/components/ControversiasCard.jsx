@@ -60,7 +60,7 @@ const PuntoControvertido = ({ punto, index, onNotifyChange, onUpdatePoint }) => 
       <h5 className={`text-[10px] font-bold mb-2 tracking-widest uppercase flex justify-between items-center ${
         status === 'accepted' ? 'text-green-700' : 'text-purple-700'
       }`}>
-        <span>SUGERENCIA {index + 1}: {punto.tema || "PUNTO A RESOLVER"}</span>
+        <span>{punto.fuente === 'acta' ? 'PUNTO' : 'SUGERENCIA'} {index + 1}: {punto.tema || "PUNTO A RESOLVER"}</span>
         {status === 'accepted' && <span className="bg-green-100 text-green-700 px-2 py-0.5 rounded text-[8px]">APROBADO</span>}
       </h5>
 
@@ -141,7 +141,7 @@ export const ControversiasCard = ({ puntos, onNotifyChange, onRegenerate, isRege
   if (!puntos || puntos.length === 0) {
     return (
       <div className="mb-8 bg-white rounded-xl border border-slate-200 p-6 flex items-center justify-center text-slate-400 text-[11px]">
-        Analizando puntos controvertidos...
+        No hay puntos controvertidos sugeridos para este expediente.
       </div>
     );
   }
@@ -155,7 +155,7 @@ export const ControversiasCard = ({ puntos, onNotifyChange, onRegenerate, isRege
           Puntos Controvertidos
         </h4>
         <span className="bg-purple-100 text-purple-700 px-2.5 py-1 rounded-md text-[9px] font-bold tracking-wide">
-          IA Sugiere
+          {puntos.some((punto) => punto.fuente === 'acta') ? 'Extraído del acta' : 'IA Sugiere'}
         </span>
       </div>
 

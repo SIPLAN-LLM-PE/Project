@@ -8,6 +8,28 @@ export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
   const mostrarValor = (valor) => valor && !["No detectado", "No encontrado", ""].includes(valor);
   const domicilios = data.domicilios || {};
 
+  const titleCase = (valor) => String(valor || "")
+    .toLowerCase()
+    .replace(/\b([a-záéíóúüñ])/g, (letra) => letra.toUpperCase());
+
+  const limpiarNombreTarjeta = (valor) => {
+    if (!mostrarValor(valor)) return "No detectado";
+    let limpio = String(valor)
+      .replace(/\s+/g, " ")
+      .replace(/^\s*(?:parte\s+)?demandad[ao]\s+/i, "")
+      .replace(/^\s*(?:parte\s+)?demandante\s+/i, "")
+      .trim();
+
+    limpio = limpio.split(/\b(?:demandad[ao]|menores?|materia|dni|ingreso|pensi[oó]n|demanda|auto|audiencia|sentencia|recurso|casaci[oó]n)\b/i)[0]
+      .replace(/[,:;\-]+$/g, "")
+      .trim();
+
+    return limpio ? titleCase(limpio) : "No detectado";
+  };
+
+  const nombreDemandante = limpiarNombreTarjeta(data.demandante?.nombre);
+  const nombreDemandado = limpiarNombreTarjeta(data.demandado?.nombre);
+
   const DomicilioItem = ({ icon: Icon, label, value, color = "text-slate-400" }) => (
     <div className="flex items-start gap-2 min-w-0">
       <Icon size={12} className={`${color} mt-0.5 shrink-0`} />
@@ -48,22 +70,22 @@ export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
           <div className="flex justify-between items-start mb-3">
             <h5 className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">Parte Demandante</h5>
           </div>
-          <div className="flex items-center gap-3 mb-3">
+          <div className="flex items-start gap-3 mb-3 min-w-0">
             <div className="bg-emerald-50 p-2 rounded-full text-emerald-600">
               <User size={16} />
             </div>
             
-            <div className="flex items-center gap-2">
-              <p className="text-sm font-bold text-slate-800">
-                {data.demandante?.nombre || "No detectado"}
+            <div className="flex items-start gap-2 min-w-0 flex-1">
+              <p className="text-sm font-bold text-slate-800 leading-5 break-words min-w-0">
+                {nombreDemandante}
               </p>
               
               {/* 🚀 BOTÓN DE TRAZABILIDAD PARA EL NOMBRE */}
-              {data.demandante?.nombre && data.demandante.nombre !== "No detectado" && (
+              {nombreDemandante !== "No detectado" && (
                 <button 
-                  onClick={() => onJumpToSource(data.demandante.nombre, { label: "Demandante" })}
+                  onClick={() => onJumpToSource(nombreDemandante, { label: "Demandante" })}
                   title="Buscar en el documento original"
-                  className="text-emerald-500 hover:text-emerald-700 hover:bg-emerald-50 p-1 rounded transition-colors"
+                  className="text-emerald-500 hover:text-emerald-700 hover:bg-emerald-50 p-1 rounded transition-colors shrink-0"
                 >
                   <ExternalLink size={14} />
                 </button>
@@ -71,7 +93,7 @@ export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
             </div>
           </div>
           <div className="grid grid-cols-1 gap-2 text-xs text-slate-600 font-medium">
-            <div className="flex items-center gap-2">
+            <div className="flex items-start gap-2 min-w-0 flex-1">
               <CreditCard size={12} className="text-slate-400" />
               <span>DNI: <span className="font-mono text-slate-800">
                 {data.demandante?.dni && data.demandante.dni !== "No detectado" ? data.demandante.dni : "No encontrado"}
@@ -114,22 +136,22 @@ export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
           <div className="flex justify-between items-start mb-3">
             <h5 className="text-[10px] font-bold text-rose-600 uppercase tracking-widest">Parte Demandada</h5>
           </div>
-          <div className="flex items-center gap-3 mb-3">
+          <div className="flex items-start gap-3 mb-3 min-w-0">
             <div className="bg-rose-50 p-2 rounded-full text-rose-600">
               <User size={16} />
             </div>
             
-            <div className="flex items-center gap-2">
-              <p className="text-sm font-bold text-slate-800">
-                {data.demandado?.nombre || "No detectado"}
+            <div className="flex items-start gap-2 min-w-0 flex-1">
+              <p className="text-sm font-bold text-slate-800 leading-5 break-words min-w-0">
+                {nombreDemandado}
               </p>
               
               {/* 🚀 BOTÓN DE TRAZABILIDAD PARA EL NOMBRE */}
-              {data.demandado?.nombre && data.demandado.nombre !== "No detectado" && (
+              {nombreDemandado !== "No detectado" && (
                 <button 
-                  onClick={() => onJumpToSource(data.demandado.nombre, { label: "Demandado" })}
+                  onClick={() => onJumpToSource(nombreDemandado, { label: "Demandado" })}
                   title="Buscar en el documento original"
-                  className="text-rose-500 hover:text-rose-700 hover:bg-rose-50 p-1 rounded transition-colors"
+                  className="text-rose-500 hover:text-rose-700 hover:bg-rose-50 p-1 rounded transition-colors shrink-0"
                 >
                   <ExternalLink size={14} />
                 </button>
@@ -137,7 +159,7 @@ export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
             </div>
           </div>
           <div className="grid grid-cols-1 gap-2 text-xs text-slate-600 font-medium">
-            <div className="flex items-center gap-2">
+            <div className="flex items-start gap-2 min-w-0 flex-1">
               <CreditCard size={12} className="text-slate-400" />
               <span>DNI: <span className="font-mono text-slate-800">
                 {data.demandado?.dni && data.demandado.dni !== "No detectado" ? data.demandado.dni : "No encontrado"}
@@ -215,3 +237,7 @@ export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
     </div>
   );
 };
+
+
+
+

@@ -41,6 +41,18 @@ const MAX_UPLOAD_FILE_MB = 50;
 const MAX_UPLOAD_FILE_BYTES = MAX_UPLOAD_FILE_MB * 1024 * 1024;
 const formatFileSize = (bytes = 0) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 
+const safeText = (value, fallback = '') => {
+  if (value === null || value === undefined) return fallback;
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) return value.map(item => safeText(item)).filter(Boolean).join(' ');
+  if (typeof value === 'object') {
+    const preferred = value.texto || value.fragmento || value.evidencia || value.contenido || value.valor || value.nombre || value.archivo || value.documento;
+    return preferred ? safeText(preferred, fallback) : JSON.stringify(value);
+  }
+  return String(value);
+};
+
 const progressStageConfig = {
   preparando: { floor: 2, ceiling: 8, durationMs: 4000 },
   ocr: { floor: 5, ceiling: 41, durationMs: 45000 },
@@ -1247,7 +1259,13 @@ export const Analysis = () => {
       const respuesta = res.ok
         ? (data.respuesta || "No hay informacion sobre esto en el expediente.")
         : (data.detail || "No se pudo consultar el expediente.");
-      const msjsConRespuesta = [...nuevosMensajes, { rol: 'assistant', contenido: respuesta }];
+      const msjsConRespuesta = [
+        ...nuevosMensajes,
+        {
+          rol: 'assistant',
+          contenido: respuesta
+        }
+      ];
       setChatMessages(msjsConRespuesta);
       draftChatMessages = msjsConRespuesta;
     } catch (error) {
@@ -1817,7 +1835,7 @@ export const Analysis = () => {
                           ? 'bg-[#1a3059] text-white border-[#1a3059] rounded-tr-sm'
                           : 'bg-[#f8fafc] border-slate-200 text-slate-700 rounded-tl-sm'
                       }`}>
-                        {msg.contenido}
+                        <div>{msg.contenido}</div>
                       </div>
                     </div>
                   ))}

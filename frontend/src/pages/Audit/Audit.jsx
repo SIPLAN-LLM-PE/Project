@@ -15,7 +15,7 @@ const NER_VALIDATION_FIELDS = [
   { key: 'menor', label: 'Nombre o iniciales del menor', multiline: false, helper: 'Usa iniciales si el documento está anonimizado.' },
   { key: 'dni_demandante', label: 'DNI de la demandante', multiline: false, helper: 'DNI adulto, no CUI del menor.' },
   { key: 'dni_demandado', label: 'DNI del demandado', multiline: false, helper: 'DNI adulto, no CUI del menor.' },
-  { key: 'monto_petitorio', label: 'Petitorio', multiline: false, helper: 'Monto principal solicitado por alimentos.' },
+  { key: 'monto_petitorio', label: 'Petitorio / monto referencial', multiline: false, helper: 'Monto solicitado por alimentos o monto referencial alimentario posterior.' },
   { key: 'ingreso_demandado', label: 'Ingreso del demandado', multiline: false, helper: 'Ingreso o remuneración base detectada.' },
   { key: 'fecha_presentacion_demanda', label: 'Presentación de demanda', multiline: false, helper: 'Fecha de ingreso o presentación de la demanda.' },
   { key: 'fecha_audiencia_unica', label: 'Audiencia única', multiline: false, helper: 'Fecha de audiencia única o acta de audiencia.' },
@@ -24,7 +24,20 @@ const NER_VALIDATION_FIELDS = [
 
 const NER_FIELD_LABELS = Object.fromEntries(NER_VALIDATION_FIELDS.map(field => [field.key, field.label]));
 
-const emptyNerEvaluation = () => Object.fromEntries(NER_VALIDATION_FIELDS.map(field => [field.key, null]));
+const emptyNerEvaluation = () => Object.fromEntries(
+  NER_VALIDATION_FIELDS.map(field => [field.key, { dato_detectado: null, campo_correcto: null }])
+);
+
+const emptyRagCase = () => ({
+  pregunta: '',
+  respuesta_esperada: '',
+  documento_esperado: '',
+  pagina_esperada: '',
+  posicion_fuente_correcta: 0,
+  respuesta_correcta: false,
+  cita_sustenta: false,
+  abstencion_correcta: false
+});
 
 const formatPercent = (value) => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
@@ -34,6 +47,41 @@ const formatPercent = (value) => {
 const formatMetric4 = (value) => {
   if (value === null || value === undefined || Number.isNaN(Number(value))) return '—';
   return Number(value).toFixed(4);
+};
+
+const buildRagDisplayMetrics = (rag = {}, casos = []) => {
+  const rows = Array.isArray(casos) ? casos : [];
+  if (!rows.length) return rag || {};
+
+  const total = rows.length;
+  const retrievableRows = rows.filter(item => !item.abstencion_correcta);
+  const retrievableTotal = retrievableRows.length;
+  const rankOf = (item) => Number(item?.posicion_fuente_correcta || 0);
+  const safeRatio = (num, den) => (den ? Number((num / den).toFixed(4)) : 0);
+
+  const recallAt5 = safeRatio(retrievableRows.filter(item => {
+    const rank = rankOf(item);
+    return rank > 0 && rank <= 5;
+  }).length, retrievableTotal);
+  const mrr = safeRatio(retrievableRows.reduce((acc, item) => {
+    const rank = rankOf(item);
+    return acc + (rank > 0 ? 1 / rank : 0);
+  }, 0), retrievableTotal);
+  const citationAccuracy = safeRatio(retrievableRows.filter(item => item.cita_sustenta).length, retrievableTotal);
+  const validResponse = safeRatio(rows.filter(item => item.respuesta_correcta || item.abstencion_correcta).length, total);
+  const unsupported = safeRatio(rows.filter(item => !item.cita_sustenta && !item.abstencion_correcta).length, total);
+  const abstention = safeRatio(rows.filter(item => item.abstencion_correcta).length, total);
+
+  return {
+    ...rag,
+    rag_retrievable_questions: retrievableTotal,
+    rag_recall_at_5: recallAt5,
+    rag_mrr: mrr,
+    rag_citation_accuracy: citationAccuracy,
+    rag_valid_response_accuracy: validResponse,
+    rag_unsupported_rate: unsupported,
+    rag_correct_abstention_rate: abstention
+  };
 };
 
 const getNerFieldClass = (value) => {
@@ -77,8 +125,10 @@ const Audit = () => {
   const [nerEvaluation, setNerEvaluation] = useState(emptyNerEvaluation());
   const [isValidationMetricsOpen, setIsValidationMetricsOpen] = useState(false);
   const [isNerDatasetOpen, setIsNerDatasetOpen] = useState(false);
+  const [isRagTraceOpen, setIsRagTraceOpen] = useState(false);
   const [nerDatasetScope, setNerDatasetScope] = useState('global');
   const [bertReference, setBertReference] = useState('');
+  const [ragCases, setRagCases] = useState([emptyRagCase()]);
   const [isValidatingMetrics, setIsValidatingMetrics] = useState(false);
   const [validationMessage, setValidationMessage] = useState('');
 
@@ -102,6 +152,8 @@ const Audit = () => {
   const nerScopeLabel = nerDatasetScope === 'expediente'
     ? (selectedValidationExp || 'expediente seleccionado')
     : 'dataset completo';
+  const ragTraceRows = validationMetrics?.rag?.casos || [];
+  const ragDisplayMetrics = buildRagDisplayMetrics(validationMetrics?.rag, ragTraceRows);
 
   // 2. Fetch para traer los datos del backend al cargar la página
   useEffect(() => {
@@ -177,6 +229,8 @@ const Audit = () => {
       ...evaluacionGuardada
     });
     setBertReference(validationMetrics?.bert?.resumen_referencia || '');
+    const casosRag = validationMetrics?.rag?.casos;
+    setRagCases(Array.isArray(casosRag) && casosRag.length ? casosRag : [emptyRagCase()]);
   }, [validationMetrics]);
 
   const formatExtractedValue = (value, fieldKey) => {
@@ -269,10 +323,14 @@ const Audit = () => {
   const handleValidarNER = async () => {
     if (!selectedValidationExp) return;
     const evaluacionCampos = Object.fromEntries(
-      Object.entries(nerEvaluation).filter(([, value]) => value === true || value === false)
+      Object.entries(nerEvaluation).filter(([, value]) => (
+        value &&
+        (value.dato_detectado === true || value.dato_detectado === false ||
+         value.campo_correcto === true || value.campo_correcto === false)
+      ))
     );
     if (!Object.keys(evaluacionCampos).length) {
-      setValidationMessage('Marca al menos un campo NER como correcto o incorrecto.');
+      setValidationMessage('Marca al menos un campo NER en dato detectado o campo correcto.');
       return;
     }
     setIsValidatingMetrics(true);
@@ -289,7 +347,7 @@ const Audit = () => {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'No se pudo validar NER.');
-      setValidationMessage(`NER validado: F1 ${formatMetric4(data.ner.ner_f1)} · precision ${formatMetric4(data.ner.ner_precision)} · recall ${formatMetric4(data.ner.ner_recall)}`);
+      setValidationMessage(`NER validado: detección ${formatMetric4(data.ner.ner_detection_accuracy ?? data.ner.ner_precision)} · asignación ${formatMetric4(data.ner.ner_assignment_accuracy ?? data.ner.ner_recall)} · integral ${formatMetric4(data.ner.ner_integral_accuracy ?? data.ner.ner_f1)}`);
       await refrescarValidacionActual();
     } catch (error) {
       setValidationMessage(error.message);
@@ -318,6 +376,78 @@ const Audit = () => {
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || 'No se pudo validar BERTScore.');
       setValidationMessage(`BERTScore validado: F1 ${data.bert.bert_f1} · precision ${data.bert.bert_precision} · recall ${data.bert.bert_recall}`);
+      await refrescarValidacionActual();
+    } catch (error) {
+      setValidationMessage(error.message);
+    } finally {
+      setIsValidatingMetrics(false);
+    }
+  };
+
+  const updateRagCase = (index, field, value) => {
+    setRagCases(prev => prev.map((item, idx) => (
+      idx === index ? { ...item, [field]: value } : item
+    )));
+  };
+
+  const addRagCase = () => {
+    setRagCases(prev => [...prev, emptyRagCase()]);
+  };
+
+  const removeRagCase = (index) => {
+    setRagCases(prev => prev.length <= 1 ? [emptyRagCase()] : prev.filter((_, idx) => idx !== index));
+  };
+
+  const handleValidarRAG = async () => {
+    if (!selectedValidationExp) return;
+    const casos = ragCases
+      .map(item => ({
+        ...item,
+        posicion_fuente_correcta: Number(item.posicion_fuente_correcta || 0)
+      }))
+      .filter(item => item.pregunta.trim());
+    if (!casos.length) {
+      setValidationMessage('Registra al menos una pregunta RAG para validar.');
+      return;
+    }
+    setIsValidatingMetrics(true);
+    setValidationMessage('');
+    try {
+      const res = await fetch('/api/v1/validation-metrics/rag', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+        body: JSON.stringify({
+          numero_expediente: selectedValidationExp,
+          usuario: usuarioActivo.username || usuarioActivo.nombre || 'Usuario SIGEJA',
+          casos
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'No se pudo validar RAG.');
+      setValidationMessage(`RAG validado: Recall@5 ${formatMetric4(data.rag.rag_recall_at_5)} · MRR ${formatMetric4(data.rag.rag_mrr)} · citas ${formatMetric4(data.rag.rag_citation_accuracy)}`);
+      await refrescarValidacionActual();
+    } catch (error) {
+      setValidationMessage(error.message);
+    } finally {
+      setIsValidatingMetrics(false);
+    }
+  };
+
+  const handleResetRAG = async () => {
+    if (!selectedValidationExp) return;
+    const confirmar = window.confirm('¿Resetear solo las preguntas y métricas RAG de este expediente? OCR, NER y BERTScore se conservarán.');
+    if (!confirmar) return;
+    setIsValidatingMetrics(true);
+    setValidationMessage('');
+    try {
+      const res = await fetch(`/api/v1/validation-metrics/${encodeURIComponent(selectedValidationExp)}/rag/reset`, {
+        method: 'POST',
+        headers: getAuthHeaders()
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || 'No se pudo resetear RAG.');
+      setValidationMessage('Trazabilidad y métricas RAG reiniciadas para el expediente seleccionado.');
+      setIsRagTraceOpen(false);
       await refrescarValidacionActual();
     } catch (error) {
       setValidationMessage(error.message);
@@ -603,7 +733,7 @@ const Audit = () => {
                   </div>
                 </div>
 
-              <div className="p-6 grid grid-cols-1 xl:grid-cols-3 gap-5">
+              <div className="p-6 grid grid-cols-1 xl:grid-cols-2 2xl:grid-cols-4 gap-5">
                 <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
                   <h5 className="text-sm font-black text-[#1a3059] mb-1">Texto Accuracy</h5>
                   <p className="text-[11px] text-slate-500 mb-4">Carga un TXT corregido manualmente para comparar contra el texto extraído por el sistema (PyPDF2/pdfplumber/Tesseract) y calcular CER.</p>
@@ -631,9 +761,9 @@ const Audit = () => {
 
                 <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
                   <div className="mb-2">
-                    <h5 className="text-sm font-black text-[#1a3059] mb-1">NER Precision / Recall / F1</h5>
+                    <h5 className="text-sm font-black text-[#1a3059] mb-1">NER por campos críticos</h5>
                     <p className="text-[11px] text-slate-500">
-                      Marca con check si la entidad extraída es correcta o con equis si requiere corrección.
+                      Marca si el dato existe en el expediente y si está asignado al campo jurídico correcto.
                     </p>
                   </div>
 
@@ -662,35 +792,55 @@ const Audit = () => {
                                     </pre>
                                   </td>
                                   <td className="px-3 py-3">
-                                    <div className="flex items-center justify-center gap-2">
-                                      <button
-                                        type="button"
-                                        title="La entidad extraída es correcta"
-                                        onClick={() => setNerEvaluation(prev => ({ ...prev, [field.key]: true }))}
-                                        className={`h-9 w-9 rounded-lg border flex items-center justify-center transition-colors ${
-                                          nerEvaluation[field.key] === true
-                                            ? 'border-emerald-300 bg-emerald-100 text-emerald-700'
-                                            : 'border-slate-200 bg-white text-slate-400 hover:border-emerald-200 hover:text-emerald-600'
-                                        }`}
-                                      >
-                                        <Check size={16} />
-                                      </button>
-                                      <button
-                                        type="button"
-                                        title="La entidad extraída es incorrecta"
-                                        onClick={() => setNerEvaluation(prev => ({ ...prev, [field.key]: false }))}
-                                        className={`h-9 w-9 rounded-lg border flex items-center justify-center transition-colors ${
-                                          nerEvaluation[field.key] === false
-                                            ? 'border-rose-300 bg-rose-100 text-rose-700'
-                                            : 'border-slate-200 bg-white text-slate-400 hover:border-rose-200 hover:text-rose-600'
-                                        }`}
-                                      >
-                                        <X size={16} />
-                                      </button>
+                                    <div className="space-y-2">
+                                      {[
+                                        ['dato_detectado', 'Dato existe'],
+                                        ['campo_correcto', 'Campo correcto']
+                                      ].map(([metricKey, label]) => (
+                                        <div key={metricKey}>
+                                          <p className="mb-1 text-center text-[9px] font-black uppercase tracking-widest text-slate-400">{label}</p>
+                                          <div className="flex justify-center gap-2">
+                                            <button
+                                              type="button"
+                                              title={metricKey === 'dato_detectado' ? 'El dato extraído existe en el expediente' : 'El dato pertenece al campo evaluado'}
+                                              onClick={() => setNerEvaluation(prev => ({
+                                                ...prev,
+                                                [field.key]: { ...(prev[field.key] || {}), [metricKey]: true }
+                                              }))}
+                                              className={`h-8 w-8 rounded-lg border flex items-center justify-center transition-colors ${
+                                                nerEvaluation[field.key]?.[metricKey] === true
+                                                  ? 'border-emerald-300 bg-emerald-100 text-emerald-700'
+                                                  : 'border-slate-200 bg-white text-slate-400 hover:border-emerald-200 hover:text-emerald-600'
+                                              }`}
+                                            >
+                                              <Check size={15} />
+                                            </button>
+                                            <button
+                                              type="button"
+                                              title={metricKey === 'dato_detectado' ? 'El dato no existe o no corresponde al expediente' : 'El dato existe pero no pertenece a este campo'}
+                                              onClick={() => setNerEvaluation(prev => ({
+                                                ...prev,
+                                                [field.key]: { ...(prev[field.key] || {}), [metricKey]: false }
+                                              }))}
+                                              className={`h-8 w-8 rounded-lg border flex items-center justify-center transition-colors ${
+                                                nerEvaluation[field.key]?.[metricKey] === false
+                                                  ? 'border-rose-300 bg-rose-100 text-rose-700'
+                                                  : 'border-slate-200 bg-white text-slate-400 hover:border-rose-200 hover:text-rose-600'
+                                              }`}
+                                            >
+                                              <X size={15} />
+                                            </button>
+                                          </div>
+                                        </div>
+                                      ))}
+                                      <p className="mt-1 text-center text-[10px] font-bold text-slate-400">
+                                        {nerEvaluation[field.key]?.dato_detectado === true && nerEvaluation[field.key]?.campo_correcto === true
+                                          ? 'Integral correcto'
+                                          : nerEvaluation[field.key]?.dato_detectado === null && nerEvaluation[field.key]?.campo_correcto === null
+                                            ? 'Sin evaluar'
+                                            : 'Evaluación parcial'}
+                                      </p>
                                     </div>
-                                    <p className="mt-1 text-center text-[10px] font-bold text-slate-400">
-                                      {nerEvaluation[field.key] === true ? 'Correcto' : nerEvaluation[field.key] === false ? 'Incorrecto' : 'Sin evaluar'}
-                                    </p>
                                   </td>
                                 </tr>
                               );
@@ -754,6 +904,114 @@ const Audit = () => {
                     </div>
                   </div>
                 </div>
+
+                <div className="border border-slate-200 rounded-xl p-4 bg-slate-50/50">
+                  <h5 className="text-sm font-black text-[#1a3059] mb-1">RAG / Evidencia</h5>
+                  <p className="text-[11px] text-slate-500 mb-3">
+                    La validación RAG se registra desde el chat IA de cada expediente. Haz una pregunta, revisa la respuesta y confirma si la evidencia mostrada la sustenta.
+                  </p>
+                  <div className="rounded-xl border border-indigo-100 bg-white p-4">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-indigo-600">Flujo de evaluación</p>
+                    <ol className="mt-3 space-y-2 text-[11px] font-semibold leading-relaxed text-slate-600">
+                      <li>1. Abre un expediente en Análisis IA.</li>
+                      <li>2. Formula una pregunta en el chat contextual.</li>
+                      <li>3. El sistema mostrará la respuesta y las evidencias recuperadas.</li>
+                      <li>4. Marca si la respuesta es correcta, si la cita sustenta o si corresponde abstención correcta.</li>
+                    </ol>
+                  </div>
+                  <div className="mt-4 grid grid-cols-2 xl:grid-cols-3 gap-2 text-center text-xs">
+                    <div className="rounded-lg bg-white border border-slate-200 p-2">
+                      <p className="text-[10px] text-slate-400 font-bold">R@5</p>
+                      <p className="font-black text-indigo-600">{formatMetric4(ragDisplayMetrics?.rag_recall_at_5)}</p>
+                    </div>
+                    <div className="rounded-lg bg-white border border-slate-200 p-2">
+                      <p className="text-[10px] text-slate-400 font-bold">MRR</p>
+                      <p className="font-black text-indigo-600">{formatMetric4(ragDisplayMetrics?.rag_mrr)}</p>
+                    </div>
+                    <div className="rounded-lg bg-white border border-slate-200 p-2">
+                      <p className="text-[10px] text-slate-400 font-bold">Citas</p>
+                      <p className="font-black text-indigo-600">{formatMetric4(ragDisplayMetrics?.rag_citation_accuracy)}</p>
+                    </div>
+                    <div className="rounded-lg bg-white border border-slate-200 p-2">
+                      <p className="text-[10px] text-slate-400 font-bold">Correctas</p>
+                      <p className="font-black text-emerald-600">{formatMetric4(ragDisplayMetrics?.rag_valid_response_accuracy ?? ((ragDisplayMetrics?.rag_answer_accuracy || 0) + (ragDisplayMetrics?.rag_correct_abstention_rate || 0)))}</p>
+                    </div>
+                    <div className="rounded-lg bg-white border border-slate-200 p-2">
+                      <p className="text-[10px] text-slate-400 font-bold">Unsupported</p>
+                      <p className="font-black text-rose-500">{formatMetric4(ragDisplayMetrics?.rag_unsupported_rate)}</p>
+                    </div>
+                    <div className="rounded-lg bg-white border border-slate-200 p-2">
+                      <p className="text-[10px] text-slate-400 font-bold">Abstención</p>
+                      <p className="font-black text-blue-600">{formatMetric4(ragDisplayMetrics?.rag_correct_abstention_rate)}</p>
+                    </div>
+                  </div>
+                  <div className="mt-4 rounded-xl border border-slate-200 bg-white">
+                    <button
+                      type="button"
+                      onClick={() => setIsRagTraceOpen(prev => !prev)}
+                      className="flex w-full items-center justify-between gap-3 px-3 py-3 text-left"
+                    >
+                      <span>
+                        <span className="block text-[10px] font-black uppercase tracking-widest text-slate-500">
+                          Trazabilidad de preguntas
+                        </span>
+                        <span className="block text-[11px] font-semibold text-slate-400">
+                          {ragTraceRows.length} pregunta(s) RAG guardadas
+                        </span>
+                      </span>
+                      <ChevronDown size={15} className={`text-slate-400 transition-transform ${isRagTraceOpen ? 'rotate-180' : ''}`} />
+                    </button>
+                    {isRagTraceOpen && (
+                      <div className="max-h-[260px] overflow-auto border-t border-slate-100">
+                        {ragTraceRows.length ? (
+                          <div className="divide-y divide-slate-100">
+                            {ragTraceRows.map((item, idx) => {
+                              const estado = item.abstencion_correcta
+                                ? 'Abstención correcta'
+                                : item.respuesta_correcta
+                                  ? 'Respuesta correcta'
+                                  : 'Respuesta incorrecta';
+                              return (
+                                <div key={`${idx}-${item.pregunta}`} className="px-3 py-3 text-[11px]">
+                                  <div className="mb-1 flex items-center justify-between gap-2">
+                                    <span className="font-black text-[#1a3059]">Pregunta {idx + 1}</span>
+                                    <span className={`rounded-full px-2 py-0.5 text-[9px] font-black ${
+                                      item.abstencion_correcta
+                                        ? 'bg-blue-50 text-blue-600'
+                                        : item.respuesta_correcta
+                                          ? 'bg-emerald-50 text-emerald-600'
+                                          : 'bg-rose-50 text-rose-600'
+                                    }`}>
+                                      {estado}
+                                    </span>
+                                  </div>
+                                  <p className="font-semibold text-slate-700">{item.pregunta || 'Pregunta no registrada'}</p>
+                                  <p className="mt-1 text-slate-500">
+                                    Fuente: <span className="font-bold">{item.documento_esperado || 'No ubicada'}</span>
+                                    {item.pagina_esperada ? ` · pág. ${item.pagina_esperada}` : ''}
+                                    {item.posicion_fuente_correcta ? ` · rank #${item.posicion_fuente_correcta}` : ' · sin fuente correcta'}
+                                  </p>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="px-3 py-4 text-[11px] font-bold text-slate-400">
+                            Aún no hay preguntas RAG guardadas para este expediente.
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleResetRAG}
+                    disabled={!selectedValidationExp || isValidatingMetrics || !ragTraceRows.length}
+                    className="mt-3 w-full rounded-lg border border-rose-100 bg-rose-50 px-4 py-2 text-xs font-black text-rose-600 hover:bg-rose-100 disabled:opacity-50"
+                  >
+                    Resetear solo resultados RAG
+                  </button>
+                </div>
               </div>
 
               <div className="px-6 pb-6">
@@ -770,10 +1028,13 @@ const Audit = () => {
                         {validationSummary?.global?.total || 0} expediente(s) con métricas manuales guardadas.
                       </p>
                     </div>
-                    <div className="grid grid-cols-3 gap-2 text-[11px] font-black">
+                    <div className="grid grid-cols-2 xl:grid-cols-6 gap-2 text-[11px] font-black">
                       <span className="rounded bg-white border border-slate-200 px-3 py-1">Texto {validationSummary?.global?.ocr_accuracy ?? '—'}%</span>
                       <span className="rounded bg-white border border-slate-200 px-3 py-1">NER F1 {formatMetric4(validationSummary?.global?.ner_f1)}</span>
                       <span className="rounded bg-white border border-slate-200 px-3 py-1">BERT F1 {formatMetric4(validationSummary?.global?.bert_f1)}</span>
+                      <span className="rounded bg-white border border-slate-200 px-3 py-1">RAG R@5 {formatMetric4(validationSummary?.global?.rag_recall_at_5)}</span>
+                      <span className="rounded bg-white border border-slate-200 px-3 py-1">RAG MRR {formatMetric4(validationSummary?.global?.rag_mrr)}</span>
+                      <span className="rounded bg-white border border-slate-200 px-3 py-1">RAG Correctas {formatMetric4(validationSummary?.global?.rag_valid_response_accuracy ?? ((validationSummary?.global?.rag_answer_accuracy || 0) + (validationSummary?.global?.rag_correct_abstention_rate || 0)))}</span>
                     </div>
                   </div>
                   <div className="overflow-x-auto">
@@ -870,6 +1131,8 @@ const Audit = () => {
                           <th className="px-4 py-3 text-right">Texto Accuracy</th>
                           <th className="px-4 py-3 text-right">NER F1</th>
                           <th className="px-4 py-3 text-right">BERT F1</th>
+                          <th className="px-4 py-3 text-right">RAG R@5</th>
+                          <th className="px-4 py-3 text-right">RAG MRR</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
@@ -880,6 +1143,8 @@ const Audit = () => {
                             <td className="px-4 py-3 text-right font-black text-amber-500">{item.ocr_accuracy != null ? `${item.ocr_accuracy}%` : '—'}</td>
                             <td className="px-4 py-3 text-right font-black text-blue-600">{formatMetric4(item.ner_f1)}</td>
                             <td className="px-4 py-3 text-right font-black text-rose-500">{formatMetric4(item.bert_f1)}</td>
+                            <td className="px-4 py-3 text-right font-black text-indigo-600">{formatMetric4(item.rag_recall_at_5)}</td>
+                            <td className="px-4 py-3 text-right font-black text-indigo-600">{formatMetric4(item.rag_mrr)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -1225,3 +1490,5 @@ const Audit = () => {
 };
 
 export default Audit;
+
+

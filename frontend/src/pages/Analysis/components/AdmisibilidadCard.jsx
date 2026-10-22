@@ -39,7 +39,7 @@ export const AdmisibilidadCard = ({ data, onJumpToSource, onExportPdf }) => {
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="p-4 border-b border-slate-100 bg-slate-50/50">
           <p className="text-[10px] text-slate-500 font-medium leading-relaxed">
-            La IA ha verificado la mención de los siguientes anexos obligatorios según el Art. 424 y 425 del CPC:
+            Menciones detectadas en el texto extraído. Una mención no acredita que el anexo esté incorporado al expediente.
           </p>
         </div>
 
@@ -62,12 +62,12 @@ export const AdmisibilidadCard = ({ data, onJumpToSource, onExportPdf }) => {
                 {item.estado === "encontrado" ? (
                   <>
                     <CheckCircle2 size={12} />
-                    CONFORME
+                    MENCIÓN
                   </>
                 ) : (
                   <>
                     <XCircle size={12} />
-                    FALTA
+                    SIN MENCIÓN
                   </>
                 )}
               </div>
@@ -75,11 +75,14 @@ export const AdmisibilidadCard = ({ data, onJumpToSource, onExportPdf }) => {
           ))}
         </div>
 
-        {/* Footer de decisión sugerida */}
-        <div className="p-4 bg-emerald-50/30">
-          <div className="flex items-center gap-2 text-emerald-800">
-            <CheckCircle2 size={14} />
-            <span className="text-[11px] font-bold">Sugerencia IA: ADMISIBLE</span>
+        <div className="p-4 bg-slate-50">
+          <div className="flex items-center gap-2 text-slate-600">
+            <ClipboardCheck size={14} />
+            <span className="text-[11px] font-bold">
+              {data.some((item) => item.estado !== "encontrado")
+                ? "Revisión documental pendiente"
+                : "Menciones detectadas; verificar anexos"}
+            </span>
           </div>
         </div>
       </div>
