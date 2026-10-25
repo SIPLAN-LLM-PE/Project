@@ -1,5 +1,6 @@
 import React from 'react';
 import { X, Scale, Calculator, AlertTriangle, Landmark, Gavel } from 'lucide-react';
+import { EstadoVerificacion } from './EstadoVerificacion';
 
 export const CapacidadDetalleDrawer = ({ isOpen, onClose, data }) => {
   if (!data) return null;
@@ -51,7 +52,10 @@ export const CapacidadDetalleDrawer = ({ isOpen, onClose, data }) => {
               <div className="flex gap-3 items-start">
                 <Gavel className="text-emerald-600 mt-1" size={18} />
                 <div className="flex-1">
-                  <h4 className="text-emerald-900 font-bold text-xs uppercase mb-1">Pensión Ya Ordenada por Sentencia</h4>
+                  <div className="flex items-center justify-between gap-2 mb-1">
+                    <h4 className="text-emerald-900 font-bold text-xs uppercase">Pensión Ya Ordenada por Sentencia</h4>
+                    <EstadoVerificacion verificacion={data.verificacion?.pension} />
+                  </div>
                   <p className="text-emerald-800 text-sm font-black">
                     {pensionOrdenada.tipo === "porcentaje"
                       ? `${pensionOrdenada.valor}% de los ingresos mensuales`

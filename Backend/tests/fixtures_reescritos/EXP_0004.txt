@@ -1,0 +1,216 @@
+--- [DOCUMENTO 1: scan_001.pdf] ---
+REGLAMENTO: Mantener exactamente todos los hechos y datos (nombres, DNI, domicilios, fechas, montos, cargas, empresa, plazos).
+Copia las fechas y los montos tal cual aparecen en el original, sin cambiar su formato. No agregue datos nuevos ni quite ninguno. Siempre en español (nunca en inglés). Devuelve solo el texto del documento reescrito, sin comentarios.
+
+DOCUMENTO REESCRITO:
+EXPEDIENTE: 0004-2026-0-0701-JP-FC-03 - INDICE DEL EXPEDIENTE
+---------------------------------------------------------------
+
+**EXPEDIENTE N.° 0004-2026-0-0701-JP-FC-03**
+-------------------------------------------
+
+INDICE DEL EXPEDIENTE
+----------------------
+
+Expediente Hipotético - Sin Valor Jurídico
+Advertencia de Anonimización: Todos los nombres, DNI, CUI, domicilios, teléfonos, correos, casillas, empresas, montos y demás datos de este documento son enteramente ficticios. El menor se identifica solo mediante iniciales y CUI parcialmente ocultado.
+El presente índice relaciona los documentos que conforman este expediente hipotético. Todos los archivos pertenecen al mismo número de expediente y carecen de valor jurídico.
+Orden Documento Fecha Descripción
+----------------------------------
+01 Demanda de alimentos 04 de mayo De solicitud, hechos, derecho, pruebas probatorias y anexos.
+02 Resolución de admisión 06 de mayo Acepta demanda, trata de traslado y programa audiencia.
+03 Notificación al demandado 08 de mayo Certificado y constancia ficticia de entrega.
+04 Respuesta 15 de mayo Reconoce obligación, declara ingresos/cargas y ofrece contrapropuesta.
+05 Acta de audiencia única 08 de junio Puntos controvertidos, prueba y conciliación fallida.
+06 Sentencia 15 de junio Establece pensión mensual de S/. 800.00.
+07 Oficio de retención 03 de julio Orden simulada de retención para etapa de ejecución.
+---------------------------------------------------------------
+**EXPEDIENTE HIPOTÉTICO - SIN VALOR JURídICO PÁGINA 1**
+
+--- [DOCUMENTO 2: scan_002.pdf] ---
+EXPEDIENTE: 0004-2026-0-0701-JP-FC-03 DEMANDA DE ALIMENTOS
+
+EXPEDIENTE N° 0004-2026-0-0701-JP-FC-03
+DEMANDA DE ALIMENTOS (EXPEDIENTE SIMULADO - SIN VALOR LEGAL)
+
+AVISO DE ANONIMIZACIÓN: Todos los nombres, DNI, CUI, domicilios, teléfonos, correos, casillas, empresas, montos y demás datos de este documento son enteramente ficticios. El menor se identifica solo mediante iniciales y CUI parcialmente enmascarado.
+
+SEÑOR JUEZ DEL JUZGADO DE PAZ LETRADO DE FAMILIA - SEDE ACADÉMICA FICTICIA DEL CALLAO:
+
+En representación del menor alimentista S.C.V.P., con CUI/DNI parcialmente anonimizado N.° 77**15**8, yo, Camila Alejandra Vega Ramos, identificada con DNI ficticio N.° 75492168, interpongo demanda de alimentos contra Renato Gabriel Ponce Alarcón, identificado con DNI ficticio N.° 71963854.
+
+I. DATOS DE CONTACTO Y DOMICILIOS
+- Domicilio real de la demandante: Av. Jardines del Sur 1185, torre B, dpto. 503, distrito ficticio Villa Portuaria, Callao. Domicilio procesal: Calle Litigio Académico 94, oficina 301, distrito ficticio Villa Portuaria, Callao. Casilla electrónica ficticia: CE-FICT-260441. Correo: camila.vega@ejemplo.invalid. Teléfono ficticio: 902 713 548.
+- Domicilio real del demandado: Mz. H, lote 4, Cooperativa Vista Marina, distrito ficticio Villa Portuaria, Callao. Domicilio laboral declarado/referenciado: Av. Innovación Portuaria 2250, Edificio Ficticio 3, Callao. Empleador o actividad económica: Tecnologías Portuarias Andinas S.A.C..
+
+II. PETITORIO
+Solicito que se imponga a favor del menor S.C.V.P. una pensión alimenticia mensual de S/. 1100.00, pagadera por adelantado dentro de los primeros cinco días de cada mes, además de los gastos extraordinarios que corresponden conforme a evaluación judicial.
+
+III. FUNDAMENTOS DE HECHO
+1. El menor alimentista presenta necesidades ordinarias de alimentación, vivienda, educación, movilidad, vestido, salud preventiva, útiles y actividades formativas, estimadas mensualmente en aproximadamente S/. 1760.00.
+2. Dentro del cuadro de necesidades se han individualizado alimentación atribuible al menor por S/. 360.00 y educación y útiles por S/. 240.00. Otros conceptos constan descritos pero no todos cuentan con comprobante individualizado o monto cerrado.
+3. Según información de carácter ficticio aportada para esta prueba, el demandado percibiría aproximadamente S/. 2480.00 netos mensuales. Su fuente económica principal se vincula con Tecnologías Portuarias Andinas S.A.C..
+4. La parte accionante refiere que el obligado ha efectuado transferencias parciales e irregulares. Asimismo, se deja constancia de la siguiente inconsistencia controlada para auditoría: El demandado declara un gasto de alquiler de S/. 620.00, pero su ficha laboral ficticia consigna un beneficio de vivenda de S/. 300.00 mensuales.
+
+IV. FUNDAMENTOS DE DERECHO
+La pretensión se formula tomando como referencia las reglas generales del Código Civil peruano sobre alimentos, el interés superior del niño y las disposiciones procesales aplicables a las demandas de alimentos. Toda cita tiene finalidad exclusivamente didáctica y no constituye asesoría legal.
+
+V. MEDIOS PROBATORIOS
+Se ofrecen como medios de prueba simulados: documento de identidad de la demandante; constancia ficticia del vínculo familiar; cuadro de necesidades mensuales; constancias ficticias de educación y salud; impresión simulada de transferencias y comunicaciones; y ficha referencial del empleador o actividad económica del demandado.
+
+VI. ANEXOS
+1-A DNI ficticio de la demandante. 1-B Constancia ficticia de vínculo familiar. 1-C Cuadro de necesidades del alimentista. 1-D Constancias simuladas de educación y salud. 1-E Transferencias y comunicaciones ficticias. 1-F Ficha referencial de la fuente de ingresos del obligado.
+
+Callao ficticio, 04 de mayo de 2026
+Camila Alejandra Vega Ramos - Parte demandante
+
+--- [DOCUMENTO 3: scan_003.pdf] ---
+DOCUMENTO REESCRITO:
+
+EXPEDIENTE: EXP-0004-2026-0701-JP-FC-03 - RESOLUCIÓN DE ADMISIÓN
+
+RESOLUCIÓN DE ADMISIÓN N.° 01
+Lugar ficticio: Callao, 06 de mayo de 2026
+
+VISTOS: El reclamo por alimentos y sus anexos simulados, y CONSIDERANDO:
+
+PRIMERO.- Que la pretensión ha sido presentada por quien se declara como representante del menor alimentista y contiene la identificación de las partes, petición económica, hechos, domicilios y anexos básicos suficientes para esta simulación académica.
+SEGUNDO.- Que, sin tomar posición en cuanto al fondo, es adecuado admitir el procesamiento de la demanda e impartir traslado al demandante para que ejerza su derecho de contradicción.
+
+SE RESUELVE:
+1. ADMITIR al procesamiento, mediante la vía apropiada para esta simulación, del reclamo por alimentos.
+2. ENTREGAR TRASLADO al demandante durante un plazo ficticio de cinco (5) días laborables contados a partir del día laborable siguiente a la notificación válida, con el fin de que responda y presente la documentación económica pertinente.
+3. ACEPTAR los medios probatorios descritos, sin perjuicio de su evaluación en la etapa correspondiente.
+4. PROGRAMAR audiencia única tentativamente para el 08 de junio de 2026, sujeta a verificación de notificaciones y agenda simulada.
+5. REQUERIR que cualquier documento económico adicional sea presentado con una identificación clara de origen y período. En caso de omisiones formales menores, se otorgue la oportunidad de subsanación conforme a los criterios procesales de esta prueba.
+
+Notifíquese. Documento elaborado exclusivamente para pruebas académicas.
+
+EXPEDIENTE SIMULADO - SIN VALOR LEGAL Página 1
+
+--- [DOCUMENTO 4: scan_004.pdf] ---
+EXPEDIENTE SIMULADO: NOTIFICACIÓN AL RECLAMANTE
+NÚMERO DE EXPEDIENTE: 0004-2026-0-0701-JP-FC-03
+CÉDULA DE NOTIFICACIÓN AL RECLAMANTE
+EXPEDIENTE SIMULADO - SIN VALOR LEGAL
+Advertencia de anonimización: Todos los nombres, DNI, CUI, domicilios, teléfonos, correos, casillas, empresas,
+montos y demás datos de este documento son enteramente ficticios. El menor se identifica solo mediante iniciales y
+CUI parcialmente enmascarado.
+Fecha de emisión: 08 de mayo de 2026
+Destinatario: Renato Gabriel Ponce Alarcón (DNI ficticio: 71963854)
+Domicilio de notificación: Mz. H, lote 4, Cooperativa Vista Marina, distrito ficticio Villa Portuaria, Callao
+Acto notificado: Resolución N.° 01 - admisión de demanda y traslado
+Plazo indicado: 5 días hábiles para contestar
+Se deja constancia ficticia de que el 08 de mayo de 2026 se hizo entrega de copia de la resolución admisoria y de la demanda en el domicilio consignado. El cómputo del plazo se inicia el día hábil siguiente a la notificación.
+Advertencia: La presente cédula no proviene de un órgano jurisdiccional real, carece de código de barras oficial, firma digital, sello o validez jurídica.
+CONSTANCIA DE ENTREGA SIMULADA: recibida por persona adulta en el domicilio indicado, quien manifestó relación con el destinatario. Sin verificación de identidad real.
+EXPEDIENTE SIMULADO - SIN VALOR LEGAL Página 1
+
+--- [DOCUMENTO 5: scan_005.pdf] ---
+EXPEDIENTE: 0004-2026-0-0701-JP-FC-03 - RESPUESTA A LA RECLAMACIÓN
+EXPEDIENTE N°: 0004-2026-0-0701-JP-FC-03
+RESPUESTA A LA RECLAMACIÓN
+EXPEDIENTE HIPOTÉTICO - SIN VALOR JURídICO
+Advertencia de anonimización: Todos los nombres, DNI, CUI, domicilios, teléfonos, correos, casillas, empresas,
+montos y demás datos de este documento son enteramente ficticios. El menor se identifica solo mediante iniciales y
+CUI parcialmente enmascarado.
+SEÑOR JUEZ DEL TRIBUNAL DE PACIFICACIÓN Y RECONCILIACIÓN FAMILIAR - SUCURSAL LETRADA DE LA CALLAO:
+Yo, Renato Gabriel Ponce Alarcón, DNI ficticio N.° 71963854, dentro del plazo estipulado, respondo a la reclamación interpuesta por Camila Alejandra Vega Ramos.
+I. POSICIÓN RELATIVA A LA RECLAMACIÓN
+Reconozco mi obligación de apoyar al menor S.C.V.P.; sin embargo, rechazo parcialmente el monto solicitado de S/. 1100.00 por considerar que sobrepasa mis ingresos mensuales conforme a los recursos y cargas que declaro.
+II. INGRESOS Y ACTIVIDAD ECONÓMICA
+Declaro un ingreso mensual neto aproximado de S/. 2480.00. Mi empleador o actividad principal es Tecnologías Portuarias Andinas S.A.C., con domicilio laboral en Av. Innovación Portuaria 2250, Edificio Ficticio 3, Callao.
+La remuneración bruta referencial consignada en la documentación ficticia asciende a S/. 3150.00, sujeta a descuentos y conceptos variables.
+III. CARGAS Y GASTOS
+Declaro como carga familiar adicional: pensión voluntaria para otro hijo menor, acreditada solo parcialmente, a la cual destino aproximadamente S/. 320.00 mensuales. También asumo alimentación, transporte, vivienda, telefonía y obligaciones de consumo.
+Para fines de auditoría del sistema se mantiene deliberadamente la siguiente tensión documental: El demandado declara un gasto de alquiler de S/. 620.00, pero su ficha laboral ficticia consigna un beneficio de vivienda de S/. 300.00 mensuales.
+IV. PROPUESTA
+Ofrezco abonar una pensión regular mensual de S/. 600.00, pagadera dentro de los primeros cinco días de cada mes por el mecanismo que se establezca en esta hipotética.
+V. MEDIOS PROBATORIOS
+Boletas o constancias de ingreso ficticias, relación de gastos personales, referencia de la carga familiar declarada y ficha de la actividad laboral o económica.
+Callao ficticio, 15 de mayo de 2026
+Renato Gabriel Ponce Alarcón - Parte demandada
+EXPEDIENTE HIPOTÉTICO - SIN VALOR JURídICO Página 1
+
+--- [DOCUMENTO 6: scan_006.pdf] ---
+EXPEDIENTE: 0004-2026-0-0701-JP-FC-03 ACTA DE AUDIENCIA ÚNICA
+EXPEDIENTE N.° 0004-2026-0-0701-JP-FC-03
+ACTA DE AUDIENCIA ÚNICA
+EXPEDIENTE SIMULADO - SIN VALOR LEGAL
+Advertencia de anonimización: Todos los nombres, DNI, CUI, domicilios, teléfonos, correos, casillas, empresas,
+montos y demás datos de este documento son enteramente ficticios. El menor se identifica solo mediante iniciales y
+CUI parcialmente enmascarado.
+En la sede académica ficticia, siendo las 10:00 horas del 08 de junio de 2026, se instala la audiencia
+única del expediente 0004-2026-0-0701-JP-FC-03.
+ASISTENCIA: Comparecen la demandante y el demandado, ambos identificados únicamente con datos
+ficticios para esta prueba. Se deja constancia de la representación del menor alimentista mediante
+iniciales.
+I. SANEAMIENTO Y PUNTOS CONTROVERTIDOS
+Se tienen como cuestiones a resolver: (a) las necesidades económicas del alimentista; (b) la capacidad
+contributiva real del obligado; (c) la incidencia de las cargas familiares declaradas; y (d) el monto
+proporcional de la pensión.
+II. MEDIOS PROBATORIOS
+Se admiten, para esta simulación, la relación de gastos presentada por la progenitora; constancias
+educativas y de salud ficticias; transferencias parciales previas; documentación de ingresos del
+obligado y referencias a sus cargas familiares.
+III. DECLARACIONES RELEVANTES
+La demandante manifiesta que, con finalidad conciliatoria, reduciría su propuesta a S/. 950.00
+mensuales. El demandado incrementa su ofrecimiento a S/. 680.00 mensuales.
+El demandado reconoce la obligación alimentaria y ratifica un ingreso neto referencial de S/. 2480.00,
+además de la carga declarada consistente en pensión voluntaria para otro hijo menor, acreditada solo
+parcialmente por S/. 320.00 mensuales.
+IV. CONCILIACIÓN
+No se alcanza acuerdo total respecto del monto de pensión. Las partes manifiestan que cualquier pago
+deberá efectuarse por depósito bancario o mecanismo equivalente habilitado para la prueba y que los
+gastos extraordinarios de salud debidamente acreditados serán comunicados entre ellas.
+V. CIERRE
+Concluida la actuación, queda la causa expedita para decisión dentro de la simulación académica.
+EXPEDIENTE SIMULADO - SIN VALOR LEGAL Página 1
+
+--- [DOCUMENTO 7: scan_007.pdf] ---
+EXPEDIENTE: 0004-2026-0-0701-JP-FC-03 - JUDICIAL CARE CASE
+EXPEDIENTE N.º 0004-2026-0-0701-JP-FC-03
+DECISION
+SIMULATED EXPEDIENT WITH NO LEGAL VALUE
+Advertencia de anonimización: Todos los nombres, DNI, CUI, domicilios, teléfonos, correos, casillas, empresas,
+montos y demás datos de este documento son enteramente ficticios. El menor se identifica solo mediante iniciales y
+CUI parcialmente enmascarado.
+RESOLUCIÓN N.° 04 - DECISIÓN SIMULADA
+Lugar ficticio, 15 de junio de 2026.
+CONSIDERADO: La demanda, la contestación, el acta de audiencia y los medios de prueba simulados; y
+ATENDIDO A LO SIGUIENTE:
+PRIMERO.- Se ha demostrado para fines de esta prueba que el menor S.C.V.P. requiere cobertura permanente de alimentación, educación, vivienda, movilidad, vestido y salud. El informe de necesidades presentado estima un total mensual cercano a S/. 1760.00, aunque solo algunos rubros cuentan con monetización individual directa.
+SEGUNDO.- El demandado ha admitido su obligación alimentaria y declara ingresos netos aproximados de S/. 2480.00. Asimismo, señala como carga adicional pensión voluntaria para otro hijo menor, acreditada solo parcialmente por S/. 320.00.
+TERCERO.- La diferencia entre el monto solicitado (S/. 1100.00), la oferta inicial del obligado (S/. 600.00) y su propuesta posterior (S/. 680.00) evidencia controversia sobre proporcionalidad, mas no sobre la existencia de la obligación.
+CUARTO.- Las inconsistencias económicas declaradas deben valorarse conjuntamente con la fuente de ingresos, los gastos acreditados y las necesidades del alimentista, evitando equiparar automáticamente gasto declarado con imposibilidad contributiva.
+DECRETO:
+1. DECLARAR JUSTIFICADA en parte la demanda de alimentos interpuesta por Camila Alejandra Vega Ramos contra Renato Gabriel Ponce Alarcón.
+2. ORDENAR al demandado que asista al menor S.C.V.P. con una pensión alimenticia mensual de S/. 800.00.
+3. DISPONER que la pensión sea pagada dentro de los primeros cinco días de cada mes mediante cuenta de alimentos ficticia o mecanismo equivalente habilitado para esta prueba, siendo exigible conforme a la fecha procesal que corresponda en la simulación.
+4. ADVERTENCIA al obligado que el incumplimiento puede activar mecanismos de ejecución previstos por la legislación aplicable, mención realizada únicamente con finalidad académica.
+La presente decisión se tendrá por consentida, para el escenario simulado, con fecha 30 de junio de 2026.
+SIMULATED EXPEDIENT WITH NO LEGAL VALUE Página 1
+
+--- [DOCUMENTO 8: scan_008.pdf] ---
+EXPEDIENTE: 0004-2026-0-0701-JP-FC-03 - EXPEDIENTE DE ALCABALLA
+DOCUMENTO ACADÉMICO - NO EJECUTABLE - SIN VALOR LEGAL
+
+Advertencia de anonimización: Todos los nombres, DNI, CUI, domicilios, teléfonos, correos, casillas, empresas, montos y demás datos de este documento son enteramente ficticios. El menor se identifica solo mediante iniciales y CUI parcialmente enmascarado.
+
+OFICIO N.° RET-FICT-2026
+Callao ficticio, 03 de julio de 2026.
+
+A: SEÑOR/A RESPONSABLE DE PAGOS DE: Tecnologías Portuarias Andinas S.A.C.
+Domicilio laboral referencial: Av. Innovación Portuaria 2250, Edificio Ficticio 3, Callao.
+
+En este documento académico, me refiero a usted con respecto al expediente simulado N.° 0004-2026-0-0701-JP-FC-03 entre Camila Alejandra Vega Ramos y Renato Gabriel Ponce Alarcón relativo a alimentos.
+
+Se ha comprobado que la sentencia del 15 de junio de 2026 fue confirmada el 30 de junio de 2026, por lo que se dispone, exclusivamente para fines académicos, la retención mensual de S/. 800.00 de las remuneraciones o pagos del obligado, a partir de la siguiente planilla tras la recepción del presente oficio simulado.
+
+El importe mencionado deberá ser destinado a una cuenta ficticia de alimentos o un mecanismo equivalente de prueba. No contiene número de cuenta real, código interbancario real ni autoridad auténtica.
+
+Por favor, dejar constancia ficticia de recepción y ejecución para fines de trazabilidad del sistema.
+
+Este documento es solo académico, no ejecutable y sin valor legal.
+
+DOCUMENTO ACADÉMICO - NO EJECUTABLE - SIN VALOR LEGAL Página 1

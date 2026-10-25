@@ -1,0 +1,261 @@
+{
+  "_nota": "Valores esperados leidos A MANO de los PDFs simulados de cada expediente (no generados por el codigo). Si cambias un valor, justifica contra el documento.",
+  "EXP_0001": {
+    "petitorio": 850.0,
+    "gastos": {
+      "Educación": 160.0,
+      "Alimentación": 280.0,
+      "Movilidad del menor": 180.0
+    },
+    "ingreso_base": 1650.0,
+    "cargas": [
+      300.0
+    ],
+    "pension": [
+      "monto_fijo",
+      650.0
+    ],
+    "plazo": {
+      "notificacion": "13/02/2026",
+      "presentacion": "20/02/2026",
+      "estado": "Dentro del Plazo",
+      "dias": 5
+    },
+    "eventos": {
+      "demanda": "09/02/2026",
+      "admision": "11/02/2026",
+      "notificacion": "13/02/2026",
+      "contestacion": "20/02/2026",
+      "sentencia": "16/03/2026",
+      "oficio": "06/04/2026"
+    },
+    "domicilios": {
+      "demandante_real": "Jr. Los Cedros",
+      "demandado_real": "Mz. F, lote 12"
+    },
+    "puntos_acta": 4,
+    "postura": {
+      "oferta": 450.0,
+      "demandante_reduce": 750.0,
+      "demandado_eleva": 500.0
+    },
+    "partes": {
+      "demandante": {
+        "nombre": "Mariana Lucía Quispe Valverde",
+        "dni": "74821963"
+      },
+      "demandado": {
+        "nombre": "Carlos Eduardo Rivas Montenegro",
+        "dni": "71640528"
+      }
+    }
+  },
+  "EXP_0002": {
+    "petitorio": 900.0,
+    "gastos": {
+      "Educación": 190.0,
+      "Alimentación": 310.0
+    },
+    "ingreso_base": 2100.0,
+    "cargas": [
+      250.0
+    ],
+    "pension": [
+      "monto_fijo",
+      700.0
+    ],
+    "plazo": {
+      "notificacion": "23/03/2026",
+      "presentacion": "30/03/2026",
+      "estado": "Dentro del Plazo",
+      "dias": 5
+    },
+    "eventos": {
+      "demanda": "17/03/2026",
+      "admision": "19/03/2026",
+      "notificacion": "23/03/2026",
+      "contestacion": "30/03/2026",
+      "audiencia": "20/04/2026",
+      "sentencia": "27/04/2026",
+      "consentimiento": "12/05/2026",
+      "oficio": "15/05/2026"
+    },
+    "domicilios": {
+      "demandante_real": "Calle Los Sauces N.° 327",
+      "demandado_real": "Mz. C, lote 9",
+      "demandado_laboral": "Av. Puerto Modelo 1440, Zona Industrial Académica, Callao."
+    },
+    "puntos_acta": 4,
+    "postura": {
+      "oferta": 480.0,
+      "demandante_reduce": 750.0,
+      "demandado_eleva": 560.0
+    },
+    "partes": {
+      "demandante": {
+        "nombre": "Valeria Fernanda Salazar Pinedo",
+        "dni": "73268415"
+      },
+      "demandado": {
+        "nombre": "Luis Alberto Medina Cárdenas",
+        "dni": "70419382"
+      }
+    }
+  },
+  "EXP_0003": {
+    "petitorio": 750.0,
+    "gastos": {
+      "Educación": 150.0,
+      "Alimentación": 260.0
+    },
+    "ingreso_base": 1380.0,
+    "cargas": [
+      220.0
+    ],
+    "pension": [
+      "monto_fijo",
+      520.0
+    ],
+    "plazo": {
+      "notificacion": "10/04/2026",
+      "presentacion": "17/04/2026",
+      "estado": "Dentro del Plazo",
+      "dias": 5
+    },
+    "eventos": {
+      "demanda": "06/04/2026",
+      "admision": "08/04/2026",
+      "notificacion": "10/04/2026",
+      "contestacion": "17/04/2026",
+      "audiencia": "11/05/2026",
+      "sentencia": "18/05/2026",
+      "consentimiento": "02/06/2026",
+      "oficio": "05/06/2026"
+    },
+    "domicilios": {
+      "demandante_real": "Pasaje Las Palmeras 56",
+      "demandado_real": "Jr. Mercado Central 912",
+      "demandado_laboral": "Calle Motor Académico 380, local 6"
+    },
+    "puntos_acta": 4,
+    "postura": {
+      "oferta": 350.0,
+      "demandante_reduce": 600.0,
+      "demandado_eleva": 420.0
+    },
+    "partes": {
+      "demandante": {
+        "nombre": "Andrea Milagros Torres Lévano",
+        "dni": "76130549"
+      },
+      "demandado": {
+        "nombre": "Jorge Sebastián Huamán Peralta",
+        "dni": "72851406"
+      }
+    }
+  },
+  "EXP_0004": {
+    "petitorio": 1100.0,
+    "gastos": {
+      "Educación": 240.0,
+      "Alimentación": 360.0
+    },
+    "ingreso_base": 2480.0,
+    "cargas": [
+      320.0
+    ],
+    "pension": [
+      "monto_fijo",
+      800.0
+    ],
+    "plazo": {
+      "notificacion": "08/05/2026",
+      "presentacion": "15/05/2026",
+      "estado": "Dentro del Plazo",
+      "dias": 5
+    },
+    "eventos": {
+      "demanda": "04/05/2026",
+      "admision": "06/05/2026",
+      "notificacion": "08/05/2026",
+      "contestacion": "15/05/2026",
+      "audiencia": "08/06/2026",
+      "sentencia": "15/06/2026",
+      "consentimiento": "30/06/2026",
+      "oficio": "03/07/2026"
+    },
+    "domicilios": {
+      "demandante_real": "Av. Jardines del Sur 1185",
+      "demandado_real": "Mz. H, lote 4",
+      "demandado_laboral": "Av. Innovación Portuaria 2250"
+    },
+    "puntos_acta": 4,
+    "postura": {
+      "oferta": 600.0,
+      "demandante_reduce": 950.0,
+      "demandado_eleva": 680.0
+    },
+    "partes": {
+      "demandante": {
+        "nombre": "Camila Alejandra Vega Ramos",
+        "dni": "75492168"
+      },
+      "demandado": {
+        "nombre": "Renato Gabriel Ponce Alarcón",
+        "dni": "71963854"
+      }
+    }
+  },
+  "EXP_0005": {
+    "petitorio": 680.0,
+    "gastos": {
+      "Educación": 160.0,
+      "Alimentación": 280.0
+    },
+    "ingreso_base": 1450.0,
+    "cargas": [
+      300.0
+    ],
+    "pension": [
+      "monto_fijo",
+      500.0
+    ],
+    "plazo": {
+      "notificacion": "05/06/2026",
+      "presentacion": "12/06/2026",
+      "estado": "Dentro del Plazo",
+      "dias": 5
+    },
+    "eventos": {
+      "demanda": "01/06/2026",
+      "admision": "03/06/2026",
+      "notificacion": "05/06/2026",
+      "contestacion": "12/06/2026",
+      "audiencia": "06/07/2026",
+      "sentencia": "13/07/2026",
+      "consentimiento": "28/07/2026",
+      "oficio": "31/07/2026"
+    },
+    "domicilios": {
+      "demandante_real": "Jr. Las Gaviotas 441",
+      "demandado_real": "Calle Horizonte 209",
+      "demandado_laboral": "Av. Comercio Simulado 560"
+    },
+    "puntos_acta": 4,
+    "postura": {
+      "oferta": 400.0,
+      "demandante_reduce": 550.0,
+      "demandado_eleva": 450.0
+    },
+    "partes": {
+      "demandante": {
+        "nombre": "Paola Daniela Núñez Cabrera",
+        "dni": "74615823"
+      },
+      "demandado": {
+        "nombre": "Marco Antonio Reyes Villanueva",
+        "dni": "73580241"
+      }
+    }
+  }
+}

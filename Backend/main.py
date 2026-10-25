@@ -35,7 +35,7 @@ from fastapi import Form
 import os
 import unicodedata
 
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+pytesseract.pytesseract.tesseract_cmd = os.getenv('TESSERACT_CMD') or r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 warnings.filterwarnings("ignore", category=Warning, module="PyPDF2")
 
@@ -61,7 +61,7 @@ DB_URL = os.getenv(
     "DATABASE_URL",
     "postgresql://postgres:123@localhost:5433/sigeja_db"
 )
-JWT_SECRET = os.getenv("SIGEJA_JWT_SECRET", "sigeja-dev-secret-change-me")
+JWT_SECRET = os.getenv("SIGEJA_JWT_SECRET") or os.getenv("JWT_SECRET") or "sigeja-dev-secret-change-me"
 JWT_ALGORITHM = "HS256"
 JWT_EXP_MINUTES = int(os.getenv("SIGEJA_JWT_EXP_MINUTES", "480"))
 PASSWORD_RESET_MINUTES = int(os.getenv("SIGEJA_PASSWORD_RESET_MINUTES", "15"))
@@ -1425,7 +1425,7 @@ def modulo_ocr_avanzado_imagen(contenido_pdf: bytes) -> str:
     texto_final = ""
     print("📸 Iniciando OCR Profundo (300 DPI + preprocesado)...")
     try:
-        ruta_poppler = r'C:\poppler\Library\bin'
+        ruta_poppler = os.getenv('POPPLER_PATH') or (r'C:\poppler\Library\bin' if os.name == 'nt' else None)
         imagenes = convert_from_bytes(contenido_pdf, dpi=300, poppler_path=ruta_poppler)
 
         for i, imagen in enumerate(imagenes):
@@ -1613,15 +1613,27 @@ Responde ÚNICAMENTE con este JSON (sin texto adicional):
 def _limpiar_domicilio_extraido(valor: str) -> str:
     valor = re.sub(r'\s+', ' ', valor or '').strip(" ,;:-")
     valor = re.sub(r'^(?:ficticio|ficticia)\s*[:,-]?\s*', '', valor, flags=re.IGNORECASE).strip(" ,;:-")
+    # Etiqueta de rol pegada al valor ("de la demandante: Calle ...", "del demandado: Mz. ...").
+    valor = re.sub(
+        r'^(?:de\s+la\s+|del\s+|de\s+)?(?:demandante|demandad[oa]|obligad[oa]|accionante)\s*[:,-]?\s*',
+        '', valor, flags=re.IGNORECASE
+    ).strip(" ,;:-")
+    # Calificativo de la fuente ("declarado/referenciado:", "referencial:") que no forma parte de la dirección.
+    valor = re.sub(
+        r'^(?:(?:declarad[oa]|referenciad[oa]|referencial)\s*/?\s*)+[:,-]?\s*',
+        '', valor, flags=re.IGNORECASE
+    ).strip(" ,;:-")
     valor = re.split(
         r'\b(?:DNI|D\.N\.I\.|DOCUMENTO|CELULAR|TELEFONO|TELÉFONO|CORREO|EMAIL|CASILLA|ANEXO|PETITORIO|'
         r'DEMANDANTE|DEMANDADO|MATERIA|JUEZ|ESPECIALISTA|REMUNERACI[OÓ]N|SUELDO|INGRESO|'
         r'NOTIFICACI[OÓ]N|AUDIENCIA|SENTENCIA|RESOLUCI[OÓ]N|CONTACTO\s+PROCESAL|ASIMISMO|'
-        r'PARTE\s+ACCIONANTE|FUNDAMENTOS?|MEDIOS\s+PROBATORIOS)\b',
+        r'PARTE\s+ACCIONANTE|FUNDAMENTOS?|MEDIOS\s+PROBATORIOS|EMPLEADOR(?:A)?|ACTIVIDAD\s+ECON[OÓ]MICA)\b',
         valor,
         maxsplit=1,
         flags=re.IGNORECASE
     )[0].strip(" ,;:-")
+    # Numeral de sección ("... Callao. II.") que quedó pegado al final.
+    valor = re.sub(r'(?<=[.,])\s+[IVX]{1,4}\.?$', '', valor).strip(" ,;:-")
     valor = re.sub(
         r'\b(?:DNI|D\.N\.I\.|DOCUMENTO|CELULAR|TELEFONO|CORREO|EMAIL|CASILLA|ANEXO|PETITORIO|'
         r'DEMANDANTE|DEMANDADO|MATERIA|JUEZ|ESPECIALISTA)\b.*$',
@@ -1652,6 +1664,20 @@ def _domicilio_parece_valido(valor: str) -> bool:
 
 
 def _rol_contextual_domicilio(texto: str, inicio: int, tipo: str) -> str:
+    patron_rol = r'\b(demandante|accionante|parte\s+actora|demandad[oa]|obligad[oa]|emplazad[oa])\b'
+
+    def _a_rol(palabra: str) -> str:
+        palabra = palabra.lower()
+        return "demandado" if palabra.startswith(("demandad", "obligad", "emplazad")) else "demandante"
+
+    # 1) La propia etiqueta nombra al titular ("Domicilio real del demandado: ...").
+    etiqueta = re.match(r'[^:\n]{0,45}?\b(?:de\s+la|del|de)\s+' + patron_rol[2:], texto[inicio:inicio + 70], re.IGNORECASE)
+    if etiqueta:
+        return _a_rol(etiqueta.group(1))
+    # 2) Si no, el titular es la mención de rol más reciente antes del domicilio.
+    previas = list(re.finditer(patron_rol, texto[max(0, inicio - 450):inicio], re.IGNORECASE))
+    if previas:
+        return _a_rol(previas[-1].group(1))
     ctx = texto[max(0, inicio - 450):inicio + 120].lower()
     senales_demandante = len(re.findall(r'\bdemandante\b|parte\s+actora|accionante|madre|solicitante', ctx))
     senales_demandado = len(re.findall(r'\bdemandad[oa]\b|obligado|emplazad[oa]|padre|generales\s+de\s+ley', ctx))
@@ -1665,6 +1691,16 @@ def _rol_contextual_domicilio(texto: str, inicio: int, tipo: str) -> str:
 
 
 def _registrar_domicilio_resultado(resultado: dict, rol: str, tipo: str, domicilio: str, evidencia: str = ""):
+    # Si el texto capturado empieza nombrando a OTRA parte ("de la demandante Jr. ..."),
+    # ese domicilio no pertenece al rol que se está registrando.
+    titular = re.match(
+        r'^\s*(?:de\s+la\s+|del\s+|de\s+)?(demandante|accionante|demandad[oa]|obligad[oa])\b',
+        domicilio or '', flags=re.IGNORECASE
+    )
+    if titular and rol in ("demandante", "demandado"):
+        rol_titular = "demandado" if titular.group(1).lower().startswith(("demandad", "obligad")) else "demandante"
+        if rol_titular != rol:
+            return
     domicilio_limpio = _limpiar_domicilio_extraido(domicilio)
     if not _domicilio_parece_valido(domicilio_limpio):
         return
@@ -1701,12 +1737,12 @@ def extraer_domicilios_judiciales(texto_plano: str) -> dict:
     if not texto_plano:
         return resultado
 
-    texto_demanda = _texto_documento_por_nombre(texto_plano, r'demanda|01_') or texto_plano
+    texto_demanda = _texto_documento(texto_plano, "demanda", r'demanda|01_') or texto_plano
     texto_demanda_lineal = re.sub(r'\s+', ' ', texto_demanda).strip()
     for rol, tipo, patron in [
-        ("demandante", "real", r'domicilio\s+real\s+de\s+la\s+demandante\s+(.+?)(?=\b(?:domicilio\s+procesal|contacto\s+procesal|domicilio\s+conocido\s+del\s+demandado|I\.\s*PETITORIO)\b|$)'),
-        ("demandante", "procesal", r'domicilio\s+procesal\s+(.+?)(?=\b(?:contacto\s+procesal|domicilio\s+conocido\s+del\s+demandado|I\.\s*PETITORIO)\b|$)'),
-        ("demandado", "real", r'domicilio\s+conocido\s+del\s+demandado\s+(.+?)(?=\b(?:contacto\s+procesal|I\.\s*PETITORIO)\b|$)'),
+        ("demandante", "real", r'domicilio\s+real\s+de\s+la\s+demandante\s*:?\s*(.+?)(?=\b(?:domicilio\s+procesal|contacto\s+procesal|domicilio\s+(?:conocido|real)\s+del\s+demandado|I{1,3}\.\s*PETITORIO)\b|$)'),
+        ("demandante", "procesal", r'domicilio\s+procesal\s*:?\s*(.+?)(?=\b(?:contacto\s+procesal|casilla|correo|domicilio\s+(?:conocido|real)\s+del\s+demandado|I{1,3}\.\s*PETITORIO)\b|$)'),
+        ("demandado", "real", r'domicilio\s+(?:conocido|real)\s+del\s+demandado\s*:?\s*(.+?)(?=\b(?:domicilio\s+laboral|centro\s+de\s+labores|contacto\s+procesal|correo|tel[eé]fono|I{1,3}\.\s*PETITORIO)\b|$)'),
     ]:
         match = re.search(patron, texto_demanda_lineal, re.IGNORECASE)
         if match:
@@ -1803,6 +1839,279 @@ def extraer_domicilios_judiciales(texto_plano: str) -> dict:
     return resultado
 
 
+_ABREVIATURAS_DIRECCION = ("av", "jr", "urb", "mz", "lt", "psje", "cdra", "nro", "dpto", "int", "prol", "sr", "sra", "dr", "dra", "esq", "ca", "n", "aa")
+
+
+def _recortar_domicilio(valor) -> str:
+    """Deja solo la dirección: sin el 'en' inicial y cortada donde acaba ('..., y señalando domicilio procesal...',
+    '..., a usted respetuosamente digo', '..., interpone demanda...', el punto que cierra la oración)."""
+    v = re.sub(r'\s+', ' ', str(valor or '')).strip()
+    if v in ("", "No detectado", "No encontrado"):
+        return v or "No detectado"
+    v = re.sub(r'(?i)^(?:en|:)\s+(?:(?:la|el)\s+)?', '', v)
+    corte = re.search(
+        r'(?i),\s*(?:y\s+)?(?:se[ñn]alando|con\s+domicilio\s+procesal|domicilio\s+procesal|interpon\w+|a\s+usted|ante\s+usted|'
+        r'en\s+el\s+proceso|quien\b|identificad[oa])|;|\s+a\s+usted\s+(?:respetuosamente\s+)?digo|\s+interpone\b|\s+contra\s+[A-ZÁÉÍÓÚÑ]', v)
+    if corte:
+        v = v[:corte.start()]
+    for punto in re.finditer(r'\.(?=\s+(?:[IVX]+\.|[A-ZÁÉÍÓÚÑ]))', v):
+        anterior = re.search(r'(\w+)$', v[:punto.start()])
+        if anterior and anterior.group(1).lower() not in _ABREVIATURAS_DIRECCION:
+            v = v[:punto.start()]
+            break
+    v = v.strip(' ,.;:-')
+    return v or "No detectado"
+
+
+def _domicilios_del_titular(texto_plano: str, dni: str) -> dict:
+    """Domicilios que el escrito da JUNTO al DNI de una parte: '..., identificado con DNI N.° X, con domicilio real en A,
+    y señalando domicilio procesal en B'. Anclar al DNI evita atribuir a una parte el domicilio de otra."""
+    resultado = {}
+    if not dni or dni in ("No detectado", "No encontrado"):
+        return resultado
+    texto = re.sub(r'\s+', ' ', texto_plano or '')
+    for m_dni in re.finditer(rf'(?<!\d){re.escape(dni)}(?!\d)', texto):
+        despues = texto[m_dni.end(): m_dni.end() + 520]
+        otro = re.search(r'(?i)\bD\.?N\.?I\b|\bcontra\s+[A-ZÁÉÍÓÚÑ]', despues)       # la cláusula de OTRA persona empieza ahí
+        if otro:
+            despues = despues[:otro.start()]
+        for m_dom in re.finditer(r'(?i)domicilio\s+(real|procesal|legal|actual)?\s*(?:en|:)\s*', despues):
+            tipo = "procesal" if (m_dom.group(1) or "").lower() == "procesal" else "real"
+            valor = _recortar_domicilio(despues[m_dom.end():])
+            if valor != "No detectado" and len(valor) >= 8 and tipo not in resultado:
+                resultado[tipo] = valor
+        if resultado:
+            break
+    return resultado
+
+
+def _nombre_confiable(nombre: str, texto_plano: str) -> bool:
+    """Un nombre es confiable si tiene 2+ palabras, sin dígitos/asteriscos ni marcas de anonimización o de
+    redacción procesal, y figura literalmente en el texto (así una invención de la IA no pasa)."""
+    n = re.sub(r'\s+', ' ', str(nombre or '')).strip()
+    if len(n.split()) < 2 or re.search(r'[\d*]', n):
+        return False
+    if re.search(r'\b(?:ANONIMIZAD\w*|CUI|DNI|N[°º]|DOMICILIO|DEMANDA|DIRIGE|INTERPONE|FORMULA|PRESENTE|PETITORIO)\b',
+                 n, re.IGNORECASE):
+        return False
+    return _normalizar_texto_busqueda_pdf(n) in _normalizar_texto_busqueda_pdf(texto_plano)
+
+
+def _nombre_junto_al_dni(texto_plano: str, dni: str):
+    """Nombre que el texto escribe justo antes de ese DNI ("Yo, Ana Pérez Soto, identificada con DNI N.° ...").
+    El DNI sí se detecta bien; el nombre pegado a él es la evidencia más directa de a quién pertenece."""
+    palabra = r"[A-ZÁÉÍÓÚÑ][A-Za-zÁÉÍÓÚÑáéíóúñ'’]+"
+    nombre = rf"({palabra}(?:\s+(?:(?i:de|del|la|las|los|y)\s+)?{palabra}){{1,5}})"
+    cola = r"(?i:\s*,?\s*(?:identificad[oa]\s+)?(?:con\s+)?D\.?N\.?I\.?\s*(?:ficticio\s*)?(?:N\s*\.?\s*[°º]?\s*)?)$"
+    for m in re.finditer(rf'(?<!\d){re.escape(dni)}(?!\d)', texto_plano or ""):
+        previo = re.sub(r'\s+', ' ', texto_plano[max(0, m.start() - 160):m.start()])
+        m_nombre = re.search(nombre + cola, previo)
+        if m_nombre:
+            palabras = m_nombre.group(1).split()
+            # Un encabezado en mayúsculas pegado al nombre ("CONTESTACIÓN Mario Soto Peña") no forma parte de él.
+            while len(palabras) > 2 and palabras[0].isupper() and not all(p.isupper() for p in palabras):
+                palabras.pop(0)
+            return " ".join(palabras)
+    return None
+
+
+PARTES_IA_ACTIVADO = os.getenv("SIGEJA_PARTES_IA", "true").strip().lower() in ("1", "true", "yes", "si")
+PARTES_IA_TIMEOUT = int(os.getenv("SIGEJA_PARTES_IA_TIMEOUT", "120"))   # segundos; en CPU sin GPU conviene subirlo
+
+_PROMPT_PARTES_IA = """Eres un asistente jurídico. Del siguiente texto de un expediente judicial peruano identifica:
+- DEMANDANTE: quien interpone la demanda.
+- DEMANDADO: la persona contra quien se interpone.
+Responde SOLO un JSON con esta forma exacta:
+{{"demandante": {{"nombre": "", "dni": "", "cita": ""}}, "demandado": {{"nombre": "", "dni": "", "cita": ""}}}}
+Reglas: "nombre" sin títulos (doña, don, señor). "dni" son 8 dígitos tal como aparecen en el texto. "cita" es una frase COPIADA LITERALMENTE del texto donde aparece esa persona. Si un dato no aparece, deja "" y no lo inventes.
+
+TEXTO:
+{texto}
+"""
+
+
+def _sin_puntuacion(texto) -> str:
+    """Minúsculas, sin tildes ni signos y con espacios simples: para comparar lo que dice la IA con el texto."""
+    return re.sub(r'\s+', ' ', re.sub(r'[^\w\s]', ' ', _normalizar_texto_busqueda_pdf(str(texto or "")))).strip()
+
+
+def _texto_para_partes(texto_plano: str, max_por_doc: int = 3000, max_docs: int = 3) -> str:
+    """Inicio de los primeros documentos del expediente (demanda, admisoria, contestación): ahí se identifica a las partes."""
+    trozos = re.split(r'(?m)^--- \[DOCUMENTO \d+: ([^\]]+)\] ---$', texto_plano or "")
+    if len(trozos) < 3:                       # texto sin marcas de documento
+        return (texto_plano or "")[:max_por_doc * max_docs]
+    docs = [(trozos[i], trozos[i + 1].strip()) for i in range(1, len(trozos) - 1, 2)]
+    return "\n\n".join(f"[{nombre}]\n{texto[:max_por_doc]}" for nombre, texto in docs[:max_docs])
+
+
+def _extraer_partes_con_ia(texto_plano: str):
+    """La IA lee el inicio del expediente y devuelve a las partes con la frase literal que las respalda.
+    Retorna (datos, fragmento leído); datos es None si no hay IA o su respuesta no sirve."""
+    fragmento = _texto_para_partes(texto_plano)
+    try:
+        res = post_ollama_generate(
+            {"model": "mistral", "prompt": _PROMPT_PARTES_IA.format(texto=fragmento), "format": "json", "stream": False,
+             "options": {"temperature": 0, "seed": 0, "num_ctx": 8192, "num_predict": 500}},
+            timeout=PARTES_IA_TIMEOUT
+        )
+        datos = json.loads(res.json().get("response", "{}"))
+    except Exception as e:
+        print(f"⚠ Partes con IA no disponible: {type(e).__name__}")
+        return None, fragmento
+    return (datos if isinstance(datos, dict) else None), fragmento
+
+
+def _cita_respaldada(cita, base: str) -> bool:
+    """La cita figura en el texto: completa, o con al menos el 75 % de sus tramos de 4 palabras (la IA a veces
+    omite un signo o una palabra al copiar)."""
+    palabras = _sin_puntuacion(cita).split()
+    if len(palabras) < 4:
+        return False
+    if " ".join(palabras) in base:
+        return True
+    tramos = [" ".join(palabras[i:i + 4]) for i in range(len(palabras) - 3)]
+    return sum(t in base for t in tramos) / len(tramos) >= 0.75
+
+
+def _verificar_parte_ia(parte, base: str) -> list:
+    """Motivos por los que NO se confía en lo que la IA dijo de una parte (lista vacía = verificada).
+    Son comprobaciones generales contra el texto: no dependen de cómo redacte una plantilla concreta."""
+    if not isinstance(parte, dict):
+        return ["la IA no devolvió esta parte"]
+    nombre = _sin_puntuacion(parte.get("nombre"))
+    dni = re.sub(r'\D', '', str(parte.get("dni") or ""))
+    motivos = []
+    if len(nombre.split()) < 2:
+        motivos.append("sin nombre completo")
+    elif nombre not in base:
+        motivos.append("el nombre no está en el texto")
+    patron_dni = rf'(?<!\d){dni}(?!\d)'
+    if len(dni) != 8:
+        motivos.append("sin DNI de 8 dígitos")
+    elif not re.search(patron_dni, base):
+        motivos.append("el DNI no está en el texto")
+    elif nombre in base and not any(abs(n.start() - d.start()) <= 250
+                                    for n in re.finditer(re.escape(nombre), base)
+                                    for d in re.finditer(patron_dni, base)):
+        motivos.append("el DNI no está junto al nombre")
+    if not _cita_respaldada(parte.get("cita"), base):
+        motivos.append("la cita no figura en el texto")
+    return motivos
+
+
+def _aplicar_partes_ia(entidades: dict, texto_plano: str) -> dict:
+    """Las partes que lee la IA reemplazan a las de las reglas solo si el texto las confirma. Si no se pueden
+    verificar y discrepan de las reglas (o a estas les falta el dato), la parte queda marcada 'revisar' en vez
+    de mostrarse como segura. Sin IA (p. ej. servidor sin Ollama) todo queda como lo dejaron las reglas."""
+    roles = ("demandante", "demandado")
+    if not PARTES_IA_ACTIVADO:
+        return entidades
+    datos, fragmento = _extraer_partes_con_ia(texto_plano)
+    if datos is None:
+        for rol in roles:
+            entidades[rol]["verificacion"] = {"estado": "sin_ia", "motivos": []}
+        return entidades
+    base = _sin_puntuacion(fragmento)
+    partes = {rol: datos.get(rol) for rol in roles}
+    motivos = {rol: _verificar_parte_ia(partes[rol], base) for rol in roles}
+    dnis = {rol: re.sub(r'\D', '', str(partes[rol].get("dni") or "")) if isinstance(partes[rol], dict) else "" for rol in roles}
+    if dnis["demandante"] and dnis["demandante"] == dnis["demandado"]:
+        for rol in roles:
+            motivos[rol].append("ambas partes tienen el mismo DNI")
+    verificada = {rol: not motivos[rol] for rol in roles}
+    for rol in roles:
+        actual = entidades[rol]
+        if verificada[rol]:
+            nombre = re.sub(r'\s+', ' ', str(partes[rol]["nombre"])).strip().upper()
+            if (actual["nombre"], actual["dni"]) != (nombre, dnis[rol]):
+                print(f"🔧 {rol.capitalize()} según la IA verificada: {actual['nombre']} ({actual['dni']}) → {nombre} ({dnis[rol]})")
+            actual["nombre"], actual["dni"] = nombre, dnis[rol]
+            actual["verificacion"] = {"estado": "verificada", "motivos": []}
+        else:
+            coincide = bool(dnis[rol]) and dnis[rol] == actual["dni"]
+            actual["verificacion"] = {"estado": "verificada" if coincide else "revisar",
+                                      "motivos": [] if coincide else motivos[rol]}
+    for rol, otro in (("demandante", "demandado"), ("demandado", "demandante")):
+        # El texto confirma que ese DNI es de esta parte: no puede seguir figurando en la otra.
+        if verificada[rol] and not verificada[otro] and entidades[otro]["dni"] == dnis[rol]:
+            entidades[otro]["dni"] = "No detectado"
+            entidades[otro]["verificacion"] = {"estado": "revisar", "motivos": ["su DNI pertenece a la otra parte según el texto"]}
+    return entidades
+
+
+def _materia_del_proceso(texto_plano: str):
+    """Materia del proceso según el TÍTULO de la demanda ("DEMANDA DE DIVORCIO POR SEPARACIÓN DE HECHO Y ALIMENTOS"),
+    o su rótulo "Materia: ...". None si el expediente no la dice."""
+    def en_oracion(materia: str) -> str:
+        materia = re.sub(r'\s+', ' ', materia).strip(' .:;-')
+        return materia[:1].upper() + materia[1:].lower() if materia else ""
+
+    def casi_todo_mayusculas(renglon: str) -> bool:
+        letras = [c for c in renglon if c.isalpha()]
+        return bool(letras) and sum(c.isupper() for c in letras) / len(letras) >= 0.6
+
+    secciones = _secciones_tipadas(texto_plano)
+    demanda = next((s for s in secciones if s.get("tipo") == "demanda"), secciones[0] if secciones else None)
+    cuerpo = demanda["texto"] if demanda else (texto_plano or "")
+    renglones = cuerpo[:900].splitlines()
+    cola_titulo = lambda siguiente, materia: (
+        siguiente and len(siguiente) < 110 and not materia.rstrip().endswith('.') and casi_todo_mayusculas(siguiente)
+        and not re.match(r'(?i)^(se[ñn]or|i\.|expediente|petitorio|a\s+usted|escrito)', siguiente))
+    # 1) El título: "DEMANDA DE ..." (que puede seguir en el renglón siguiente: "... Y / PRETENSIONES ACUMULADAS").
+    for i, renglon in enumerate(renglones):
+        renglon = renglon.strip()
+        m = re.match(r'(?i)^demanda\s+d(?:e|el)\s+(.+)$', renglon)
+        if m and len(renglon) <= 160 and casi_todo_mayusculas(renglon):
+            materia = m.group(1)
+            siguiente = renglones[i + 1].strip() if i + 1 < len(renglones) else ""
+            if cola_titulo(siguiente, materia):
+                materia += " " + siguiente
+            return en_oracion(materia) or None
+    # 2) El rótulo "Materia: ..." (también en dos renglones).
+    for i, renglon in enumerate(renglones):
+        m = re.match(r'(?i)^\s*materia\s*[:\-]\s*(\S.{4,160})$', renglon)
+        if m:
+            materia = m.group(1)
+            siguiente = renglones[i + 1].strip() if i + 1 < len(renglones) else ""
+            if cola_titulo(siguiente, materia):
+                materia += " " + siguiente
+            return en_oracion(materia) or None
+    # 3) La frase con que se interpone: "X interpone demanda de reconocimiento de tenencia y alimentos contra Y".
+    m = re.search(r'(?is)\binterpon\w+\s+(?:la\s+presente\s+)?demanda\s+d(?:e|el)\s+(.{8,170}?)(?=\s+contra\b|,\s*con\s+pretensi|\.\s|$)',
+                  re.sub(r'\s+', ' ', cuerpo[:1600]))
+    return en_oracion(m.group(1)) or None if m else None
+
+
+_PRETENSIONES = (   # (etiqueta, cómo se escribe en el texto)
+    ("Divorcio", r'divorcio'), ("Alimentos", r'alimentos|pensi[oó]n\s+alimenticia|alimentaria'),
+    ("Tenencia y custodia", r'tenencia|custodia'), ("Régimen de visitas", r'visitas'),
+    ("Filiación / paternidad", r'filiaci[oó]n|paternidad'), ("Unión de hecho", r'uni[oó]n\s+de\s+hecho'),
+    ("Indemnización", r'indemnizaci[oó]n'), ("Liquidación de sociedad de gananciales", r'ganancial'),
+    ("Patria potestad", r'patria\s+potestad'), ("Impugnación", r'impugnaci'),
+    ("Cese de alimentos", r'cese\s+de\s+(?:la\s+)?(?:obligaci[oó]n\s+)?(?:alimentaria|pensi[oó]n|alimentos)'),
+    ("Exoneración de alimentos", r'exoneraci[oó]n'), ("Variación / modificación", r'variaci[oó]n|modificaci[oó]n'),
+)
+
+
+def _pretensiones_del_proceso(texto_plano: str, materia: str = None) -> list:
+    """Pretensiones que la demanda NOMBRA en su título/sumilla y en su petitorio (no las que solo menciona en los hechos)."""
+    secciones = _secciones_tipadas(texto_plano)
+    demanda = next((s for s in secciones if s.get("tipo") == "demanda"), secciones[0] if secciones else None)
+    cuerpo = demanda["texto"] if demanda else (texto_plano or "")
+    zonas = [materia or ""]
+    compacto = re.sub(r'\s+', ' ', cuerpo[:1800])
+    for patron, texto_zona in (
+        (r'(?is)\bsumilla\b[:\s]*(.{0,350}?)(?=se[ñn]or\s+juez|\Z)', compacto),                     # "SUMILLA: Interpongo demanda de ..."
+        (r'(?is)\binterpon\w+\s+(?:la\s+presente\s+)?demanda\b(.{0,300}?\.)', compacto),             # "X interpone demanda de ... contra Y."
+        (r'(?is)\bpetitorio\b(.{0,1200}?)(?=\n\s*(?:II|2)[.\s)]|\bfundamentos\b|\bhechos\b|\Z)', cuerpo),   # el petitorio
+    ):
+        m = re.search(patron, texto_zona)
+        if m:
+            zonas.append(m.group(1))
+    zona = _normalizar_texto_busqueda_pdf(" ".join(zonas))
+    return [etiqueta for etiqueta, patron in _PRETENSIONES if re.search(patron, zona)]
+
+
 def modulo_ner_spacy(texto_plano: str) -> dict:
     """
     Versión 7.0: Anclaje Narrativo y Filtro Anti-OCR.
@@ -1851,57 +2160,11 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
         limpio = normalizar_nombre_ocr(limpio)
         return limpio
 
-    # 1. EXTRACCIÓN DE MONTO — prioridad: FALLO/ORDENO → pensión mensual → petitorio → fallback
-    _monto_encontrado = None
-
-    # Prioridad 1: sección de FALLO / resolución ordenatoria (pensión definitiva)
-    _m_fallo = re.search(
-        r'(?:FALLO|ORDENO?|SE\s+ORDENA|POR\s+(?:ESTAS|LO\s+EXPUESTO))\b[^$]{0,600}?'
-        r'(?:pension(?:es)?\s+alimenticia|acuda\s+con\s+(?:la\s+)?(?:suma|pension|cantidad))'
-        r'[^$]{0,120}?(?:S/|S/\.)\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)',
-        texto_plano, re.IGNORECASE | re.DOTALL
-    )
-    if _m_fallo:
-        _val = float(_m_fallo.group(1).replace(',', ''))
-        if 50.0 < _val < 50000.0:
-            _monto_encontrado = _val
-
-    # Prioridad 2: "PENSIÓN MENSUAL: S/X" (tabla de liquidación / encabezado)
-    if _monto_encontrado is None:
-        _m_pm = re.search(
-            r'PENSI[OÓ]N\s+MENSUAL\s*[:\-]\s*(?:S/|S/\.)\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)',
-            texto_plano, re.IGNORECASE
-        )
-        if _m_pm:
-            _val = float(_m_pm.group(1).replace(',', ''))
-            if 50.0 < _val < 20000.0:
-                _monto_encontrado = _val
-
-    # Prioridad 3: "petitorio / solicita / fija en" con S/ cercano
-    if _monto_encontrado is None:
-        _m_gen = re.search(
-            r'(?:petitorio|solicit[oa]|fija\s+(?:la\s+)?pension|fija.*?en)\s*[^S\n]{0,60}'
-            r'(?:S/|S/\.)\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)',
-            texto_plano, re.IGNORECASE
-        )
-        if _m_gen:
-            _val = float(_m_gen.group(1).replace(',', ''))
-            if _val > 50.0:
-                _monto_encontrado = _val
-
-    # Fallback: primer S/ > 100 que NO esté precedido de "interés/devengadas/liquidación/costas"
-    if _monto_encontrado is None:
-        for _m_fb in re.finditer(r'(?:S/|S/\.)\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)', texto_plano):
-            _ctx_prev = texto_plano[max(0, _m_fb.start() - 80): _m_fb.start()].lower()
-            if re.search(r'inter[eé]s|devengad|liquidaci[oó]n|costas|honorario', _ctx_prev):
-                continue
-            _val = float(_m_fb.group(1).replace(',', ''))
-            if _val > 100.0:
-                _monto_encontrado = _val
-                break
-
-    if _monto_encontrado is not None:
-        entidades["monto_solicitado"] = _monto_encontrado
+    # 1. EXTRACCIÓN DEL MONTO SOLICITADO: lo que PIDE la demanda, leído de la frase que lo solicita. No es lo que luego ordene
+    # la sentencia, ni una indemnización, ni la pensión anterior cuyo cese se pide, ni un aporte ya hecho (ver _petitorio_verificado).
+    _petitorio_demanda = _extraer_petitorio_demanda_info(texto_plano)
+    if _petitorio_demanda.get("monto"):
+        entidades["monto_solicitado"] = float(_petitorio_demanda["monto"])
 
     # 2. EXTRACCIÓN COORDINADA DE DNIs - BASADA EN CONTEXTO
     # Estrategia: para cada DNI encontrado, analizar los 600 chars anteriores
@@ -2201,6 +2464,11 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
     # Detecta errores semánticos como CUI de menores asignados como DNI de adultos.
     print("🔍 Validando entidades con Mistral...")
     entidades = _validar_entidades_con_mistral(texto_plano, entidades)
+    # El petitorio lo fija la frase que lo pide en la demanda: el validador de la IA no lo cambia (ni inventa uno cuando no hay).
+    entidades["monto_solicitado"] = float(_petitorio_demanda.get("monto") or 0.0)
+
+    # 5b. LA IA LEE A LAS PARTES Y EL TEXTO LAS CONFIRMA: lo verificado prevalece sobre las reglas.
+    entidades = _aplicar_partes_ia(entidades, texto_plano)
 
     # 6. ESTANDARIZACIÓN FINAL (Aplica para Mistral y Python)
     entidades["demandante"]["nombre"] = estandarizar_nombre(entidades["demandante"]["nombre"])
@@ -2233,6 +2501,19 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
             if not _nombre_sucio_procesal(entidades["demandado"]["nombre"]):
                 break
 
+    # 6b. El nombre de cada parte va pegado a su DNI en el texto: si el nombre quedó vacío o no es confiable
+    # (p. ej. "TE ANONIMIZADO N.° 81**67**4" o "No detectado"), se toma de ahí.
+    for _rol in ("demandante", "demandado"):
+        _dni_parte = entidades[_rol]["dni"]
+        if _dni_parte in ("No detectado", "No encontrado") or _nombre_confiable(entidades[_rol]["nombre"], texto_plano):
+            continue
+        _cand = _nombre_junto_al_dni(texto_plano, _dni_parte)
+        if _cand:
+            _cand = estandarizar_nombre(_cand)
+            if _cand != "No detectado" and _nombre_confiable(_cand, texto_plano):
+                print(f"🔧 {_rol.capitalize()} corregido por su DNI: {entidades[_rol]['nombre']} → {_cand}")
+                entidades[_rol]["nombre"] = _cand
+
     # 7. DEDUPLICACIÓN FINAL — si ambas partes quedaron con el mismo DNI, la demandante cede
     # (el DNI del demandado suele ser el único en el expediente cuando la demandante no tiene doc)
     if (entidades["demandante"]["dni"] not in ("No detectado", "No encontrado") and
@@ -2241,6 +2522,22 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
         entidades["demandante"]["dni"] = "No detectado"
 
     entidades["domicilios"] = extraer_domicilios_judiciales(texto_plano)
+    # Los domicilios que el escrito escribe junto al DNI de cada parte mandan sobre los hallados por proximidad de palabras.
+    for _rol in ("demandante", "demandado"):
+        _dom = entidades["domicilios"].get(_rol) or {}
+        for _tipo in ("real", "procesal", "laboral"):
+            _dom[_tipo] = _recortar_domicilio(_dom.get(_tipo))
+        for _tipo, _valor in _domicilios_del_titular(texto_plano, entidades[_rol]["dni"]).items():
+            _dom[_tipo] = _valor
+        entidades["domicilios"][_rol] = _dom
+    _dd, _ddo = entidades["domicilios"]["demandante"], entidades["domicilios"]["demandado"]
+    for _tipo in ("real", "procesal"):       # un mismo texto no puede ser el domicilio de ambas partes
+        if _ddo[_tipo] != "No detectado" and _ddo[_tipo] == _dd[_tipo]:
+            _ddo[_tipo] = "No detectado"
+    if _ddo["laboral"] != "No detectado" and _ddo["laboral"] == _ddo["real"]:
+        _ddo["laboral"] = "No detectado"      # el domicilio del demandado que el texto da sin decir 'real' no es el laboral
+    entidades["materia"] = _materia_del_proceso(texto_plano)
+    entidades["pretensiones"] = _pretensiones_del_proceso(texto_plano, entidades["materia"])
 
     return entidades
 
@@ -2249,6 +2546,18 @@ def _parse_fecha_texto(dia: int, mes: int, anio: int):
         return datetime(int(anio), int(mes), int(dia))
     except (TypeError, ValueError):
         return None
+
+
+# Fechas escritas con letras ("uno de diciembre de dos mil veintiuno", "a los veinte días del mes de octubre de dos mil veintitrés").
+_NUM_PALABRA = (r'(?:uno|un|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|'
+                r'diecisiete|dieciocho|diecinueve|veinte|veinti[uú]n(?:o)?|veintid[oó]s|veintitr[eé]s|veinticuatro|veinticinco|'
+                r'veintis[eé]is|veintisiete|veintiocho|veintinueve|treinta|cuarenta|cincuenta)')
+_DIA_PALABRA = (r'(?:primero|primer|uno|un|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|'
+                r'diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti[uú]n(?:o)?|veintid[oó]s|veintitr[eé]s|veinticuatro|'
+                r'veinticinco|veintis[eé]is|veintisiete|veintiocho|veintinueve|treinta(?:\s+y\s+uno)?)')
+_ANIO_PALABRAS = rf'dos\s+mil(?:\s+(?:y\s+)?{_NUM_PALABRA}){{0,2}}'
+_FECHA_PALABRAS = (rf'(?<![a-záéíóúñ]){_DIA_PALABRA}\s+(?:d[ií]as?\s+del\s+mes\s+)?de\s+[a-záéíóúñ]+\s+d(?:e|el)\s+'
+                   rf'(?:{_ANIO_PALABRAS}|\d{{4}})(?![\wáéíóúñ])')
 
 
 def _parse_fecha_literal(literal: str):
@@ -2263,7 +2572,7 @@ def _parse_fecha_literal(literal: str):
         dia, mes, anio = corto.groups()
         return _parse_fecha_texto(int(dia), int(mes), int(anio))
     largo = re.match(
-        r'(?<!\d)(\d{1,2})\s+de\s+([a-zA-ZáéíóúñÁÉÍÓÚÑ]+)\s+d(?:e|el)\s+(\d{4})(?!\d)',
+        r'(?<!\d)(\d{1,2})\s+(?:d[ií]as?\s+del\s+mes\s+)?de\s+([a-zA-ZáéíóúñÁÉÍÓÚÑ]+)\s+d(?:e|el)\s+(\d{4})(?!\d)',
         literal,
         re.IGNORECASE
     )
@@ -2273,12 +2582,13 @@ def _parse_fecha_literal(literal: str):
         if mes:
             return _parse_fecha_texto(int(dia), mes, int(anio))
     palabras = re.match(
-        r'(?<!\d)([a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+?)\s+de\s+([a-zA-ZáéíóúñÁÉÍÓÚÑ]+)\s+d(?:e|el)\s+(dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+|\d{4})(?!\d)',
+        r'(?<!\d)([a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+?)\s+de\s+([a-zA-ZáéíóúñÁÉÍÓÚÑ]+)\s+d(?:e|el)\s+(dos\s+mil(?:\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+)?|\d{4})(?!\d)',
         literal,
         re.IGNORECASE
     )
     if palabras:
         dia_txt, mes_txt, anio_txt = palabras.groups()
+        dia_txt = re.sub(r'\bd[ií]as?\s+del\s+mes\b', '', dia_txt, flags=re.IGNORECASE)   # "a los veinte días del mes de ..."
         dia = _numero_es_a_int(dia_txt)
         mes = meses.get(_normalizar_texto_busqueda_pdf(mes_txt))
         anio = _anio_es_a_int(anio_txt)
@@ -2307,19 +2617,24 @@ def _numero_es_a_int(texto: str) -> int | None:
 
 
 def _anio_es_a_int(texto: str) -> int | None:
+    """Año en cifras ("2021") o con letras ("dos mil veintiuno", "dos mil quince", "dos mil treinta y uno")."""
     norm = _normalizar_texto_busqueda_pdf(texto or "")
     norm = re.sub(r'\s+', ' ', norm).strip()
     if norm.isdigit() and len(norm) == 4:
         return int(norm)
-    mapa = {
-        "diecinueve": 2019, "veinte": 2020, "veintiuno": 2021, "veintidos": 2022,
-        "veintitres": 2023, "veinticuatro": 2024, "veinticinco": 2025,
-        "veintiseis": 2026, "veintisiete": 2027, "veintiocho": 2028,
-        "veintinueve": 2029, "treinta": 2030
+    unidades = {
+        "uno": 1, "un": 1, "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5, "seis": 6, "siete": 7, "ocho": 8, "nueve": 9,
+        "diez": 10, "once": 11, "doce": 12, "trece": 13, "catorce": 14, "quince": 15, "dieciseis": 16, "diecisiete": 17,
+        "dieciocho": 18, "diecinueve": 19, "veinte": 20, "veintiuno": 21, "veintiun": 21, "veintidos": 22,
+        "veintitres": 23, "veinticuatro": 24, "veinticinco": 25, "veintiseis": 26, "veintisiete": 27, "veintiocho": 28,
+        "veintinueve": 29, "treinta": 30, "cuarenta": 40, "cincuenta": 50,
     }
+    if norm == "dos mil":
+        return 2000
     if norm.startswith("dos mil "):
-        cola = norm.replace("dos mil ", "", 1).strip()
-        return mapa.get(cola)
+        palabras = [p for p in norm[len("dos mil "):].split() if p != "y"]
+        if palabras and all(p in unidades for p in palabras) and len(palabras) <= 2:
+            return 2000 + sum(unidades[p] for p in palabras)
     return None
 
 
@@ -2435,8 +2750,8 @@ def _extraer_fecha_contextual(texto_plano: str, patrones_evento: list[str], excl
     texto = texto_plano or ""
     patron_fecha = (
         r'(?P<corta>(?<!\d)\d{1,2}[/-]\d{1,2}[/-]\d{4}(?!\d))|'
-        r'(?P<larga>(?<!\d)\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4}(?!\d))|'
-        r'(?P<letras>(?<!\d)(?:primero|primer|uno|un|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti[uú]n(?:o)?|veintid[oó]s|veintitr[eé]s|veinticuatro|veinticinco|veintis[eé]is|veintisiete|veintiocho|veintinueve|treinta(?:\s+y\s+uno)?)\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+(?:dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+|\d{4})(?!\d))'
+        r'(?P<larga>(?<!\d)\d{1,2}\s+(?:d[ií]as?\s+del\s+mes\s+)?de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4}(?!\d))|'
+        r'(?P<letras>' + _FECHA_PALABRAS + r')'
     )
     candidatos = []
 
@@ -2454,7 +2769,10 @@ def _extraer_fecha_contextual(texto_plano: str, patrones_evento: list[str], excl
                     continue
                 fecha_obj = _parse_fecha_literal(fecha_match.group(0))
                 if fecha_obj:
-                    candidatos.append((distancia, fecha_obj, fecha_match.group(0), contexto))
+                    # Ante igual distancia, la fecha que sigue a la etiqueta ("Fecha de diligencia 13 de ...")
+                    # gana a la que la precede (la de la línea anterior).
+                    posterior = fecha_match.start() >= evento.end()
+                    candidatos.append((distancia + (0 if posterior else 0.5), fecha_obj, fecha_match.group(0), contexto))
 
     if not candidatos:
         return None, None, ""
@@ -2480,35 +2798,136 @@ def _secciones_documentales(texto_plano: str) -> list[dict]:
     return secciones
 
 
+_TIPO_A_CANONICO = {
+    "Indice": "indice", "Demanda": "demanda", "Auto admisorio": "admision", "Notificacion": "notificacion",
+    "Contestacion": "contestacion", "Acta de audiencia": "audiencia", "Sentencia": "sentencia", "Oficio": "oficio",
+}
+
+
+def _tipo_documental_por_titulo(texto: str):
+    """
+    Tipo de documento según su ENCABEZADO. Un escrito judicial se titula en sus primeros renglones
+    ("SENTENCIA", "ACTA DE AUDIENCIA ÚNICA", "RESOLUCIÓN ADMISORIA"...) y eso no depende de cómo se llame
+    el archivo. Manda el título que aparece primero; las menciones posteriores a otros actos no cuentan.
+    """
+    # Un título es un renglón corto escrito (casi todo) en mayúsculas; una frase suelta que menciona
+    # otro acto ("la sentencia de fecha...") no titula el documento.
+    renglones_titulo = []
+    for renglon in (texto or "")[:700].splitlines():
+        renglon = renglon.strip()
+        letras = [c for c in renglon if c.isalpha()]
+        if letras and len(renglon) <= 110 and sum(c.isupper() for c in letras) / len(letras) >= 0.7:
+            renglones_titulo.append(renglon)
+    zona = _normalizar_texto_busqueda_pdf("\n".join(renglones_titulo))
+    fuertes = (
+        ("Indice", r'\bindice\b'),
+        ("Contestacion", r'\bcontestacion\b|\bcontesto\s+la\s+demanda'),
+        ("Sentencia", r'\bsentencia\b'),
+        ("Auto admisorio", r'resolucion\s+admisoria|auto\s+admisorio'),
+        ("Notificacion", r'\bcedula\s+de\s+notificacion\b|\bnotificacion\b'),
+        ("Acta de audiencia", r'\bacta\s+de\s+audiencia\b|\bacta\b'),
+        ("Oficio", r'\boficio\b'),
+        ("Demanda", r'\bdemanda\s+de\s+(?:\w+\s+){0,3}?alimentos\b'),   # "de alimentos", "de aumento de alimentos", "de filiación y alimentos"
+    )
+    hallados = [(m.start(), tipo) for tipo, patron in fuertes for m in [re.search(patron, zona)] if m]
+    return min(hallados)[1] if hallados else None
+
+
+def _tipo_por_nombre_archivo(archivo: str):
+    """Respaldo: tipo canónico deducido solo del nombre del archivo (None si no dice nada)."""
+    nombre = _normalizar_texto_busqueda_pdf(archivo)
+    for patron, tipo in (
+        (r'indice', 'indice'), (r'contestacion', 'contestacion'),
+        (r'resolucion[_ -]?admisoria|auto[_ -]?admisorio|admisori', 'admision'),
+        (r'sentencia', 'sentencia'), (r'oficio|retencion', 'oficio'), (r'acta|audiencia', 'audiencia'),
+        (r'notificacion|cedula', 'notificacion'), (r'demanda', 'demanda'),
+    ):
+        if re.search(patron, nombre):
+            return tipo
+    return None
+
+
+def _tipo_canonico_documento(archivo: str, texto: str):
+    """Tipo canónico de un documento: por su contenido/título y, si no se reconoce, por el nombre del archivo."""
+    tipo = clasificar_documento_judicial(archivo, texto)["tipo"]
+    return _TIPO_A_CANONICO.get(tipo) or _tipo_por_nombre_archivo(archivo)
+
+
+def _secciones_tipadas(texto_plano: str) -> list[dict]:
+    """Secciones del expediente con su tipo canónico (None si no se reconoce)."""
+    secciones = _secciones_documentales(texto_plano)
+    for sec in secciones:
+        sec["tipo"] = _tipo_canonico_documento(sec.get("archivo", ""), sec.get("texto", ""))
+    return secciones
+
+
+def _texto_documento(texto_plano: str, tipo: str, patron_nombre: str = "") -> str:
+    """Texto del primer documento del tipo pedido; si no se reconoce por tipo, intenta por el nombre del archivo."""
+    for sec in _secciones_tipadas(texto_plano):
+        if sec["tipo"] == tipo:
+            return sec["texto"]
+    return _texto_documento_por_nombre(texto_plano, patron_nombre) if patron_nombre else ""
+
+
 def _extraer_fecha_por_documento(
     texto_plano: str,
     patron_nombre: str,
     preferir_patrones: list[str] = None,
-    seleccion_fecha: str = "primera"
+    seleccion_fecha: str = "primera",
+    por_prioridad: bool = False,
+    tipo: str = None
 ) -> tuple:
-    secciones = _secciones_documentales(texto_plano)
-    candidatas = [
-        sec for sec in secciones
-        if re.search(patron_nombre, sec.get("archivo", ""), re.IGNORECASE)
-    ]
+    secciones = _secciones_tipadas(texto_plano)
+    # Primero por el TIPO del documento (su título/contenido); el nombre del archivo es solo el respaldo.
+    candidatas = [sec for sec in secciones if tipo and sec.get("tipo") == tipo]
+    # El nombre del archivo es solo un respaldo: si el CONTENIDO del documento dice que es otro acto (p. ej. una contestación), un
+    # nombre que se parece ("03_...") no lo convierte en el acto buscado.
+    contradice = lambda sec: bool(tipo and sec.get("tipo") and sec.get("tipo") != tipo)
     if not candidatas:
         candidatas = [
             sec for sec in secciones
-            if re.search(patron_nombre, sec.get("texto", "")[:500], re.IGNORECASE)
+            if re.search(patron_nombre, sec.get("archivo", ""), re.IGNORECASE) and not contradice(sec)
+        ]
+    if not candidatas:
+        candidatas = [
+            sec for sec in secciones
+            if re.search(patron_nombre, sec.get("texto", "")[:500], re.IGNORECASE) and not contradice(sec)
         ]
     if not candidatas:
         return None, None, ""
     patron_fecha = (
         r'(?<!\d)\d{1,2}[/-]\d{1,2}[/-]\d{4}(?!\d)|'
-        r'(?<!\d)\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4}(?!\d)|'
-        r'(?<!\d)(?:primero|primer|uno|un|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|trece|catorce|quince|diecis[eé]is|diecisiete|dieciocho|diecinueve|veinte|veinti[uú]n(?:o)?|veintid[oó]s|veintitr[eé]s|veinticuatro|veinticinco|veintis[eé]is|veintisiete|veintiocho|veintinueve|treinta(?:\s+y\s+uno)?)\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+(?:dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+|\d{4})(?!\d)'
+        r'(?<!\d)\d{1,2}\s+(?:d[ií]as?\s+del\s+mes\s+)?de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4}(?!\d)|'
+        + _FECHA_PALABRAS
     )
-    for sec in candidatas:
-        if preferir_patrones:
-            fecha_obj, literal, contexto = _extraer_fecha_contextual(sec["texto"], preferir_patrones)
+    # Primero la evidencia por patrón en TODAS las secciones candidatas; el recurso posicional
+    # (primera/última fecha de la sección) solo si ninguna la aporta. Así una sección que
+    # coincide por nombre pero no habla del acto no tapa a la que sí lo documenta.
+    if preferir_patrones:
+        # por_prioridad: cada patrón es una evidencia más fuerte que el siguiente (se prueban en orden);
+        # si no, se usan todos juntos y gana la fecha más cercana a cualquiera de ellos.
+        grupos = [[p] for p in preferir_patrones] if por_prioridad else [preferir_patrones]
+        for grupo in grupos:
+            for sec in candidatas:
+                fecha_obj, literal, contexto = _extraer_fecha_contextual(sec["texto"], grupo)
+                if fecha_obj:
+                    return fecha_obj, literal, f"{sec['archivo']}: {contexto}"
+    if seleccion_fecha != "ultima":
+        # Antes de quedarse con "la primera fecha": la fecha de emisión del propio documento (cabecera, etiqueta de su
+        # acto o cierre). La primera fecha puede ser una referencia a otro acto, p. ej. "Fecha de demanda" en una tabla.
+        compilado = re.compile(patron_fecha, re.IGNORECASE)
+        for sec in candidatas:
+            pos = _posicion_fecha_emision(sec["texto"], tipo)
+            m_emision = compilado.match(sec["texto"], pos) if pos is not None else None
+            fecha_obj = _parse_fecha_literal(m_emision.group(0)) if m_emision else None
             if fecha_obj:
-                return fecha_obj, literal, f"{sec['archivo']}: {contexto}"
+                contexto = re.sub(r'\s+', ' ', sec["texto"][max(0, pos - 120):pos + len(m_emision.group(0)) + 180]).strip()
+                return fecha_obj, m_emision.group(0), f"{sec['archivo']}: {contexto}"
+    for sec in candidatas:
         fechas = list(re.finditer(patron_fecha, sec["texto"], re.IGNORECASE))
+        if seleccion_fecha != "ultima":
+            # "La primera fecha" no vale si es una referencia a otro acto ("la demanda presentada el ...").
+            fechas = [f for f in fechas if not _fecha_es_referencia_a_otro_acto(sec["texto"][max(0, f.start() - 70):f.start()])]
         if not fechas:
             continue
         fecha_match = fechas[-1] if seleccion_fecha == "ultima" else fechas[0]
@@ -2518,6 +2937,75 @@ def _extraer_fecha_por_documento(
             contexto = re.sub(r'\s+', ' ', sec["texto"][max(0, fecha_match.start() - 120):fecha_match.end() + 180]).strip()
             return fecha_obj, fecha_literal, f"{sec['archivo']}: {contexto}"
     return None, None, ""
+
+
+def _fecha_es_referencia_a_otro_acto(previo: str) -> bool:
+    """El texto que precede a una fecha dice que es la de otra cosa: un nacimiento, un documento de identidad, o
+    "la demanda presentada el ...", "la carta de fecha ...". Esa fecha no es la de emisión del documento que la cita."""
+    return bool(
+        re.search(r'nacid|nacimiento|naci[oó]\b|vigente|expedid', previo, re.IGNORECASE)
+        or re.search(r'(?:presentad[ao]|recibid[ao]|interpuest[ao]|de\s+fecha|con\s+fecha)\s+(?:el|del|con\s+fecha)?\s*$', previo, re.IGNORECASE)
+    )
+
+
+_ETIQUETA_FECHA_DEL_ACTO = {   # "Fecha de admisión 29/03/2021": la etiqueta que nombra el acto de ESE documento
+    "demanda": r'demanda|presentaci[oó]n|interposici[oó]n', "admision": r'admisi[oó]n|admisoria|auto\s+admisorio|resoluci[oó]n',
+    "contestacion": r'contestaci[oó]n|presentaci[oó]n', "audiencia": r'audiencia|realizaci[oó]n',
+    "sentencia": r'sentencia|emisi[oó]n|vista|resoluci[oó]n|expedici[oó]n',
+    "notificacion": r'notificaci[oó]n|diligencia', "oficio": r'oficio|emisi[oó]n',
+    "recurso": r'interposici[oó]n|presentaci[oó]n|recurso|emisi[oó]n',
+    "supremo": r'(?:decisi[oó]n\s+)?suprema|auto|resoluci[oó]n|emisi[oó]n|calificatorio|expedici[oó]n|ejecutoria|decisi[oó]n',
+}
+
+
+_ROTULO_DEL_ACTO = {   # cómo se nombra a sí mismo el acto en su propia cabecera o cierre
+    "sentencia": r'resoluci[oó]n(?:\s+de\s+vista)?|sentencia(?:\s+de\s+vista)?|auto\s+de\s+vista',
+    "recurso": r'recurso\s+de\s+casaci[oó]n|interpone|interpuesto',
+    "supremo": r'auto\s+supremo|auto\s+calificatorio|ejecutoria(?:\s+suprema)?|resoluci[oó]n(?:\s+suprema)?',
+    "admision": r'resoluci[oó]n(?:\s+admisoria)?|auto\s+admisorio',
+}
+
+
+def _posicion_fecha_emision(cuerpo: str, tipo: str = None):
+    """
+    Posición (dentro del cuerpo de un documento) de su fecha de emisión, o None si no se identifica.
+    Un escrito judicial se fecha en su cabecera ("Trujillo, uno de diciembre de dos mil veintiuno.", "Fecha 02/06/2025",
+    "a los veinte días del mes de octubre de dos mil veintitrés") o junto a la firma. Una fecha con ese mismo aspecto
+    en medio del relato ("carta de Lima, 31 de agosto de 2011") es una referencia a otro documento: no se toma.
+    """
+    fecha = (rf'((?i:{_FECHA_PALABRAS})|\d{{1,2}}\s+(?:d[ií]as?\s+del\s+mes\s+)?de\s+[a-záéíóúñ]+\s+d(?:e|el)\s+\d{{4}}|\d{{1,2}}[/-]\d{{1,2}}[/-]\d{{4}})')
+    lugar = r'(?:[A-ZÁÉÍÓÚÑ][\wáéíóúñ]*(?:\s+[a-záéíóúñ]+)?,\s*)+'
+    cabecera = cuerpo[:700]
+    desde_cola = max(0, len(cuerpo) - 500)
+    # "Fecha 20 de julio de 2022" es una etiqueta; "sentencia de fecha 06/11/2020" y "con fecha ..." citan OTRO acto.
+    fecha_rotulada = r'(?<!\bde\s)(?<!\bcon\s)(?<!\bla\s)\bfecha\s*:?\s*' + fecha
+    intentos = [(cabecera, 0, lugar + fecha, 0)]
+    if tipo in _ETIQUETA_FECHA_DEL_ACTO:
+        intentos.append((cuerpo, 0, rf'\bfecha\s+(?:de(?:l)?\s+)?(?:la\s+)?(?:{_ETIQUETA_FECHA_DEL_ACTO[tipo]})\s*:?\s*' + fecha, re.IGNORECASE))
+    if tipo in _ROTULO_DEL_ACTO:
+        # "Resolución de fecha: 28/05/2024", "Resolución N. 30 - 17/05/2022", "interpone recurso de casación con fecha 14/07/2023",
+        # "Auto supremo de fecha 28 de abril de 2025": el rótulo es el del PROPIO acto y no va precedido de artículo
+        # (la sentencia de fecha ... / el auto de fecha ... citan otro acto).
+        # El hueco entre el rótulo y la fecha no puede nombrar a otro acto ("... recurso de casación contra la sentencia de vista de fecha ...").
+        propio = (rf'(?<!\bla\s)(?<!\bel\s)(?<!\bdicha\s)\b(?:{_ROTULO_DEL_ACTO[tipo]})\b(?:(?!contra|sentencia|resoluci|vista|auto)[^\n]){{0,30}}?'
+                  r'(?:\s+de\s+fecha\s*:?\s*|\s+con\s+fecha\s*:?\s*|\s+fecha\s*:?\s*|\s+del\s+|\s+el\s+|\s*[-–]\s*|\s*:\s*)' + fecha)
+        intentos.append((cabecera, 0, propio, re.IGNORECASE))
+        intentos.append((cuerpo[desde_cola:], desde_cola, propio, re.IGNORECASE))
+    intentos += [
+        (cabecera, 0, fecha_rotulada, re.IGNORECASE),
+        (cabecera, 0, r'\ba\s+los\s+' + fecha, re.IGNORECASE),
+        (cabecera, 0, r'\bresoluci[oó]n\s+(?:n[°º.\s]*|n[uú]mero\s+)?\w+\s+del\s+' + fecha, re.IGNORECASE),   # "Resolución N.° 38 del 20 de julio de 2022"
+        (cabecera, 0, r'\binterpuest[oa]\s+el\s+' + fecha, re.IGNORECASE),                                   # recursos: "Interpuesto el 13 de setiembre de 2022"
+        (cuerpo, 0, r'fecha\s+de\s+emisi[oó]n\s*:?\s*' + fecha, re.IGNORECASE),
+        (cuerpo, 0, r'siendo\s+las\s+[^.]{0,40}?\bdel\s+' + fecha, re.IGNORECASE),
+        (cuerpo[desde_cola:], desde_cola, lugar + fecha, 0),
+        (cuerpo[desde_cola:], desde_cola, fecha_rotulada, re.IGNORECASE),                                    # tabla final: "Fecha 20 de julio de 2022 Órgano ..."
+    ]
+    for zona, desplazamiento, patron, flags in intentos:
+        m = re.search(patron, zona, flags)
+        if m:
+            return desplazamiento + m.start(1)
+    return None
 
 
 def _auditar_fechas_temporales(texto_plano: str) -> dict:
@@ -2534,6 +3022,44 @@ def _auditar_fechas_temporales(texto_plano: str) -> dict:
     hallazgos = []
     eventos = []
     vistos = set()
+
+    # Rango de cada documento dentro del texto concatenado. Cada fecha se interpreta dentro de SU
+    # documento: el encabezado del archivo siguiente no es evidencia de qué acto es la fecha.
+    # El tipo del documento sale de su título/contenido (el nombre del archivo es solo un apoyo).
+    texto_total = texto_plano or ""
+    cabeceras = list(re.finditer(r'--- \[DOCUMENTO\s+(\d+):\s+([^\]]+)\] ---', texto_total, re.IGNORECASE))
+    patron_cualquier_fecha = (
+        r'(?<!\d)\d{1,2}[/-]\d{1,2}[/-]\d{4}(?!\d)|'
+        r'(?<!\d)\d{1,2}\s+(?:d[ií]as?\s+del\s+mes\s+)?de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4}(?!\d)|'
+        + _FECHA_PALABRAS
+    )
+    rangos = []
+    for i, cab in enumerate(cabeceras):
+        fin_doc = cabeceras[i + 1].start() if i + 1 < len(cabeceras) else len(texto_total)
+        rango = {
+            "ini": cab.end(),
+            "fin": fin_doc,
+            "tipo": _tipo_canonico_documento(cab.group(2), texto_total[cab.end():fin_doc].strip()),
+            "emision_pos": None,
+        }
+        # Fecha de emisión del documento: la de su cabecera o su cierre ("Lugar, fecha", "Fecha ...", "a los ... días del mes de",
+        # "Fecha de emisión", "siendo las ... del"). Una fecha mencionada en el relato (p. ej. una carta previa) no es la del documento.
+        cuerpo = texto_total[rango["ini"]:rango["fin"]]
+        pos_emision = _posicion_fecha_emision(cuerpo, rango["tipo"])
+        if pos_emision is not None:
+            rango["emision_pos"] = rango["ini"] + pos_emision
+        else:
+            # Sin esas líneas: la primera fecha del cuerpo (salvo nacimiento/identidad o la referencia a otro acto:
+            # "la demanda presentada el ...", "carta de fecha ...").
+            for m_fecha in re.finditer(patron_cualquier_fecha, cuerpo, re.IGNORECASE):
+                if _fecha_es_referencia_a_otro_acto(cuerpo[max(0, m_fecha.start() - 70):m_fecha.start()]):
+                    continue
+                rango["emision_pos"] = rango["ini"] + m_fecha.start()
+                break
+        rangos.append(rango)
+
+    def rango_de(pos: int):
+        return next((r for r in rangos if r["ini"] <= pos < r["fin"]), None)
 
     def tipo_evento(contexto: str) -> str:
         ctx = (contexto or "").lower()
@@ -2560,8 +3086,9 @@ def _auditar_fechas_temporales(texto_plano: str) -> dict:
         return "fecha"
 
     patrones_evento_cercano = {
-        "demanda": r'interpone|presenta\s+demanda|demanda\s+de\s+alimentos|escrito\s+de\s+demanda',
-        "admision": r'admisori[ao]|admitir\s+(?:a\s+tr[aá]mite\s+)?la\s+demanda|resoluci[oó]n\s+n[uú]mero\s+uno',
+        "demanda": r'interpone|presenta\s+demanda|demanda\s+de\s+alimentos|escrito\s+de\s+demanda|'
+                   r'demanda\s+presentada|presentad[ao]\s+la\s+demanda|recibid[ao]\s+la\s+demanda|fecha\s+de\s+(?:la\s+)?demanda',
+        "admision": r'admisori[ao]|admitir\s+(?:a\s+tr[aá]mite\s+)?la\s+demanda|resoluci[oó]n\s+n[uú]mero\s+uno|fecha\s+de\s+admisi[oó]n',
         "notificacion": r'notificaci[oó]n|notifica|c[eé]dula|sinoe|emplazad[oa]',
         "contestacion": r'contestaci[oó]n|contesta\s+la\s+demanda|absuelve\s+traslado',
         "audiencia": r'audiencia',
@@ -2570,9 +3097,11 @@ def _auditar_fechas_temporales(texto_plano: str) -> dict:
         "oficio": r'oficio|retenci[oó]n'
     }
 
-    def tipo_evento_cercano(match, contexto: str) -> tuple:
+    def tipo_evento_cercano(match, contexto: str, rango: dict = None) -> tuple:
         inicio = max(0, match.start() - 180)
         fin = min(len(texto_plano or ""), match.end() + 180)
+        if rango:
+            inicio, fin = max(inicio, rango["ini"]), min(fin, rango["fin"])
         ventana = (texto_plano or "")[inicio:fin].lower()
         fecha_inicio = match.start() - inicio
         fecha_fin = match.end() - inicio
@@ -2580,6 +3109,11 @@ def _auditar_fechas_temporales(texto_plano: str) -> dict:
         for tipo, patron in patrones_evento_cercano.items():
             for kw in re.finditer(patron, ventana, re.IGNORECASE):
                 distancia = min(abs(kw.end() - fecha_inicio), abs(kw.start() - fecha_fin))
+                # "<acto> de fecha <fecha>" / "<acto> el <fecha>": la fecha pertenece a ese acto.
+                if kw.end() <= fecha_inicio and re.fullmatch(
+                    r'\s*(?:(?:de|con)\s+fecha|del|de|el|fechad[ao]\s+el)\s*', ventana[kw.end():fecha_inicio]
+                ):
+                    distancia = 0
                 if mejor is None or distancia < mejor[0]:
                     mejor = (distancia, tipo)
         if mejor and mejor[0] <= 140:
@@ -2600,7 +3134,11 @@ def _auditar_fechas_temporales(texto_plano: str) -> dict:
         })
 
     def procesar_fecha(match, dia, mes, anio, literal):
-        contexto = texto_plano[max(0, match.start() - 140): min(len(texto_plano), match.end() + 140)]
+        rango = rango_de(match.start())
+        ini_ctx, fin_ctx = max(0, match.start() - 140), min(len(texto_plano), match.end() + 140)
+        if rango:
+            ini_ctx, fin_ctx = max(ini_ctx, rango["ini"]), min(fin_ctx, rango["fin"])
+        contexto = texto_plano[ini_ctx:fin_ctx]
         fecha_obj = _parse_fecha_texto(dia, mes, anio)
         if not fecha_obj:
             agregar_hallazgo(
@@ -2627,7 +3165,13 @@ def _auditar_fechas_temporales(texto_plano: str) -> dict:
                 contexto,
                 "ADVERTENCIA"
             )
-        tipo_detectado, score_evento = tipo_evento_cercano(match, contexto)
+        if rango and rango["tipo"] == "indice":
+            return  # el índice solo resume fechas de otros documentos: no define eventos propios
+        if rango and rango["tipo"] and rango["emision_pos"] == match.start():
+            # La fecha de emisión del documento pesa más que una mención ("Sentencia de 31 de agosto de 2011" citada en el texto).
+            tipo_detectado, score_evento = rango["tipo"], -1
+        else:
+            tipo_detectado, score_evento = tipo_evento_cercano(match, contexto, rango)
         eventos.append({
             "tipo": tipo_detectado,
             "score": score_evento,
@@ -2640,7 +3184,7 @@ def _auditar_fechas_temporales(texto_plano: str) -> dict:
         dia, mes, anio = match.groups()
         procesar_fecha(match, int(dia), int(mes), int(anio), match.group(0))
 
-    patron_largo = r'(?<!\d)(\d{1,2})\s+de\s+([a-zA-ZáéíóúñÁÉÍÓÚÑ]+)\s+d(?:e|el)\s+(\d{4})(?!\d)'
+    patron_largo = r'(?<!\d)(\d{1,2})\s+(?:d[ií]as?\s+del\s+mes\s+)?de\s+([a-zA-ZáéíóúñÁÉÍÓÚÑ]+)\s+d(?:e|el)\s+(\d{4})(?!\d)'
     for match in re.finditer(patron_largo, texto_plano or "", re.IGNORECASE):
         dia, mes_txt, anio = match.groups()
         mes = meses.get(_normalizar_texto_busqueda_pdf(mes_txt))
@@ -2655,7 +3199,13 @@ def _auditar_fechas_temporales(texto_plano: str) -> dict:
             continue
         procesar_fecha(match, int(dia), mes, int(anio), match.group(0))
 
-    orden_esperado = ["demanda", "admision", "notificacion", "contestacion", "audiencia", "sentencia", "consentimiento", "oficio"]
+    # Fechas escritas con letras ("uno de diciembre de dos mil veintiuno"): los escritos judiciales las usan a menudo.
+    for match in re.finditer(_FECHA_PALABRAS, texto_plano or "", re.IGNORECASE):
+        fecha_letras = _parse_fecha_literal(match.group(0))
+        if fecha_letras:
+            procesar_fecha(match, fecha_letras.day, fecha_letras.month, fecha_letras.year, match.group(0))
+
+    orden_esperado =["demanda", "admision", "notificacion", "contestacion", "audiencia", "sentencia", "consentimiento", "oficio"]
     evento_canonico = {}
     for evento in eventos:
         tipo = evento["tipo"]
@@ -2755,7 +3305,8 @@ def modulo_extraccion_plazos(texto_plano: str) -> dict:
             r'admitir\s+a\s+tr[aá]mite\s+la\s+demanda',
             r'dado\s+cuenta'
         ],
-        seleccion_fecha="primera"
+        seleccion_fecha="primera",
+        tipo="admision"
     )
     if admision_obj:
         fijar_evento_prioritario("admision", admision_obj, admision_lit, admision_ctx)
@@ -2768,34 +3319,44 @@ def modulo_extraccion_plazos(texto_plano: str) -> dict:
             r'siendo\s+la\s+.*?ma[nñ]ana',
             r'acta\s+de\s+audiencia'
         ],
-        seleccion_fecha="primera"
+        seleccion_fecha="primera",
+        tipo="audiencia"
     )
     if audiencia_obj:
         fijar_evento_prioritario("audiencia", audiencia_obj, audiencia_lit, audiencia_ctx)
 
     fecha_notificacion_obj, fecha_notificacion_literal, contexto_notificacion = _extraer_fecha_por_documento(
         texto_plano,
-        r'(?:^|[_\s-])(?:03|notificaci[oó]n|cedula|c[eé]dula)',
+        r'^0?3[_\s-]|(?:^|[_\s-])(?:notificaci[oó]n|cedula|c[eé]dula)',
         [
+            # La notificación surte efecto el día de la diligencia/entrega, no el de emisión de la cédula
+            # ni el de la resolución que se notifica.
+            r'fecha\s+de\s+diligencia',
+            r'se\s+hizo\s+entrega|fueron\s+recibid[oa]s|entrega\s+de\s+copia',
             r'fecha\s+(?:de\s+)?notificaci[oó]n',
             r'notificaci[oó]n\s+(?:del\s+cargo|de\s+la\s+demanda|al\s+demandado)',
             r'(?:notificad[oa]|emplazad[oa])\s+(?:el|con|al|a\s+la)?',
             r'c[eé]dula\s+de\s+notificaci[oó]n'
         ],
-        seleccion_fecha="ultima"
+        seleccion_fecha="ultima",
+        por_prioridad=True,
+        tipo="notificacion"
     )
     if not fecha_notificacion_obj:
+        # Sin un documento de notificación, solo vale una frase que diga que se notificó/emplazó CON LA DEMANDA y cuándo.
+        # "la parte emplazada" a secas describe a la parte, no es una notificación.
         fecha_notificacion_obj, fecha_notificacion_literal, contexto_notificacion = _extraer_fecha_contextual(
             texto_plano,
             [
-                r'notificaci[oó]n\s+(?:del\s+cargo|de\s+la\s+demanda|al\s+demandado)',
-                r'(?:notificad[oa]|emplazad[oa])\s+(?:el|con|al|a\s+la)?',
-                r'c[eé]dula\s+de\s+notificaci[oó]n'
+                r'notificaci[oó]n\s+(?:del\s+cargo|de\s+la\s+demanda|al\s+demandado)\s*(?:fue\s+)?(?:el|con\s+fecha|de\s+fecha)?',
+                r'(?:fue|fueron|ha\s+sido)\s+(?:debidamente\s+)?(?:notificad[oa]s?|emplazad[oa]s?)\s+(?:con\s+la\s+demanda\s+)?(?:el|con\s+fecha)',
+                r'(?:notificad[oa]|emplazad[oa])\s+con\s+la\s+demanda\s+(?:el|con\s+fecha)?',
+                r'c[eé]dula\s+de\s+notificaci[oó]n\s*(?:de\s+fecha|del)?'
             ]
         )
     fecha_presentacion_obj, fecha_presentacion_literal, contexto_presentacion = _extraer_fecha_por_documento(
         texto_plano,
-        r'(?:^|[_\s-])(?:04|contestaci[oó]n)',
+        r'^0?4[_\s-]|(?:^|[_\s-])contestaci[oó]n',
         [
             r'fecha\s+(?:de\s+)?presentaci[oó]n',
             r'contestaci[oó]n\s+(?:de\s+la\s+)?demanda',
@@ -2803,7 +3364,8 @@ def modulo_extraccion_plazos(texto_plano: str) -> dict:
             r'absuelve\s+traslado',
             r'escrito\s+de\s+contestaci[oó]n'
         ],
-        seleccion_fecha="ultima"
+        seleccion_fecha="ultima",
+        tipo="contestacion"
     )
     if not fecha_presentacion_obj:
         fecha_presentacion_obj, fecha_presentacion_literal, contexto_presentacion = _extraer_fecha_contextual(
@@ -2836,7 +3398,13 @@ def modulo_extraccion_plazos(texto_plano: str) -> dict:
         auditoria_temporal["eventos_procesales"] = eventos
 
     if not fecha_notificacion_obj:
-        fecha_notificacion_obj, fecha_notificacion_str, _ = fecha_evento("notificacion")
+        contexto_notificacion_generico = str(eventos.get("notificacion", {}).get("contexto", ""))
+        if re.search(r'\bfue(?:ron)?\s+notificad|notificad[oa]s?\s+(?:con|el)\b|c[eé]dula\s+de\s+notificaci[oó]n\s+(?:de\s+fecha|del)|'
+                     r'fecha\s+de\s+(?:la\s+)?notificaci[oó]n|notificaci[oó]n\s+de\s+la\s+demanda', contexto_notificacion_generico, re.IGNORECASE):
+            fecha_notificacion_obj, fecha_notificacion_str, _ = fecha_evento("notificacion")
+        else:
+            # Una mención suelta ("la parte emplazada", "cédulas de notificación de fojas 480") no es la notificación de la demanda.
+            eventos.pop("notificacion", None)
     if not fecha_presentacion_obj:
         contexto_generico_contestacion = str(eventos.get("contestacion", {}).get("contexto", ""))
         if contexto_generico_contestacion and not re.search(
@@ -2904,7 +3472,14 @@ def modulo_verificacion_admisibilidad(texto_plano: str) -> list:
         },
         {
             "anexo": "Pruebas de Capacidad",
-            "keywords": [r"\bboletas?\s+de\s+pago\b", r"\brecibos?\s+de\s+honorarios\b", r"\bestado\s+de\s+cuenta\b", r"\bconstancia\s+de\s+ingresos\b"]
+            "keywords": [
+                r"\bboletas?\s+de\s+pago\b", r"\brecibos?\s+de\s+honorarios\b", r"\bestado\s+de\s+cuenta\b",
+                r"\bconstancias?\s+de\s+ingresos?\b",
+                r"\bboletas?\s+(?:o|y)\s+constancias?\s+de\s+ingresos?\b",
+                r"\bficha\s+referencial\s+de\s+la\s+fuente\s+de\s+ingresos\b",
+                r"\bfuente\s+de\s+ingresos\s+del\s+obligado\b",
+                r"\bconsulta\s+de\s+remuneraciones\b", r"\bconstancias?\s+de\s+haberes\b"
+            ]
         },
         {
             "anexo": "Certificado Domiciliario",
@@ -3082,7 +3657,7 @@ def _extraer_montos_reales(texto_plano: str):
     Fuente de verdad financiera del documento:
     recoge todos los montos explícitos con símbolo monetario.
     """
-    patron_monto = r'(?:S/|S/\.)\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)'
+    patron_monto = r'(?:S/|S/\.)\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)'
     montos = []
     for match in re.finditer(patron_monto, texto_plano):
         val = _normalizar_monto_texto(match.group(1))
@@ -3136,13 +3711,81 @@ def _contexto_monto_en_texto(texto_plano: str, monto: float, ventana: int = 110)
             return re.sub(r'\s+', ' ', texto_plano[inicio:fin]).strip()
     return ""
 
+# "fije/fijar/fijando" piden; "fija" suelta es casi siempre el adjetivo ("remuneración mensual fija").
+_CUE_PETICION = re.compile(r'solicit\w*|pretend\w*|pretensi[oó]n|\bse\s+fij[ae]\b|\bfij(?:ar|e|en|ase|ando)\b|propon\w*|propuest\w*|\bpid\w+|ruego|reclam\w*|ordene', re.IGNORECASE)
+_SUSTANTIVO_PENSION = re.compile(r'pensi[oó]n|alimentos|alimentari\w*|alimentist\w*|asignaci[oó]n', re.IGNORECASE)
+# Lo que vuelve a un monto "otra cosa" aunque la frase hable de alimentos: indemnización, cese o pensión anterior ya fijada,
+# pagos o aportes, ingresos, gastos, liquidaciones, o un reparto por hijo.
+_CUE_NO_ES_PETICION = re.compile(
+    # Pagos YA hechos (no "se ordene el pago de una pensión", que es la petición): pagó/pagado, abonó/abonado, depositó, aportes...
+    r'indemniz\w+|da[ñn]o|\bcese\b|\bcesar\b|exoner\w+|concilia\w+|\bexpediente\s+n|ya\s+fij\w+|ven[ií]a\w*|\baportes?\b|aport(?:ó|aron|ado|ando)|'
+    r'cumpl(?:ió|ieron|ido|iendo)|entreg(?:ó|aron|ado|ando)|abon(?:ó|aron|ado|ando)|\bpag(?:ó|aron|ado|ados|ada|adas|os|ando)\b|'
+    r'deposit(?:ó|aron|ado|ados|os|ando)|\bingres\w+|remuner\w+|sueldo|percib\w+|\bhaber(?:es)?\b|\bgast\w+|deuda|devengad\w+|liquidaci\w+|'
+    r'saldo|ganancial\w*|raz[oó]n\s+de|por\s+cada|para\s+cada|en\s+proporci[oó]n|perjuicio', re.IGNORECASE)
+
+
+def _frase_es_peticion_de_pension(izquierda: str, derecha: str = "") -> bool:
+    """La frase del monto PIDE una pensión alimenticia: hay una petición y un sustantivo de pensión antes del monto, y lo que
+    rodea al monto no es una indemnización, el cese de una pensión anterior, un pago, un ingreso o un gasto."""
+    peticiones = list(_CUE_PETICION.finditer(izquierda))
+    if not peticiones or not _SUSTANTIVO_PENSION.search(izquierda):
+        return False
+    # Esas palabras vetan solo si están en la cláusula inmediata al monto (una tabla aplanada no tiene frases que las separen).
+    if re.search(r'indemniz\w+|da[ñn]o|\bcese\b|\bcesar\b|exoneraci\w+|concilia\w+|\bexpediente\s+n', izquierda[-130:], re.IGNORECASE):
+        return False
+    if _CUE_NO_ES_PETICION.search(izquierda[peticiones[-1].start():]):
+        return False
+    # Lo que viene después solo veta si CALIFICA al monto ("S/ 80,000 por daño moral"), no si es la siguiente pretensión o la fila siguiente.
+    return not re.match(r'\s*,?\s*(?:por|en|a\s+t[ií]tulo\s+de)\s+(?:concepto\s+de\s+)?(?:da[ñn]o|indemniz|reparaci)', derecha, re.IGNORECASE)
+
+
+def _petitorio_verificado(texto_plano: str):
+    """Monto mensual de pensión que PIDE la demanda, leído de la frase que lo solicita (no de una indemnización, de una pensión
+    anterior que se pide cesar, de aportes ya hechos ni de lo que luego ordene la sentencia). None si la demanda no pide un monto."""
+    demanda = next((s for s in _secciones_tipadas(texto_plano)
+                    if s.get("tipo") == "demanda" and not re.search(r'apelaci|casaci|recurso', _normalizar_texto_busqueda_pdf(s["archivo"]))), None)
+    if not demanda:
+        return None
+    candidatos = []
+    for mt in _montos_con_contexto(demanda["texto"]):
+        if not (50.0 < mt["valor"] < 50000.0) or not _frase_es_peticion_de_pension(mt["izq"], mt["der"]):
+            continue
+        candidatos.append({**mt, "evidencia": re.sub(r'\s+', ' ', mt["izq"][-170:] + mt["literal"] + mt["der"]).strip()})
+    if not candidatos:
+        return None
+    por_valor = {}
+    for c in candidatos:
+        por_valor.setdefault(round(c["valor"], 2), []).append(c)
+    ranking = sorted(por_valor.values(), key=lambda g: (-len(g), g[0]["pos"]))
+    elegido = ranking[0][0]
+    ambiguo = len(ranking) > 1 and len(ranking[0]) == len(ranking[1])
+    return {"monto": round(elegido["valor"], 2), "evidencia": elegido["evidencia"],
+            "fuente": "Petitorio verificado en la demanda",
+            "verificacion": {"estado": "revisar" if ambiguo else "verificada",
+                             "motivos": ["la demanda pide más de un monto distinto"] if ambiguo else []}}
+
+
 def _extraer_petitorio_demanda_info(texto_plano: str) -> dict:
     """
     Extrae el petitorio principal y su evidencia desde demanda/sentencia.
     Evita usar la primera aparición numérica del monto como trazabilidad.
     """
-    texto_demanda = _texto_documento_por_nombre(
-        texto_plano, r'^(?:0?1[_ -])?DEMANDA(?:[_ .-]|$)'
+    verificado = _petitorio_verificado(texto_plano)
+    if verificado:
+        return verificado
+    info = _extraer_petitorio_demanda_info_antiguo(texto_plano)
+    # Los métodos anteriores solo valen si su propia evidencia es una petición de pensión (no una indemnización, un pago, etc.)
+    # y si no leen lo FIJADO por el juez ("pensión mensual principal/fijada"): eso es la pensión ordenada, no el petitorio.
+    if info.get("monto") and (not _frase_es_peticion_de_pension(info.get("evidencia", ""))
+                              or "fijada" in str(info.get("fuente", ""))):
+        return {"monto": 0.0, "evidencia": "", "fuente": "No detectado"}
+    return info
+
+
+def _extraer_petitorio_demanda_info_antiguo(texto_plano: str) -> dict:
+    """Métodos de respaldo para el petitorio (sección I. PETITORIO, pensión fijada, petitorio en letras)."""
+    texto_demanda = _texto_documento(
+        texto_plano, "demanda", r'^(?:0?1[_ -])?DEMANDA(?:[_ .-]|$)'
     ) or re.split(
         r'CONTESTACI[ÓO]N\s+DE\s+DEMANDA|SUMILLA:\s*CONTESTACI[ÓO]N|ESCRITO:\s*0?2-\d{4}',
         texto_plano,
@@ -3259,6 +3902,17 @@ def _texto_parece_petitorio_o_oferta(texto: str) -> bool:
         re.IGNORECASE
     ))
 
+def _monto_precedido_de_ingreso(texto_plano: str, pos: int) -> bool:
+    """True si, en la misma oración, antes del monto aparece 'remuneración / ingreso / sueldo / haberes / percibe':
+    es lo que gana el demandado, no lo que se solicita ni un gasto."""
+    # Solo la cláusula del monto: se corta en puntuación ("..., solicito una pensión de S/ 900") y en montos previos.
+    previo = re.split(r'[.;:,]\s|S/\.?\s*[\d.,]+', texto_plano[max(0, pos - 140):pos])[-1]
+    return bool(re.search(
+        r'\b(?:remuneraci[oó]n(?:es)?|ingresos?|sueldo|salario|haber(?:es)?|percibe(?:n)?|planilla)\b',
+        previo, re.IGNORECASE
+    ))
+
+
 def _texto_parece_ingreso_hu14(texto: str) -> bool:
     """
     Detecta montos que describen capacidad económica del obligado.
@@ -3324,8 +3978,8 @@ def _obtener_bloques_demanda_contestacion(texto_plano: str):
         return "", ""
     secciones = _secciones_documentales(texto_plano)
     if len(secciones) > 1:
-        demanda = _texto_documento_por_nombre(texto_plano, r'^(?:0?1[_ -])?DEMANDA(?:[_ .-]|$)')
-        contestacion = _texto_documento_por_nombre(texto_plano, r'CONTESTACI[ÓO]N')
+        demanda = _texto_documento(texto_plano, "demanda", r'^(?:0?1[_ -])?DEMANDA(?:[_ .-]|$)')
+        contestacion = _texto_documento(texto_plano, "contestacion", r'CONTESTACI[ÓO]N')
         if demanda or contestacion:
             return demanda, contestacion
     partes = re.split(
@@ -3339,38 +3993,260 @@ def _obtener_bloques_demanda_contestacion(texto_plano: str):
     return demanda, contestacion
 
 
+_VERBOS_DE_PUNTO = (r'(?:determinar|establecer|definir|verificar|dilucidar|analizar|precisar|acreditar|evaluar|resolver|fijar|'
+                    r'delimitar|examinar|decidir|se[ñn]alar)')
+
+
+def _separar_puntos_controvertidos(bloque: str) -> list:
+    """Separa el bloque de un acta en sus puntos: ítems numerados ("1. ...", "2) ...", "(a) ..."), con viñeta, separados por ";",
+    o frases que empiezan con un verbo de fijación ("Determinar si...", "..., establecer si... y definir..."). Cada punto es un
+    fragmento literal del acta. Un texto corrido que no es una lista (p. ej. un título) no produce puntos."""
+    bloque = re.sub(r'\s+', ' ', bloque).strip()
+    # La frase introductoria ("Se fijan como puntos controvertidos:") no es un punto.
+    bloque = re.sub(r'(?i)^(?:.{0,160}?\b)?(?:se\s+\w+\s+)?como\s+(?:puntos?\s+controvertidos?|cuestiones\s+(?:a\s+resolver|controvertidas))\s*:?\s*', '', bloque)
+    partes = re.split(r'(?:(?<=\s)|^)(?:\d{1,2}[.)]|\([a-z]\)|[a-z]\))\s+(?=\S)', bloque)
+    es_lista = len([p for p in partes if p.strip()]) >= 2
+    if not es_lista:
+        partes = re.split(r'\s[-–•]\s+(?=[A-ZÁÉÍÓÚÑ])', bloque)
+        es_lista = len([p for p in partes if p.strip()]) >= 2
+    puntos = []
+    for parte in partes:
+        for fragmento in re.split(r';\s*(?:y\s+)?', parte):
+            es_lista = es_lista or ';' in parte
+            for punto in re.split(rf'(?:(?<=[.])\s+|,\s*(?:y\s+)?|\s+y\s+)(?={_VERBOS_DE_PUNTO}\b)', fragmento, flags=re.IGNORECASE):
+                punto = punto.strip(' .;,:-')
+                if len(punto) < 15:
+                    continue
+                if es_lista or re.match(rf'(?i)^(?:y\s+)?{_VERBOS_DE_PUNTO}\b', punto):
+                    puntos.append(punto)
+    return list(dict.fromkeys(puntos))
+
+
 def _extraer_puntos_controvertidos_acta(texto_plano: str) -> list:
-    acta = _texto_documento_por_nombre(texto_plano, r'ACTA[_ -]AUDIENCIA|AUDIENCIA[_ -]UNICA')
+    acta = _texto_documento(texto_plano, "audiencia", r'ACTA[_ -]AUDIENCIA|AUDIENCIA[_ -]UNICA')
     if not acta:
         return []
-    match = re.search(
-        r'se\s+tienen\s+como\s+puntos\s+controvertidos\s*:\s*([\s\S]{0,1200}?)(?=\n\s*[IVX]+\.\s+[A-ZÁÉÍÓÚÑ]|$)',
-        acta, re.IGNORECASE
+    # Fin de la sección: el siguiente encabezado en MAYÚSCULAS ("III. ACTUACIÓN", "MEDIOS PROBATORIOS"), no un ítem "2. Determinar...".
+    fin_seccion = (r'(?=(?-i:\n\s*(?:[IVX]+|\d+)\.\s+[A-ZÁÉÍÓÚÑ]{3,}|\n\s*[A-ZÁÉÍÓÚÑ ]{12,}\s*\n|\bACTUACI[ÓO]N\b)|'
+                   r'\bSe\s+(?:admiten?|actuaron)\b|\bMedios\s+probatorios\b|\bFirma\b|$)')
+    # 1) "se tienen / se fijaron / se establecen como puntos controvertidos:" (o "cuestiones a resolver:")
+    # 2) el encabezado "PUNTOS CONTROVERTIDOS" seguido de la lista.
+    for patron in (
+        r'(?:se\s+\w+\s+)?como\s+(?:puntos\s+controvertidos|cuestiones\s+(?:a\s+resolver|controvertidas))\s*:?\s*([\s\S]{0,1200}?)' + fin_seccion,
+        r'\bpuntos?\s+controvertidos?\b[:\s-]*([\s\S]{0,1200}?)' + fin_seccion,
+    ):
+        for match in re.finditer(patron, acta, re.IGNORECASE):
+            puntos = _separar_puntos_controvertidos(match.group(1))
+            if puntos:
+                return [{"tema": "Punto controvertido del acta", "sugerencia": p, "fuente": "acta"} for p in puntos]
+    return []
+
+
+def _punto_sugerido_fundamentado(punto: dict, texto_plano: str) -> bool:
+    """
+    Anti-alucinación para las sugerencias que redacta la IA: si cita un fragmento entre comillas,
+    ese fragmento debe existir en el documento al que la sugerencia lo atribuye (o, si no atribuye
+    ninguno, en algún documento del expediente).
+    """
+    texto = f"{punto.get('tema', '')} {punto.get('sugerencia', '')}"
+    citas = [c for c in re.findall(r"['\"“‘«]([^'\"”’»]{15,300})['\"”’»]", texto)]
+    if not citas:
+        return True
+    secciones = _secciones_documentales(texto_plano)
+    atribuciones = [
+        (r'\bacta\b|audiencia\s+[uú]nica', r'ACTA|AUDIENCIA'),
+        (r'\bsentencia\b', r'SENTENCIA'),
+        (r'\bdemanda\b', r'DEMANDA'),
+        (r'contestaci[oó]n', r'CONTESTACION'),
+        (r'resoluci[oó]n\s+admisoria|auto\s+admisorio', r'ADMISORI'),
+        (r'\boficio\b', r'OFICIO'),
+        (r'notificaci[oó]n|c[eé]dula', r'NOTIFICACION'),
+    ]
+    citados = [nombre for citado, nombre in atribuciones if re.search(citado, texto, re.IGNORECASE)]
+    for num in re.findall(r'\bdocumento\s+(\d{1,2})\b', texto, re.IGNORECASE):
+        for sec in secciones:
+            if sec["indice"] == int(num):
+                citados.append(re.escape(sec["archivo"]))
+    candidatas = [
+        sec for sec in secciones if citados and any(re.search(n, sec.get("archivo", ""), re.IGNORECASE) for n in citados)
+    ] or secciones
+    universo = _normalizar_texto_busqueda_pdf(" ".join(sec.get("texto", "") for sec in candidatas))
+    return all(_normalizar_texto_busqueda_pdf(cita) in universo for cita in citas)
+
+
+def _a_tercera_persona(texto: str) -> str:
+    for patron, nuevo in ((r'\bmi\b', 'su'), (r'\bmis\b', 'sus'), (r'\bdeclaro\b', 'declara'),
+                          (r'\basumo\b', 'asume'), (r'\bdestino\b', 'destina')):
+        texto = re.sub(patron, nuevo, texto, flags=re.IGNORECASE)
+    return texto
+
+
+def _hechos_contestacion_y_audiencia(texto_plano: str) -> dict:
+    """
+    Hechos de la contestación y de la audiencia leídos del propio texto del expediente
+    (no del modelo): reconocimiento de la obligación, oposición, ingresos, cargas, ofertas.
+    """
+    soles = r'(?:S/|S/\.)\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)'
+    _, contestacion = _obtener_bloques_demanda_contestacion(texto_plano)
+    acta = _texto_documento(texto_plano, "audiencia", r'ACTA[_ -]AUDIENCIA|AUDIENCIA[_ -]UNICA')
+    cont = re.sub(r'\s+', ' ', contestacion or '')
+    act = re.sub(r'\s+', ' ', acta or '')
+    flags = re.IGNORECASE
+
+    def monto(match, grupo):
+        return _normalizar_monto_texto(match.group(grupo)) if match else None
+
+    hechos = {}
+    if re.search(r'\b(?:reconozc\w*|reconoc\w*|reconoci\w*)\b[^.]{0,60}\bobligaci[oó]n|\bno\s+desconoce\s+(?:su\s+)?(?:deber|obligaci[oó]n)',
+                 cont, flags):
+        hechos["reconoce"] = True
+    cargas_previas = _extraer_cargas_porcentuales(texto_plano)
+    if cargas_previas:
+        hechos["cargas_previas_pct"] = {"total": sum(c["porcentaje"] for c in cargas_previas), "n": len(cargas_previas)}
+    m = re.search(
+        r'\b(?:contradigo|contradice|me\s+opongo|se\s+opone)\s+(parcialmente\s+)?[^.]{0,80}?monto\s+solicitado\s+de\s+'
+        + soles + r'(?:\s+por\s+considerar\s+que\s+([^.;]{8,110}))?', cont, flags
     )
-    if not match:
-        return []
-    puntos = []
-    for fragmento in re.split(r';\s*(?=(?:y\s+)?\d+\))', match.group(1)):
-        texto_punto = re.sub(r'^(?:y\s+)?\d+\)\s*', '', fragmento.strip(), flags=re.IGNORECASE).strip(' .;')
-        if texto_punto:
-            puntos.append({"tema": "Punto controvertido del acta", "sugerencia": texto_punto, "fuente": "acta"})
-    return puntos
+    if m and monto(m, 2):
+        hechos["oposicion"] = {
+            "parcial": bool(m.group(1)), "monto": monto(m, 2),
+            "motivo": _a_tercera_persona(m.group(3).strip()) if m.group(3) else ""
+        }
+    m = re.search(r'\b(ingreso\s+(?:mensual\s+)?(?:neto\s+|bruto\s+)?(?:aproximado\s+|referencial\s+)?)de\s+' + soles, cont, flags)
+    if m and monto(m, 2):
+        hechos["ingreso"] = {"calificativo": m.group(1).strip().lower(), "monto": monto(m, 2)}
+    m = re.search(r'\bcarga\s+(?:familiar\s+)?adicional\s*:\s*([^,.]{5,120})[^.]{0,120}?' + soles, cont, flags)
+    if m and monto(m, 2):
+        hechos["carga"] = {"descripcion": _a_tercera_persona(m.group(1).strip()), "monto": monto(m, 2)}
+    m = re.search(r'\b(?:ofrezco|ofrece|ofreci[oó]|ofrecimiento)\b[^.]{0,160}?' + soles, cont, flags)
+    if m and monto(m, 1):
+        hechos["oferta"] = monto(m, 1)
+
+    audiencia = {}
+    m = re.search(r'siendo\s+las\s+[^.]{0,40}?\bdel\s+(\d{1,2}\s+de\s+[a-záéíóúñ]+\s+de\s+\d{4})', act, flags)
+    if m:
+        audiencia["fecha"] = m.group(1)
+    m = re.search(
+        r'(?:demandante|progenitora|madre|accionante)\s+(?:manifiesta|propone|ofrece|indica|se[ñn]ala)'
+        r'[^.]{0,160}?(?:reduc\w+|rebaj\w+|disminu\w+)[^.]{0,80}?' + soles, act, flags
+    )
+    if m and monto(m, 1):
+        audiencia["demandante_reduce"] = monto(m, 1)
+    m = re.search(
+        r'(?:demandado|obligado)\s+(?:increment\w+|aument\w+|elev\w+|mejor\w+)\s+su\s+(?:ofrecimiento|oferta|propuesta)\s+a\s+' + soles,
+        act, flags
+    )
+    if m and monto(m, 1):
+        audiencia["demandado_eleva"] = monto(m, 1)
+    if re.search(r'no\s+se\s+alcanza\s+acuerdo[^.]{0,100}(?:monto|pensi[oó]n)', act, flags):
+        audiencia["sin_acuerdo"] = True
+    if "demandante_reduce" in audiencia or "demandado_eleva" in audiencia:
+        hechos["audiencia"] = audiencia
+    # Lo que ordenó la sentencia (monto fijo o porcentaje), con su fecha: consta en el documento, no depende de la IA.
+    pension = _pension_ordenada_del_expediente(texto_plano)
+    sentencia = next((s["texto"] for s in _secciones_tipadas(texto_plano) if s["archivo"] == pension.get("documento")),
+                     _texto_documento(texto_plano, "sentencia"))
+    if pension["tipo"] != "no_detectado":
+        fecha = re.search(r'\d{1,2}\s+de\s+[a-záéíóúñ]+\s+de(?:l)?\s+\d{4}|\d{1,2}/\d{1,2}/\d{4}', sentencia, flags)
+        hechos["fallo"] = {"tipo": pension["tipo"], "valor": pension["valor"], "fecha": fecha.group(0) if fecha else None}
+    return hechos
+
+
+def _redactar_hechos_postura(hechos: dict, tono: str) -> str:
+    tecnico = tono == "tecnico"
+    frases = []
+    clausulas = []
+    if hechos.get("reconoce"):
+        clausulas.append("reconoce su obligación alimentaria" if tecnico else "reconoce que debe pasar alimentos al menor")
+    op = hechos.get("oposicion")
+    if op:
+        if tecnico:
+            texto = f"{'contradice parcialmente' if op['parcial'] else 'contradice'} el monto solicitado de S/ {op['monto']:.2f}"
+            if op["motivo"]:
+                texto += f" por considerar que {op['motivo']}"
+        else:
+            texto = f"no está de acuerdo con los S/ {op['monto']:.2f} pedidos"
+            if op["motivo"]:
+                texto += f" porque considera que {op['motivo']}"
+        clausulas.append(texto)
+    ing = hechos.get("ingreso")
+    if ing:
+        clausulas.append(
+            f"declara un {ing['calificativo']} de S/ {ing['monto']:.2f}" if tecnico
+            else f"dice ganar unos S/ {ing['monto']:.2f} al mes"
+        )
+    carga = hechos.get("carga")
+    if carga:
+        clausulas.append(
+            f"declara como carga adicional {carga['descripcion']} (S/ {carga['monto']:.2f} mensuales)" if tecnico
+            else f"declara una carga adicional: {carga['descripcion']}, de unos S/ {carga['monto']:.2f} al mes"
+        )
+    previas = hechos.get("cargas_previas_pct")
+    if previas:
+        clausulas.append(
+            f"declara {previas['n']} obligaciones alimentarias previas que comprometen el {previas['total']:g}% de sus haberes"
+            if tecnico else
+            f"dice que ya paga alimentos a otras personas, por el {previas['total']:g}% de sus haberes"
+        )
+    oferta = hechos.get("oferta")
+    if oferta and not clausulas:
+        frases.append(f"En la contestación, el demandado ofreció S/ {oferta:.2f} mensuales.")
+    elif oferta:
+        clausulas.append(f"ofrece abonar S/ {oferta:.2f} mensuales" if tecnico else f"ofrece pagar S/ {oferta:.2f} mensuales")
+    if clausulas:
+        cuerpo = clausulas[0] if len(clausulas) == 1 else ", ".join(clausulas[:-1]) + " y " + clausulas[-1]
+        sujeto = "En la contestación, el demandado " if tecnico else "En su contestación, el demandado "
+        frases.append(f"{sujeto}{cuerpo}.")
+    aud = hechos.get("audiencia")
+    if aud:
+        partes = []
+        if "demandante_reduce" in aud:
+            partes.append(f"la demandante {'redujo su propuesta' if tecnico else 'bajó su pedido'} a S/ {aud['demandante_reduce']:.2f}")
+        if "demandado_eleva" in aud:
+            partes.append(f"el demandado {'elevó su ofrecimiento' if tecnico else 'subió su oferta'} a S/ {aud['demandado_eleva']:.2f}")
+        cuerpo = " y ".join(partes)
+        cierre = (", sin alcanzar acuerdo sobre el monto" if tecnico else ", pero no se pusieron de acuerdo en el monto") if aud.get("sin_acuerdo") else ""
+        cuando = f"En la audiencia única del {aud['fecha']}" if aud.get("fecha") else "En la audiencia única"
+        frases.append(f"{cuando}, {cuerpo}{cierre}.")
+    fallo = hechos.get("fallo")
+    if fallo:
+        cuando = f" del {fallo['fecha']}" if fallo.get("fecha") else ""
+        if fallo["tipo"] == "monto_fijo":
+            frases.append(f"La sentencia{cuando} ordenó una pensión alimenticia de S/ {fallo['valor']:.2f} mensuales."
+                          if tecnico else f"La sentencia{cuando} ordenó pagar S/ {fallo['valor']:.2f} mensuales.")
+        else:
+            frases.append(f"La sentencia{cuando} ordenó una pensión alimenticia equivalente al {fallo['valor']:g}% de los haberes del demandado."
+                          if tecnico else f"La sentencia{cuando} ordenó pagar el {fallo['valor']:g}% de los haberes del demandado.")
+    return " ".join(frases)
 
 
 def _integrar_oferta_contestacion(postura: dict, texto_plano: str) -> dict:
-    _, contestacion = _obtener_bloques_demanda_contestacion(texto_plano)
-    oferta = re.search(
-        r'\b(?:ofrezco|ofrece|ofreci[oó]|ofrecimiento)\b[^.]{0,160}?(?:S/|S/\.)\s*([0-9][0-9\.,]*)',
-        contestacion, re.IGNORECASE
-    )
-    monto = _normalizar_monto_texto(oferta.group(1)) if oferta else None
-    if not monto or not isinstance(postura, dict):
+    if not isinstance(postura, dict):
         return postura
-    frase = f"En la contestación, el demandado ofreció S/ {monto:.2f} mensuales."
+    hechos = _hechos_contestacion_y_audiencia(texto_plano)
+    if not hechos.get("oferta") and not hechos.get("audiencia"):
+        return postura
     for tono in ("tecnico", "estandar"):
         texto = str(postura.get(tono) or "").strip()
-        if texto and not re.search(rf'\b{monto:.0f}(?:[.,]00)?\b', texto):
-            postura[tono] = f"{frase} {texto}"
+        hechos_tono = dict(hechos)
+        fallo = hechos_tono.get("fallo")
+        if fallo and re.search(rf'(?<![\d.]){fallo["valor"]:g}(?!\d)', texto):
+            hechos_tono.pop("fallo")          # la IA ya dijo lo que ordenó la sentencia: no se repite
+        prefijo = _redactar_hechos_postura(hechos_tono, tono)
+        if not texto or not prefijo or prefijo in texto:
+            continue
+        if set(hechos) <= {"oferta"} and re.search(rf'\b{hechos["oferta"]:.0f}(?:[.,]00)?\b', texto):
+            continue
+        oraciones = re.split(r'(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])', texto)
+        # Se retiran las frases genéricas del modelo que los hechos concretos reemplazan.
+        patron_generico = r'^En\s+la\s+contestaci[oó]n,\s+el\s+demandado\s+(?:ofreci[oó]|ofrece)\b'
+        if "audiencia" in hechos:
+            patron_generico += (
+                r'|compareci[oó]\s+(?:a\s+la\s+audiencia\s+)?y\s+dej[oó]\s+constancia\s+de\s+su\s+(?:oferta|posici[oó]n)'
+                r'|asisti[oó]\s+a\s+la\s+audiencia\s+y\s+ofreci[oó]\s+pagar\s+una\s+pensi[oó]n'
+            )
+        restantes = [o for o in oraciones if not re.search(patron_generico, o, re.IGNORECASE)]
+        postura[tono] = f"{prefijo} {' '.join(restantes)}".strip()
     return postura
 
 
@@ -3420,18 +4296,107 @@ def _extraer_carga_especie_desde_texto(texto_plano: str, montos_reales: list) ->
 
     return {"monto_reportado": 0.0, "monto_acreditado": 0.0, "estado": "no detectada", "evidencia": ""}
 
+_SOLES_CAPTURA = r'(?:S/|S/\.)\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)'
+
+_CATEGORIAS_GASTO = [
+    ("Educación", r'(?:pensi[oó]n\s+escolar|colegio|matr[ií]cula|educaci[oó]n|mensualidad\s+escolar)'),
+    ("Alimentación", r'(?:alimentaci[oó]n|comida|gastos\s+(?:conjuntos\s+de\s+)?alimentaci[oó]n|supermercado)'),
+    ("Movilidad del menor", r'(?:movilidad\s+(?:del\s+menor|del\s+alimentista|escolar|atribuible\s+al\s+menor)|transporte\s+del\s+menor)'),
+    ("Salud", r'(?:terapia|tratamiento|m[eé]dico|salud|medicinas|consulta)'),
+    ("Vivienda", r'(?:alquiler|vivienda|arriendo|renta\s+de\s+casa)'),
+]
+
+
+# Una frase con estas palabras describe un TOTAL ("estimación mensual integral", "presupuesto total"), no el monto de un concepto.
+_PALABRAS_DE_TOTAL = re.compile(r'\b(?:total|integral|presupuesto|estimaci[oó]n|estima|estimado|suma|conjunto|global)\b', re.IGNORECASE)
+
+
+def _montos_ligados_a_categoria(texto_plano: str, patron_cat: str) -> list:
+    """
+    Montos que el texto liga a una categoría de gasto: "<concepto> ... por S/ X" (hueco corto que termina
+    en preposición) o "S/ X en <concepto>". Trabaja sobre el texto sin saltos de línea, así que una frase
+    partida por el PDF no pierde su monto, y no atribuye a un concepto un total que aparece más adelante.
+    """
+    plano = re.sub(r'\s+', ' ', texto_plano or '')
+    otras = [p for _, p in _CATEGORIAS_GASTO if p != patron_cat]
+    ligados = []
+    for cat in re.finditer(patron_cat, plano, re.IGNORECASE):
+        previo = plano[max(0, cat.start() - 40):cat.start()]
+        antes = re.search(
+            _SOLES_CAPTURA + r'\s*(?:en|por|de|para|destinad\w+\s+a|correspondiente\s+a)?\s*$', previo, re.IGNORECASE
+        )
+        if antes:
+            ligados.append((_normalizar_monto_texto(antes.group(1)), plano[max(0, cat.start() - 40) + antes.start():cat.end()]))
+            continue
+        ventana = plano[cat.end():cat.end() + 90]
+        m = re.search(_SOLES_CAPTURA, ventana, re.IGNORECASE)
+        if not m:
+            continue
+        hueco = ventana[:m.start()]
+        termina_en_preposicion = re.search(
+            r'(?:\b(?:por|de|en|asciende\s+a|ascendente\s+a|equivalente\s+a|es\s+de|son\s+de)|:)\s*$', hueco.rstrip(), re.IGNORECASE
+        )
+        if len(hueco.split()) > 6 or not termina_en_preposicion or _PALABRAS_DE_TOTAL.search(hueco):
+            continue
+        if any(re.search(p, hueco, re.IGNORECASE) for p in otras):
+            continue
+        ligados.append((_normalizar_monto_texto(m.group(1)), plano[cat.start():cat.end() + m.end()]))
+    return [(valor, evidencia) for valor, evidencia in ligados if valor]
+
+
+def _concepto_contradice_texto(texto_plano: str, concepto: str, monto: float) -> bool:
+    """True si el texto liga ese monto a OTRA categoría de gasto y no a la indicada por la IA."""
+    nombre = str(concepto or '').strip().lower()
+    propia = next((cat for cat, _ in _CATEGORIAS_GASTO if nombre.startswith(cat.lower().split()[0])), None)
+    if propia is None:
+        return False
+    ligado = {
+        cat: any(abs(valor - monto) <= 1.0 for valor, _ in _montos_ligados_a_categoria(texto_plano, patron))
+        for cat, patron in _CATEGORIAS_GASTO
+    }
+    return not ligado[propia] and any(esta for cat, esta in ligado.items() if cat != propia)
+
+
+def _gasto_ia_aceptable(texto_plano: str, concepto: str, monto: float, petitorio: float) -> tuple:
+    """
+    Filtra los gastos que propone la IA. Un gasto es una necesidad MENSUAL DEL MENOR que figura en la demanda:
+    no cuenta si es contexto de petitorio/ingreso, si el texto lo liga a otro concepto, si solo aparece en la
+    contestación (cargas del demandado) o si, sin categoría, iguala o supera el petitorio (es el total).
+    Devuelve (aceptable, motivo).
+    """
+    if _monto_tiene_contexto_excluido(texto_plano, monto):
+        return False, "contexto de petitorio, fallo o liquidación"
+    if petitorio > 0 and abs(monto - petitorio) <= 1.0:
+        return False, "es el monto que se pide como pensión, no un gasto del menor"
+    if _concepto_contradice_texto(texto_plano, concepto, monto):
+        return False, "el texto lo liga a otro concepto"
+    nombre_concepto = str(concepto or "").strip().lower()
+    propia = next(((cat, patron) for cat, patron in _CATEGORIAS_GASTO if nombre_concepto.startswith(cat.lower().split()[0])), None)
+    if propia and not any(abs(valor - monto) <= 1.0 for valor, _ in _montos_ligados_a_categoria(texto_plano, propia[1])):
+        return False, "el texto no liga ese monto a esa categoría de gasto"
+    plano = re.sub(r'\s+', ' ', texto_plano or '')
+    for m_monto in re.finditer(_SOLES_CAPTURA, plano):
+        if abs((_normalizar_monto_texto(m_monto.group(1)) or 0) - monto) <= 1.0 and re.search(
+                r'otorg\w+|dep[oó]sit\w+|aport\w+|abon\w+|entreg\w+|ven[ií]a\w*|\bpag(?:ó|ado|aron|ando)\b',
+                plano[max(0, m_monto.start() - 90):m_monto.start()], re.IGNORECASE):
+            return False, "es un pago o aporte ya realizado, no una necesidad del menor"
+    demanda, _ = _obtener_bloques_demanda_contestacion(texto_plano)
+    if demanda and not _validar_monto_con_texto(monto, _extraer_montos_reales(demanda), tolerancia=1.0):
+        return False, "no figura en la demanda"
+    conoce_categoria = any(
+        str(concepto or "").strip().lower().startswith(cat.lower().split()[0]) for cat, _ in _CATEGORIAS_GASTO
+    )
+    if not conoce_categoria and petitorio > 0 and monto >= petitorio:
+        return False, "sin categoría y no menor que el petitorio (parece el total de necesidades)"
+    return True, ""
+
+
 def _extraer_gastos_nativos(texto_plano: str, montos_reales: list, pa: float) -> list:
     """
     Fallback nativo: extrae gastos por categorías con regex contextual
     y valida contra montos reales del texto. Evita duplicar el petitorio.
     """
-    categorias = [
-        ("Educación", r'(?:pensi[oó]n\s+escolar|colegio|matr[ií]cula|educaci[oó]n|mensualidad\s+escolar)'),
-        ("Alimentación", r'(?:alimentaci[oó]n|comida|gastos\s+(?:conjuntos\s+de\s+)?alimentaci[oó]n|supermercado)'),
-        ("Movilidad del menor", r'(?:movilidad\s+(?:del\s+menor|del\s+alimentista|escolar|atribuible\s+al\s+menor)|transporte\s+del\s+menor)'),
-        ("Salud", r'(?:terapia|tratamiento|m[eé]dico|salud|medicinas|consulta)'),
-        ("Vivienda", r'(?:alquiler|vivienda|arriendo|renta\s+de\s+casa)'),
-    ]
+    categorias = _CATEGORIAS_GASTO
     gastos = []
     montos_usados = set()
 
@@ -3474,6 +4439,16 @@ def _extraer_gastos_nativos(texto_plano: str, montos_reales: list, pa: float) ->
             monto_literal = re.search(r'(?:S/|S/\.)\s*([0-9][0-9\.,]*)', linea[categoria.end():], re.IGNORECASE)
             if not monto_literal:
                 continue
+            # El monto es del concepto solo si está pegado a él: sin cambio de oración, sin otros conceptos de la
+            # misma lista en medio ("educación, transporte, ropa... El presupuesto total asciende a S/ 1490") y cerca.
+            tramo = linea[categoria.end():categoria.end() + monto_literal.start()]
+            if (
+                re.search(r'[.;]\s+[A-ZÁÉÍÓÚÑ]', tramo)
+                or _PALABRAS_DE_TOTAL.search(tramo)
+                or len(tramo.split()) > 14
+                or any(re.search(p, tramo, re.IGNORECASE) for _, p in categorias if p != patron_cat)
+            ):
+                continue
             val = _normalizar_monto_texto(monto_literal.group(1))
             val_validado = _validar_monto_con_texto(val or 0, montos_reales, tolerancia=1.0)
             if not val_validado:
@@ -3493,6 +4468,32 @@ def _extraer_gastos_nativos(texto_plano: str, montos_reales: list, pa: float) ->
                 "observacion": evidencia[:120],
                 "tipo_documento": "texto nativo"
             })
+
+    # Segunda pasada sobre el texto continuo para las categorías que la pasada por líneas no encontró
+    # (frase partida entre dos líneas, o un monto previo en la misma línea que pertenece a otro concepto).
+    encontrados = {g["concepto"].split(" /")[0] for g in gastos}
+    for concepto, patron_cat in categorias:
+        if concepto in encontrados or concepto == "Vivienda":
+            continue
+        for val, evidencia in _montos_ligados_a_categoria(texto_plano, patron_cat):
+            val_validado = _validar_monto_con_texto(val, montos_reales, tolerancia=1.0)
+            if not val_validado:
+                continue
+            if _texto_parece_petitorio_o_oferta(evidencia) or _monto_tiene_contexto_excluido(texto_plano, val_validado):
+                continue
+            if abs(val_validado - pa) <= 10:
+                continue
+            clave = (concepto, round(val_validado, 2))
+            if clave in montos_usados:
+                continue
+            montos_usados.add(clave)
+            gastos.append({
+                "concepto": concepto,
+                "monto": val_validado,
+                "observacion": evidencia[:120],
+                "tipo_documento": "texto nativo"
+            })
+            break
 
     return gastos
 
@@ -3723,6 +4724,8 @@ def _extraer_cargas_familiares_nativas(texto_plano: str, montos_reales: list) ->
         r'([^.]{0,180}(?:pensi[oó]n|acude)[^.]{0,120}(?:S/|S/\.)\s*([0-9][0-9\.,]*)[^.]{0,220}(?:otros?\s+menores|carga\s+familiar|acta\s+de\s+conciliaci[oó]n))',
         r'([^.]{0,180}(?:madre|padre|progenitor[ao]|adult[ao]\s+mayor|persona\s+mayor|apoyo\s+familiar|asistencia\s+familiar)[^.]{0,220}(?:apoyo|sustento|asistencia|ayuda|gasto|carga)[^.]{0,120}(?:S/|S/\.)\s*([0-9][0-9\.,]*))',
         r'([^.]{0,180}(?:apoyo|sustento|asistencia|ayuda|gasto|carga)[^.]{0,120}(?:S/|S/\.)\s*([0-9][0-9\.,]*)[^.]{0,220}(?:madre|padre|progenitor[ao]|adult[ao]\s+mayor|persona\s+mayor))',
+        # "Declaro como carga familiar adicional: <descripción>, ... S/. X mensuales"
+        r'(carga\s+(?:familiar\s+)?adicional\s*:\s*[^.]{0,220}?(?:S/|S/\.)\s*([0-9][0-9\.,]*))',
     ]
     for patron in patrones:
         for m in re.finditer(patron, texto_plano, re.IGNORECASE):
@@ -3741,6 +4744,56 @@ def _extraer_cargas_familiares_nativas(texto_plano: str, montos_reales: list) ->
                 "evidencia": evidencia
             })
     return cargas
+
+def _nombre_alimentista(texto_plano: str):
+    """Nombre completo de la menor/el menor alimentista cuando el texto lo escribe ("Menor alimentista Ana Soto Vera")."""
+    palabra = r"[A-ZÁÉÍÓÚÑ][a-záéíóúñ]+"
+    for patron in (rf"menor\s+alimentista\s+((?:{palabra}\s+){{1,4}}{palabra})",
+                   rf"(?:su\s+)?menor\s+hij[oa]\s+((?:{palabra}\s+){{1,4}}{palabra})"):
+        m = re.search(patron, texto_plano or "")
+        if m:
+            return _normalizar_texto_busqueda_pdf(m.group(1))
+    return None
+
+
+def _es_el_alimentista(dependiente: dict, nombre_alimentista: str) -> bool:
+    """El alimentista de este expediente no es una 'otra carga' del demandado."""
+    texto = _normalizar_texto_busqueda_pdf(f"{dependiente.get('tipo', '')} {dependiente.get('detalle', '')}")
+    return sum(1 for token in nombre_alimentista.split() if token in texto) >= 2
+
+
+def _extraer_cargas_porcentuales(texto_plano: str) -> list:
+    """
+    Obligaciones alimentarias previas que el demandado declara en la contestación como porcentaje de sus haberes
+    ("Hija Alexia ... 10% de haber mensual"). Devuelve [{porcentaje, etiqueta, evidencia}]. Solo se lee la
+    contestación: el porcentaje de la pensión ordenada y los de otras actuaciones no son cargas previas.
+    """
+    _, contestacion = _obtener_bloques_demanda_contestacion(texto_plano)
+    base = re.sub(r'[ \t]+', ' ', contestacion or '')
+    patron_pct = r'(\d{1,3})\s*%\s+de\s+(?:su\s+|sus\s+)?haber(?:es)?(?:\s+mensual(?:es)?)?'
+    inicio_fila = r'^(?:Hij[oa]s?|Madre|Padre|Ofrecimiento|C[oó]nyuge|Esposa|Esposo|Pensi[oó]n|[IVX]+\.)'
+    lineas = base.split('\n')
+    cargas = []
+    for i, linea in enumerate(lineas):
+        for m in re.finditer(patron_pct, linea, re.IGNORECASE):
+            porcentaje = float(m.group(1))
+            if not 0 < porcentaje <= 100:
+                continue
+            etiqueta = re.sub(r'.*(?:referencial|previa)\s+', '', linea[:m.start()]).strip(' ,;:-')
+            for siguiente in lineas[i + 1:i + 3]:       # el nombre de la fila suele continuar en las líneas siguientes
+                siguiente = siguiente.strip()
+                if (siguiente and not re.match(inicio_fila, siguiente) and not re.search(r'\d', siguiente)
+                        and len(siguiente) <= 60):
+                    etiqueta += ' ' + siguiente
+                else:
+                    break
+            cargas.append({
+                "porcentaje": porcentaje,
+                "etiqueta": re.sub(r'\s+', ' ', etiqueta).strip(' ,;:-')[:110],
+                "evidencia": re.sub(r'\s+', ' ', linea[:m.end()]).strip()[:200],
+            })
+    return cargas
+
 
 def _extraer_empleador_contextual(texto_plano: str, ingresos: list) -> dict:
     if not texto_plano:
@@ -3769,6 +4822,10 @@ def _extraer_empleador_contextual(texto_plano: str, ingresos: list) -> dict:
         return {"nombre": nombre[:140], "evidencia": evidencia[:260]}
 
     patrones = [
+        # "es miembro activo de la Policía Nacional del Perú y percibe..." (institución pública como empleador)
+        r'(?:miembro|efectivo|personal|servidor(?:a)?)\s+(?:activo\s+)?(?:de|del|en)\s+(?:la\s+|el\s+)?'
+        r'((?:Polic[ií]a|Ej[eé]rcito|Marina|Fuerza\s+A[eé]rea|Ministerio|Municipalidad|Gobierno|Poder|Universidad|Hospital)'
+        r'[A-Za-zÁÉÍÓÚñáéíóú\s]{3,80}?)(?=\s+y\s|\s*[,.]|\s+(?:percibe|con|que)\s)',
         r'(?:empleador(?:a)?|empresa\s+donde\s+labora|centro\s+laboral)\s*(?:es|:|,)?\s*([A-Z0-9ÁÉÍÓÚÑ&.,\s-]{4,140})',
         r'(?:labora|trabaja|presta\s+servicios)\s+(?:en|para)\s+([A-Z0-9ÁÉÍÓÚÑ&.,\s-]{4,140})',
         r'(?:oficiar|notificar|comunicar)\s+(?:a|al|a\s+la)\s+([A-Z0-9ÁÉÍÓÚÑ&.,\s-]{4,140})\s+(?:a\s+fin|para\s+que|con\s+domicilio)'
@@ -3946,9 +5003,14 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
     """
 
     try:
-        payload = {"model": "mistral", "prompt": prompt_ia, "format": "json", "stream": False, "options": {"temperature": 0}}
-        response = post_ollama_generate(payload, timeout=90)
-        raw_res = cargar_json_llm(response.json().get("response", "{}"), {})
+        try:
+            payload = {"model": "mistral", "prompt": prompt_ia, "format": "json", "stream": False, "options": {"temperature": 0}}
+            response = post_ollama_generate(payload, timeout=90)
+            raw_res = cargar_json_llm(response.json().get("response", "{}"), {})
+        except Exception as error_ia:
+            # Sin IA disponible se sigue con la extracción nativa (petitorio por reglas y gastos de la demanda).
+            print(f"Auditoría financiera sin IA, continúa con extracción nativa: {error_ia}")
+            raw_res = {}
 
         # 3) Selección de petitorio con jerarquía y validación anti-alucinación.
         petitorio_ia = raw_res.get("petitorio_principal") or {}
@@ -3964,8 +5026,11 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
         pa_regex_info = _extraer_petitorio_demanda_info(texto_plano)
         pa_regex = pa_regex_info.get("monto", 0.0) or 0.0
 
+        # Un monto de la IA solo vale si su propia evidencia es una petición de pensión (no una indemnización, un aporte, un ingreso...).
+        ia_pide_pension = bool(evidencia_ia) and _frase_es_peticion_de_pension(evidencia_ia)
         ia_petitorio_confiable = (
             pa_ia > 0
+            and ia_pide_pension
             and tipo_doc_ia in ("demanda", "demanda de alimentos", "demanda_petitorio_actora")
             and ("petitorio" in seccion_ia or "i. petitorio" in seccion_ia)
             and not _texto_parece_petitorio_o_oferta(evidencia_ia)  # protege contra citas ambiguas
@@ -3975,7 +5040,7 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
         pa_validado_spacy = _validar_monto_con_texto(pa_spacy, montos_reales_en_texto) if pa_spacy > 0 and not _monto_aparece_solo_como_ingreso_hu14(texto_plano, pa_spacy) else None
         pa_validado_regex = _validar_monto_con_texto(pa_regex, montos_reales_en_texto) if pa_regex > 0 and not _monto_aparece_solo_como_ingreso_hu14(texto_plano, pa_regex) else None
         pa_validado_ia = _validar_monto_con_texto(pa_ia, montos_reales_en_texto) if ia_petitorio_confiable else None
-        pa_validado_ia_legacy = _validar_monto_con_texto(pa_ia, montos_reales_en_texto) if pa_ia > 0 and not _monto_aparece_solo_como_ingreso_hu14(texto_plano, pa_ia) else None
+        pa_validado_ia_legacy = _validar_monto_con_texto(pa_ia, montos_reales_en_texto) if pa_ia > 0 and ia_pide_pension and not _monto_aparece_solo_como_ingreso_hu14(texto_plano, pa_ia) else None
 
         fuente_petitorio = "No detectado"
         evidencia_petitorio = ""
@@ -4025,10 +5090,11 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
             # No permitir que un texto de petitorio/oferta termine como gasto.
             if _texto_parece_petitorio_o_oferta(evidencia):
                 continue
-            if _monto_tiene_contexto_excluido(texto_plano, monto_validado):
-                print(f"Alerta HU18: gasto S/ {monto_validado} descartado por contexto excluido.")
+            aceptable, motivo = _gasto_ia_aceptable(texto_plano, g.get("concepto", ""), monto_validado, pa)
+            if not aceptable:
+                print(f"Alerta HU18: gasto S/ {monto_validado} ('{g.get('concepto')}') descartado: {motivo}.")
                 continue
-            
+
             # Condición de negocio: El gasto no puede ser igual al petitorio total
             if monto_validado > 0 and abs(monto_validado - pa) > 10:
                 detalles_finales.append({
@@ -4165,7 +5231,7 @@ def modulo_calculadora_economica(financiera: dict, capacidad: dict) -> dict:
         "advertencia": "Estimacion orientativa para revision judicial; no reemplaza la valoracion del juez."
     }
 
-def _extraer_pension_ordenada_sentencia(texto_plano: str) -> dict:
+def _extraer_pension_ordenada_sentencia(texto_plano: str, marcadores_amplios: bool = False) -> dict:
     """
     Busca en el FALLO/RESUELVE/ORDENO de la sentencia lo que el juez YA ordenó
     pagar: como PORCENTAJE de los ingresos (ej. "30% de sus ingresos") o como
@@ -4185,13 +5251,18 @@ def _extraer_pension_ordenada_sentencia(texto_plano: str) -> dict:
     # tomar la primera coincidencia: hay que revisar cada bloque dispositivo y
     # quedarse con el primero que realmente fije una pensión (por % o monto
     # fijo), no con el primero que solo diga "SE RESUELVE" sin fijar nada.
-    patron_marcador = re.compile(r'(?:FALLA|RESUELVE|SE\s+ORDENA|ORDENO)\b', re.IGNORECASE)
+    # marcadores_amplios: el texto ya es UNA sentencia, donde también se ordena con "FIJAR ...", "se fija ...".
+    # Sobre el expediente completo no se usan: una demanda también dice "fijar" al pedir.
+    marcadores = r'FALLA|FALLO|RESUELVE|SE\s+ORDENA|ORDENO|ORDENAR'
+    if marcadores_amplios:
+        marcadores += r'|FIJAR|FIJA|FIJASE|SE\s+DISPONE|CORRESPONDE\s+FIJAR'
+    patron_marcador = re.compile(rf'(?:{marcadores})\b', re.IGNORECASE)
     for m_marcador in patron_marcador.finditer(texto_plano):
         universo = texto_plano[m_marcador.start(): m_marcador.start() + 900]
 
         # 1) Porcentaje de ingresos: "(30%) de sus ingresos" / "30% de sus ingresos mensuales"
         m_pct = re.search(
-            r'\(?\s*(\d{1,3})\s*%\s*\)?\s*de\s+(?:sus|los|las)\s+(?:ingresos|remuneraci[oó]n(?:es)?)',
+            r'\(?\s*(\d{1,3})\s*%\s*\)?\s*de\s+(?:sus|los|las|su|la)\s+(?:ingresos|remuneraci[oó]n(?:es)?|haber(?:es)?|sueldo|salario)',
             universo, re.IGNORECASE
         )
         if m_pct:
@@ -4203,13 +5274,16 @@ def _extraer_pension_ordenada_sentencia(texto_plano: str) -> dict:
                     "evidencia": re.sub(r'\s+', ' ', universo[max(0, m_pct.start() - 100): m_pct.end() + 40]).strip()
                 }
 
-        # 2) Monto fijo ordenado en el fallo
-        m_fijo = re.search(
-            r'(?:pensi[oó]n(?:es)?\s+alimenticia|acuda\s+(?:a\s+favor\s+de[^.]{0,80}?)?\s+con\s+(?:la\s+)?(?:suma|pensi[oó]n|cantidad))'
-            r'[^$]{0,120}?(?:S/|S/\.)\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{1,2})?)',
+        # 2) Monto fijo ordenado en el fallo. Se descarta lo que es de OTRO concepto: pensiones devengadas, saldos,
+        # liquidaciones, indemnizaciones, costas ("pensiones alimenticias devengadas en la suma de S/ 12,840.00").
+        for m_fijo in re.finditer(
+            r'(?:pensi[oó]n(?:es)?(?:\s+alimenticia)?|acuda\s+(?:a\s+favor\s+de[^.]{0,80}?)?\s+con\s+(?:la\s+)?(?:suma|pensi[oó]n|cantidad))'
+            r'[^$]{0,120}?(?:S/|S/\.)\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)',
             universo, re.IGNORECASE | re.DOTALL
-        )
-        if m_fijo:
+        ):
+            if re.search(r'devengad|liquidaci|saldo|adeud|atrasad|indemniz|da[ñn]o\s+moral|costas|honorari|reparaci',
+                         m_fijo.group(0), re.IGNORECASE):
+                continue
             valor = float(m_fijo.group(1).replace(',', ''))
             if 50.0 < valor < 50000.0:
                 return {
@@ -4219,6 +5293,197 @@ def _extraer_pension_ordenada_sentencia(texto_plano: str) -> dict:
                 }
 
     return {"tipo": "no_detectado", "valor": 0.0, "evidencia": ""}
+
+
+def _pension_ordenada_del_expediente(texto_plano: str) -> dict:
+    """Lo que el juez ordenó pagar, leído de las sentencias de la última a la primera: la sentencia de vista
+    modifica la de primera instancia, y una que solo confirma no dice monto. Si ninguna sentencia lo dice
+    (o no se reconocen como tales) se recurre a todo el texto."""
+    for sec in reversed([s for s in _secciones_tipadas(texto_plano) if s.get("tipo") == "sentencia"]):
+        orden = _extraer_pension_ordenada_sentencia(sec["texto"], marcadores_amplios=True)
+        if orden["tipo"] != "no_detectado":
+            return {**orden, "documento": sec["archivo"]}
+    return _extraer_pension_ordenada_sentencia(texto_plano)
+
+
+# --- Ingreso del obligado: candidatos del propio texto, parte a la que pertenecen y elección verificada ---
+
+_CUE_INGRESO = re.compile(r'sueldo|remuneraci[oó]n|\bingres[oa]s?\b|\bhaber(?:es)?\b|salario|\brenta\b|percib\w+|estipendio', re.IGNORECASE)
+# Entre la palabra "ingreso" y el monto, lo que lo vuelve OTRA cosa: un pago, una oferta, un gasto, una deuda, una liquidación.
+_CUE_NO_ES_INGRESO = re.compile(
+    r'\bofre[cz]\w*|\boferta\b|\b(?:abon|pag|deposit|entreg|cancel)\w+|consign(?!a\b)\w+|\bgast\w+|\bdeuda|\badeud\w+|'
+    r'\bdevengad\w+|\bliquidaci\w+|\bsaldo\b|\bindemniz\w+|\bcostas\b|\bpensi[oó]n|raz[oó]n\s+de|por\s+cada|'
+    r'\bcada\s+(?:uno|menor|hij\w+)', re.IGNORECASE)
+
+
+def _montos_con_contexto(texto_plano: str) -> list:
+    """Cada monto en soles del expediente con la parte de su frase que lo precede/sigue, y el documento (y su tipo)."""
+    montos = []
+    for sec in _secciones_tipadas(texto_plano):
+        if sec.get("tipo") == "indice":
+            continue
+        cuerpo = sec["texto"]
+        for m in re.finditer(_SOLES_CAPTURA, cuerpo):
+            valor = _normalizar_monto_texto(m.group(1))
+            if not valor:
+                continue
+            izquierda = re.split(r'(?<=[a-záéíóúñ\)])[.;]\s+|\n\s*\n', cuerpo[max(0, m.start() - 240):m.start()])[-1]
+            derecha = re.split(r'(?<=[a-záéíóúñ\)])[.;]\s+', cuerpo[m.end():m.end() + 90])[0]
+            montos.append({"valor": float(valor), "literal": re.sub(r'\s+', ' ', m.group(0)), "izq": izquierda, "der": derecha,
+                           "archivo": sec["archivo"], "tipo": sec.get("tipo"), "pos": m.start(), "indice": sec["indice"]})
+    return montos
+
+
+def _rol_del_monto(izquierda: str, archivo: str):
+    """A quién pertenece un ingreso según su frase: 'demandado', 'demandante' u 'obligado'; None si no se puede decir."""
+    roles = list(re.finditer(r'\b(demandad[oa]|demandante|obligad[oa]|alimentante)\b', izquierda, re.IGNORECASE))
+    if roles:
+        rol = roles[-1].group(1).lower()
+        return "demandante" if rol == "demandante" else "demandado" if rol.startswith("demandad") else "obligado"
+    if re.search(r'\bm(?:i|is)\s+(?:\w+\s+){0,2}(?:ingres|remuner|sueldo|haber|salario)', izquierda, re.IGNORECASE):
+        nombre = _normalizar_texto_busqueda_pdf(archivo)
+        if "contestacion" in nombre:
+            return "demandado"
+        if "demanda" in nombre and "apelacion" not in nombre and "casacion" not in nombre:
+            return "demandante"
+    return None
+
+
+def _rol_obligado(texto_plano: str) -> str:
+    """Quién debe pagar la pensión según el expediente (por defecto el demandado): 'a cargo del demandante',
+    '7 % de los ingresos totales del demandante', 'el demandante deberá acudir con...'."""
+    votos = {"demandado": 0, "demandante": 0}
+    patrones = (
+        r'a\s+cargo\s+d(?:el|e\s+la)\s+(demandad[oa]|demandante)',
+        r'%\s+de\s+(?:los\s+|sus\s+)?(?:ingresos|haberes|remuneraci\w+)(?:\s+totales)?\s+d(?:el|e\s+la)\s+(demandad[oa]|demandante)',
+        r'\b(demandad[oa]|demandante)\s+(?:deber[aá]\s+)?(?:acuda|abone|pague|cumpla|contribuya)',
+    )
+    for patron in patrones:
+        for m in re.finditer(patron, texto_plano or "", re.IGNORECASE):
+            votos["demandante" if m.group(1).lower() == "demandante" else "demandado"] += 1
+    return "demandante" if votos["demandante"] > votos["demandado"] else "demandado"
+
+
+def _candidatos_ingreso(texto_plano: str) -> list:
+    """Montos que el propio texto presenta como ingreso (nunca un pago, oferta, gasto, deuda o liquidación)."""
+    candidatos = []
+    for mt in _montos_con_contexto(texto_plano):
+        indicios = list(_CUE_INGRESO.finditer(mt["izq"]))
+        if not indicios:
+            continue
+        tramo = mt["izq"][indicios[-1].start():]
+        if _CUE_NO_ES_INGRESO.search(tramo):
+            continue
+        inicio_frase = mt["pos"] - len(mt["izq"]) + indicios[-1].start()
+        candidatos.append({**mt, "rol": _rol_del_monto(mt["izq"], mt["archivo"]), "frase_id": (mt["indice"], inicio_frase),
+                           "evidencia": re.sub(r'\s+', ' ', mt["izq"][max(0, indicios[-1].start() - 60):] + mt["literal"] + mt["der"]).strip()})
+    # Una frase que enumera importes de años sucesivos ("S/ 930 en 2019, S/ 1,630 en 2020 y S/ 2,013 en 2021"): vale el último.
+    por_frase = {}
+    for c in candidatos:
+        por_frase.setdefault(c["frase_id"], []).append(c)
+    depurados = []
+    for grupo in por_frase.values():
+        grupo.sort(key=lambda c: c["pos"])
+        hay_anios = len(re.findall(r'\b(?:19|20)\d{2}\b', grupo[-1]["izq"])) >= 2
+        depurados.append(grupo[-1] if hay_anios else grupo[0])
+    return depurados
+
+
+def _elegir_ingreso_con_ia(candidatos: list, rol_obligado: str):
+    """Entre frases reales del expediente, la IA elige la que da el ingreso mensual actual del obligado. Solo puede
+    elegir una de ellas (nunca inventar un monto). None si no hay IA o no elige ninguna."""
+    candidatos = candidatos[:8]
+    frases = "\n".join(f'{i}. [{c["archivo"]}] "{c["evidencia"][:230]}"' for i, c in enumerate(candidatos, 1))
+    prompt = (
+        "Eres un asistente jurídico peruano. En un proceso de alimentos hay que conocer el INGRESO MENSUAL ACTUAL de la "
+        f"persona obligada a pagar la pensión (normalmente el demandado; aquí se presume el {rol_obligado}). "
+        "De las frases numeradas, elige la que lo indica. Si una frase habla de varios años, vale el más reciente. "
+        "Descarta las que hablen de la otra parte, de pagos, de gastos o de deudas. Si ninguna corresponde, responde null.\n\n"
+        f"FRASES:\n{frases}\n\nResponde SOLO este JSON: {{\"eleccion\": <número de frase o null>}}"
+    )
+    try:
+        res = post_ollama_generate(
+            {"model": "mistral", "prompt": prompt, "format": "json", "stream": False,
+             "options": {"temperature": 0, "seed": 0, "num_ctx": 4096, "num_predict": 40}},
+            timeout=PARTES_IA_TIMEOUT)
+        eleccion = json.loads(res.json().get("response", "{}")).get("eleccion")
+        return candidatos[int(eleccion) - 1] if 1 <= int(eleccion) <= len(candidatos) else None
+    except Exception as e:
+        print(f"⚠ Elección del ingreso con IA no disponible: {type(e).__name__}")
+        return None
+
+
+def _ingreso_obligado_verificado(texto_plano: str):
+    """Ingreso mensual del obligado a pagar alimentos: un monto que el texto presenta como ingreso (de la parte obligada),
+    elegido entre candidatos reales. Devuelve {'monto', 'evidencia', 'archivo', 'verificacion'} o None."""
+    rol_obligado = _rol_obligado(texto_plano)
+    otra_parte = "demandante" if rol_obligado == "demandado" else "demandado"
+    candidatos = _candidatos_ingreso(texto_plano)
+    validos = [c for c in candidatos if c["rol"] != otra_parte]
+    motivos = []
+    if not validos:
+        # El texto solo da el ingreso de la OTRA parte (p. ej. paga el demandante que pidió el divorcio): se muestra,
+        # pero queda en revisión porque no hay forma de confirmar quién es el obligado.
+        validos = [c for c in candidatos if c["rol"] == otra_parte]
+        if validos:
+            motivos.append(f"solo se encontró el ingreso del {otra_parte}; confirme que es quien debe pagar la pensión")
+    if not validos:
+        return None
+    valores = {}
+    for c in validos:
+        valores.setdefault(round(c["valor"], 2), []).append(c)
+    if len(valores) == 1:
+        elegido = max(next(iter(valores.values())), key=lambda c: c["pos"])
+    else:
+        # Varios importes distintos. Manda la regla HU14 (ingreso neto acreditado > sueldo base > alegado), luego quien
+        # nombra al obligado, luego quien más veces se menciona. Solo en un empate real decide la IA entre frases reales.
+        def clave(grupo):
+            monto = grupo[0]["valor"]
+            prioridad = _prioridad_ingreso_hu14({"monto": monto, "tipo": "Ingreso detectado", "estado": "Validado por texto",
+                                                 "evidencia": grupo[0]["evidencia"]}, texto_plano)
+            return (prioridad, any(c["rol"] in (rol_obligado, "obligado") for c in grupo), len(grupo))
+        ranking = sorted(valores.values(), key=clave, reverse=True)
+        empatados = [g for g in ranking if clave(g) == clave(ranking[0])]
+        elegido = None
+        if len(empatados) > 1:
+            elegido = _elegir_ingreso_con_ia([max(g, key=lambda c: c["pos"]) for g in empatados], rol_obligado)
+            if elegido is None:
+                motivos.append("hay varios ingresos distintos en el expediente y no se pudo decidir cuál es el del obligado")
+        if elegido is None:
+            elegido = max(ranking[0], key=lambda c: c["pos"])
+    return {"monto": round(elegido["valor"], 2), "evidencia": elegido["evidencia"], "archivo": elegido["archivo"],
+            "verificacion": {"estado": "revisar" if motivos else "verificada", "motivos": motivos}}
+
+
+_CUE_OTRA_CARGA = re.compile(
+    r'\botr[ao]s?\s+(?:obligaci\w+|hij[oa]s?|carga\w*|dependiente\w*|alimentist\w+|menor\w*)|carga\s+familiar|obligaci[oó]n\s+alimentaria\s+previa|'
+    r'a\s+su\s+cargo|sosti[ée]ne|mantiene|depend\w+\s+(?:econ[oó]micamente|de\s+[ée]l)|descuento\w*\s+(?:judicial|por\s+planilla)|afectad[ao]\s+por|'
+    r'\bcomprometid\w+|hij[oa]s?\s+de\s+(?:otra|su\s+(?:anterior|nueva))|pensi[oó]n\s+(?:de\s+alimentos\s+)?a\s+favor\s+de\s+(?:otr|su\s+(?:hij|madre|padre))',
+    re.IGNORECASE)
+
+
+def _carga_respaldada_en_texto(dependiente: dict, pension_ordenada: dict = None, petitorio: float = 0.0) -> bool:
+    """Una 'otra carga' del obligado solo vale si el texto la declara como OTRA obligación o dependiente suya (con su frase),
+    no si es la pensión que fijó la sentencia, el petitorio, el propio alimentista del proceso o una fila sin contenido."""
+    tipo = str(dependiente.get("tipo") or "").strip()
+    detalle = str(dependiente.get("detalle") or "").strip()
+    evidencia = str(dependiente.get("evidencia") or dependiente.get("evidencia_literal") or "").strip()
+    if not tipo and not detalle and not evidencia:
+        return False
+    if dependiente.get("porcentaje_haber"):
+        return True                                   # obligación previa declarada como % de los haberes (ya validada con su frase)
+    # Las palabras clave se buscan en la FRASE del documento, no en las etiquetas que la propia app le pone ("Carga familiar declarada").
+    if not _CUE_OTRA_CARGA.search(evidencia):
+        return False
+    monto = float(dependiente.get("monto_carga") or 0)
+    if monto > 0:
+        if petitorio and abs(monto - petitorio) <= 1.0:
+            return False
+        orden = (pension_ordenada or {}).get("valor") if (pension_ordenada or {}).get("tipo") == "monto_fijo" else None
+        if orden and abs(monto - float(orden)) <= 1.0:
+            return False
+    return True
+
 
 def _contexto_relevante_cargas(texto_plano: str, max_chars: int = 18000) -> str:
     texto = texto_plano or ""
@@ -4323,10 +5588,14 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
     prompt = _construir_prompt_cargas(texto_llm[:max_chars_entrada])
 
     try:
-        payload = {"model": "mistral", "prompt": prompt, "format": "json", "stream": False, "options": {"temperature": 0.1, "num_predict": NUM_PREDICT_CARGAS, "top_p": 0.85, "num_ctx": num_ctx}}
-        response = post_ollama_generate(payload, timeout=60)
-        
-        data = cargar_json_llm(response.json().get("response", "{}"), {})
+        try:
+            payload = {"model": "mistral", "prompt": prompt, "format": "json", "stream": False, "options": {"temperature": 0.1, "num_predict": NUM_PREDICT_CARGAS, "top_p": 0.85, "num_ctx": num_ctx}}
+            response = post_ollama_generate(payload, timeout=60)
+            data = cargar_json_llm(response.json().get("response", "{}"), {})
+        except Exception as error_ia:
+            # Sin IA disponible se sigue con la extracción nativa (ingresos, cargas, pensión ordenada).
+            print(f"Capacidad y cargas sin IA, continúa con extracción nativa: {error_ia}")
+            data = {}
 
         ingresos_ia = data.get("ingresos", []) or []
         dependientes_ia = data.get("dependientes", []) or []
@@ -4340,6 +5609,10 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
             re.IGNORECASE
         )
         for m in patron_ingresos:
+            # Una frase que habla de una oferta o de pagos ("declara ingresos y gastos, y ofrece S/ 450",
+            # "su remuneración está afectada y venía abonando S/ 200") no describe un ingreso.
+            if re.search(r'\bofre[cz]\w*|\boferta\b|\b(?:abon|pag|consign|deposit|entreg|cancel)\w+', m.group(1), re.IGNORECASE):
+                continue
             val = _normalizar_monto_texto(m.group(2))
             val_validado = _validar_monto_con_texto(val or 0, montos_reales_en_texto, tolerancia=1.0)
             if val_validado:
@@ -4426,6 +5699,16 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
                 dependientes.append(carga)
                 montos_carga_presentes.add(clave)
 
+        # La menor/el menor alimentista de ESTE expediente no es una "otra carga" del demandado.
+        nombre_alimentista = _nombre_alimentista(texto_plano)
+        if nombre_alimentista:
+            dependientes = [d for d in dependientes if not _es_el_alimentista(d, nombre_alimentista)]
+        # Solo quedan las cargas que el texto declara como OTRAS obligaciones del obligado (no la pensión fijada, el petitorio,
+        # los propios alimentistas ni filas vacías). Se calcula antes de usar las cargas en el ratio.
+        _pension_para_filtro = _pension_ordenada_del_expediente(texto_plano)
+        _petitorio_para_filtro = float((_extraer_petitorio_demanda_info(texto_plano) or {}).get("monto") or 0)
+        dependientes = [d for d in dependientes if _carga_respaldada_en_texto(d, _pension_para_filtro, _petitorio_para_filtro)]
+
         # Detectar carga en especie con prioridad nativa (texto real) y respaldo IA.
         carga_especie = _extraer_carga_especie_desde_texto(texto_plano, montos_reales_en_texto)
         carga_especie_ia = data.get("carga_especie", {}) if isinstance(data, dict) else {}
@@ -4449,6 +5732,25 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
 
         # --- 1. Cálculos Base ---
         ingresos, total_ingresos = _seleccionar_ingreso_base_hu14(ingresos, texto_plano)
+        # El ingreso del obligado que el propio texto presenta como tal (con su evidencia) manda sobre lo anterior.
+        ingreso_texto = _ingreso_obligado_verificado(texto_plano)
+        if ingreso_texto:
+            monto_texto = ingreso_texto["monto"]
+            otros = [dict(i, aplicado_calculo=False, estado="Validado por texto (referencial)")
+                     for i in ingresos if abs(float(i.get("monto") or 0) - monto_texto) >= 1]
+            ingresos = [{"tipo": "Ingreso del obligado", "monto": monto_texto, "estado": "Base de cálculo HU14",
+                         "evidencia": ingreso_texto["evidencia"], "aplicado_calculo": True}] + otros
+            total_ingresos = monto_texto
+        # Obligaciones previas declaradas como % de los haberes: se convierten a soles sobre el ingreso base.
+        cargas_porcentuales = _extraer_cargas_porcentuales(texto_plano)
+        for carga in cargas_porcentuales:
+            dependientes.append({
+                "tipo": "Obligación alimentaria previa",
+                "detalle": carga["etiqueta"] or f"Obligación previa ({carga['porcentaje']:g}% del haber)",
+                "monto_carga": round(total_ingresos * carga["porcentaje"] / 100.0, 2),
+                "porcentaje_haber": carga["porcentaje"],
+                "evidencia": carga["evidencia"],
+            })
         carga_especie_acreditada = float(carga_especie.get("monto_acreditado") or 0)
         carga_especie_reportada = float(carga_especie.get("monto_reportado") or 0)
         estado_carga = carga_especie.get("estado", "no detectada")
@@ -4466,12 +5768,28 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
 
         # Lo que el juez YA ordenó (si el expediente ya tiene sentencia), para no
         # confundirlo con el tope legal genérico del 60% que es solo un máximo abstracto.
-        pension_ordenada = _extraer_pension_ordenada_sentencia(texto_plano)
+        pension_ordenada = _pension_ordenada_del_expediente(texto_plano)
         monto_pension_ordenada_estimado = 0.0
         if pension_ordenada["tipo"] == "porcentaje" and total_ingresos > 0:
             monto_pension_ordenada_estimado = total_ingresos * (pension_ordenada["valor"] / 100.0)
         elif pension_ordenada["tipo"] == "monto_fijo":
             monto_pension_ordenada_estimado = pension_ordenada["valor"]
+
+        # Estado de verificación de lo que se muestra: dato respaldado por el texto o dato a revisar (con el motivo).
+        verificacion_ingreso = ingreso_texto["verificacion"] if ingreso_texto else (
+            {"estado": "revisar", "motivos": ["el ingreso no figura con claridad en los documentos"]} if total_ingresos > 0
+            else {"estado": "no_detectado", "motivos": []})
+        verificacion_pension = {"estado": "no_detectado", "motivos": []}
+        if pension_ordenada["tipo"] != "no_detectado":
+            motivos_pension = []
+            if pension_ordenada["tipo"] == "monto_fijo" and total_ingresos > 0:
+                if pension_ordenada["valor"] > total_ingresos:
+                    motivos_pension.append("la pensión supera el ingreso del obligado")
+                elif pension_ordenada["valor"] > total_ingresos * 0.6:
+                    motivos_pension.append("la pensión supera el 60 % embargable del ingreso (art. 648 inc. 6 CPC)")
+            if pension_ordenada["tipo"] == "porcentaje" and pension_ordenada["valor"] > 60:
+                motivos_pension.append("el porcentaje ordenado supera el 60 % embargable (art. 648 inc. 6 CPC)")
+            verificacion_pension = {"estado": "revisar" if motivos_pension else "verificada", "motivos": motivos_pension}
 
         # --- 3. Análisis de Ratio y Alertas ---
         ratio = 0
@@ -4500,6 +5818,19 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
                 mensaje_ratio = f"Ratio HU14 de {ratio:.1f}%. Se aplicó carga en especie alegada por S/ {carga_especie_aplicada:.2f} y cargas familiares por S/ {cargas_monetarias_dependientes:.2f}."
             else:
                 mensaje_ratio = f"Ratio HU14 de {ratio:.1f}%. Cargas familiares monetarias aplicadas: S/ {cargas_monetarias_dependientes:.2f}."
+
+            # Obligaciones previas en % de los haberes + pensión ordenada en %: si superan el 60 % embargable
+            # (art. 648 inc. 6 CPC) hay un conflicto que el juzgador debe revisar (prorrateo).
+            pct_previas = sum(c["porcentaje"] for c in cargas_porcentuales)
+            pct_pension = pension_ordenada["valor"] if pension_ordenada["tipo"] == "porcentaje" else 0.0
+            if pct_previas:
+                mensaje_ratio += f" Obligaciones previas declaradas: {pct_previas:g}% de los haberes"
+                if pct_pension:
+                    mensaje_ratio += f" + pensión ordenada {pct_pension:g}% = {pct_previas + pct_pension:g}%"
+                mensaje_ratio += "."
+                if pct_previas + pct_pension > 60:
+                    alerta_revision_hu14 = True
+                    mensaje_ratio += " Supera el 60 % embargable (art. 648 inc. 6 CPC): revisar prorrateo."
 
         contexto_social = _extraer_contexto_social_hu14(
             texto_plano,
@@ -4531,6 +5862,7 @@ def modulo_capacidad_cargas(texto_plano: str) -> dict:
             "carga_nivel": carga_nivel,
             "mensaje": mensaje_ratio,
             "alerta_revision_hu14": alerta_revision_hu14,
+            "verificacion": {"ingreso": verificacion_ingreso, "pension": verificacion_pension},
             "contexto_social": contexto_social,
             "validaciones_dependientes": {
                 "n_detectados_patron_nombre_edad": len(dependientes_nativos),
@@ -4757,6 +6089,199 @@ def _rag_fallback_extractivo(texto_plano: str, entidades: dict, error: Exception
         ]
     }
 
+def _depurar_estado_procesal(texto: str, fuente: str) -> str:
+    """Quita de la narrativa de la IA las afirmaciones de 'consentida' o 'etapa de ejecución' que ningún documento
+    del expediente respalda (la IA las inventa o se contradice entre síntesis y postura)."""
+    if not texto:
+        return texto
+    fuente_n = _normalizar_texto_busqueda_pdf(fuente)
+    respalda_consentida = bool(re.search(r'consentid|ejecutoriad|cosa juzgada', fuente_n))
+    respalda_ejecucion = bool(re.search(
+        r'etapa de ejecucion|oficio de retencion|retencion mensual|ejecucion de sentencia|requerimiento de pago', fuente_n))
+    conservar = []
+    for oracion in re.split(r'(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])', texto):
+        o = _normalizar_texto_busqueda_pdf(oracion)
+        if not respalda_consentida and 'consentid' in o:
+            continue
+        if not respalda_ejecucion and re.search(r'etapa de ejecucion|en ejecucion\b', o):
+            continue
+        conservar.append(oracion)
+    return " ".join(conservar)
+
+
+_PATRON_FECHA_CUALQUIERA = (r'(?<!\d)\d{1,2}[/-]\d{1,2}[/-]\d{4}(?!\d)|'
+                            r'(?<!\d)\d{1,2}\s+(?:d[ií]as?\s+del\s+mes\s+)?de\s+[a-záéíóúñ]+\s+d(?:e|el)\s+\d{4}(?!\d)|' + _FECHA_PALABRAS)
+
+
+def _fecha_de_emision(texto: str, tipo: str = None):
+    """(fecha, literal) de emisión del documento (cabecera, etiqueta de su acto o cierre), o (None, None)."""
+    pos = _posicion_fecha_emision(texto, tipo)
+    m = re.compile(_PATRON_FECHA_CUALQUIERA, re.IGNORECASE).match(texto, pos) if pos is not None else None
+    fecha = _parse_fecha_literal(m.group(0)) if m else None
+    return (fecha, m.group(0)) if fecha else (None, None)
+
+
+def _zona_titulo(texto: str) -> str:
+    """Los renglones cortos y en mayúsculas del comienzo de un escrito (su título), sin tildes y en minúsculas."""
+    renglones = []
+    for renglon in (texto or "")[:700].splitlines():
+        renglon = renglon.strip()
+        letras = [c for c in renglon if c.isalpha()]
+        if letras and len(renglon) <= 110 and sum(c.isupper() for c in letras) / len(letras) >= 0.7:
+            renglones.append(renglon)
+    return _normalizar_texto_busqueda_pdf("\n".join(renglones))
+
+
+def _resultado_dispositivo(texto: str, opciones: dict):
+    """Desenlace de una resolución según su PARTE DISPOSITIVA (lo que sigue al último 'se resuelve/falla/declara'),
+    no según lo que se cite en sus considerandos. opciones: {desenlace: patrón}; gana el que aparece primero."""
+    norm = _normalizar_texto_busqueda_pdf(texto)
+    marcas = list(re.finditer(r'\bse resuelve\b|\bresuelven\b|\bresuelve\b|\bfalla\b|\bfallo\b|\bse declara\b|\bdeclararon\b|\bdeclaran\b', norm))
+    dispositiva = norm[marcas[-1].start():] if marcas else norm[len(norm) // 2:]
+    hallados = [(m.start(), nombre) for nombre, patron in opciones.items() for m in [re.search(patron, dispositiva)] if m]
+    return min(hallados)[1] if hallados else None
+
+
+def _recorrido_procesal(fuente: str) -> dict:
+    """Lo que ocurrió DESPUÉS de la sentencia de primera instancia y consta en los documentos: sentencia de vista,
+    recurso de casación y resolución de la Corte Suprema, cada uno con su fecha de emisión y su desenlace.
+    Cada acto se reconoce por el título del escrito (no por el nombre del archivo)."""
+    recorrido = {}
+    for sec in _secciones_documentales(fuente):
+        texto = sec["texto"]
+        titulo = _zona_titulo(texto)
+        archivo = _normalizar_texto_busqueda_pdf(sec.get("archivo", ""))
+        # Las resoluciones supremas largas llevan el título en minúsculas y mayúsculas: se mira también el comienzo.
+        comienzo = _normalizar_texto_busqueda_pdf(texto[:350])
+        resolucion_suprema = (r'auto calificatorio|auto supremo|ejecutoria suprema|sentencia casatoria')
+        # Primero lo más específico: "AUTO CALIFICATORIO DEL RECURSO DE CASACIÓN" no es el recurso, es lo que lo resuelve.
+        if re.search(resolucion_suprema, titulo) or re.search(r'auto[_ ]calificatorio|auto[_ ]supremo|ejecutoria', archivo) \
+                or re.search(resolucion_suprema, comienzo):
+            acto = "casacion_resolucion"
+        elif re.search(r'recurso de casacion', titulo):
+            acto = "recurso_casacion"
+        elif re.search(r'sentencia de vista|auto de vista|sentencia de segunda instancia|sentencia de segundo grado', titulo + " " + archivo):
+            acto = "sentencia_vista"
+        elif re.search(r'corte suprema', titulo + " " + comienzo) and re.search(r'\bcasacion n', titulo + " " + comienzo):
+            acto = "casacion_resolucion"
+        else:
+            continue
+        tipo_fecha = {"sentencia_vista": "sentencia", "recurso_casacion": "recurso", "casacion_resolucion": "supremo"}[acto]
+        fecha, literal = _fecha_de_emision(texto, tipo_fecha)
+        if acto in recorrido:
+            # Un mismo acto puede constar en dos archivos (el auto y su versión completa): vale el primero, pero si este
+            # no trae fecha se completa con la del otro.
+            if not recorrido[acto]["fecha"] and fecha:
+                recorrido[acto].update(fecha=fecha, literal=literal)
+            continue
+        datos = {"fecha": fecha, "literal": literal, "archivo": sec["archivo"]}
+        if acto == "sentencia_vista":
+            datos["resultado"] = _resultado_dispositivo(texto, {
+                "confirma": r'\bconfirm\w+', "revoca": r'\brevoc\w+', "modifica": r'\bmodific\w+|\breform\w+',
+                "integra": r'\bintegr\w+', "anula": r'\bnul[ao]s?\b|\banul\w+'})
+            if datos["resultado"] == "confirma" and re.search(r'\brevoc\w+|\bmodific\w+', _normalizar_texto_busqueda_pdf(texto)[len(texto) // 2:]):
+                datos["resultado"] = "modifica"
+        elif acto == "casacion_resolucion":
+            # El desenlace es el del RECURSO ("improcedente el recurso de casación"), no cualquier "fundada" de los considerandos.
+            norm = _normalizar_texto_busqueda_pdf(texto)
+            datos["resultado"] = None
+            for nombre, patron in (("improcedente", r'improcedente'), ("infundado", r'infundad[oa]'), ("fundado", r'(?<!in)fundad[oa]'),
+                                   ("nulo", r'nul[oa]')):
+                if re.search(rf'\b{patron}\b[^.]{{0,100}}\brecurso\b|\brecurso\b[^.]{{0,100}}\b{patron}\b', norm):
+                    datos["resultado"] = nombre
+                    break
+        recorrido[acto] = datos
+    # La resolución suprema repite cuándo se interpuso el recurso ("el recurso de casación interpuesto el 13 de setiembre de 2022"):
+    # sirve si el propio escrito del recurso no trae fecha o no consta en el expediente.
+    suprema = recorrido.get("casacion_resolucion")
+    if suprema and not (recorrido.get("recurso_casacion") or {}).get("fecha"):
+        for sec in _secciones_documentales(fuente):
+            if sec["archivo"] == suprema["archivo"]:
+                m = re.search(r'recurso\s+de\s+casaci[oó]n[^.]{0,60}?\binterpuesto\s+(?:el|con\s+fecha)\s+(' + _PATRON_FECHA_CUALQUIERA + ')',
+                              sec["texto"], re.IGNORECASE)
+                fecha = _parse_fecha_literal(m.group(1)) if m else None
+                if fecha:
+                    recorrido["recurso_casacion"] = {**recorrido.get("recurso_casacion", {}), "fecha": fecha, "literal": m.group(1),
+                                                     "archivo": suprema["archivo"]}
+                break
+    return recorrido
+
+
+def _cierre_procesal_verificado(fuente: str):
+    """Recorrido posterior a la sentencia que SÍ consta en los documentos (sentencia de vista, recurso de casación y lo
+    que resolvió la Corte Suprema), con sus fechas. La IA suele confundir apelación con casación, por eso se arma del texto."""
+    def cuando(datos):
+        return f" del {datos['literal']}" if datos.get("literal") else ""
+    verbos = {"confirma": "la confirmó", "revoca": "la revocó", "modifica": "la modificó", "integra": "la integró",
+              "anula": "declaró su nulidad"}
+    recorrido = _recorrido_procesal(fuente)
+    frases = []
+    vista = recorrido.get("sentencia_vista")
+    if vista and vista.get("resultado") in verbos:
+        frases.append(f"La sentencia de primera instancia fue apelada y la sentencia de vista{cuando(vista)} {verbos[vista['resultado']]}.")
+    recurso = recorrido.get("recurso_casacion")
+    if recurso:
+        frases.append(f"Se interpuso recurso de casación{cuando(recurso)}.")
+    suprema = recorrido.get("casacion_resolucion")
+    if suprema and suprema.get("resultado"):
+        articulo = {"improcedente": "improcedente", "infundado": "infundado", "fundado": "fundado", "nulo": "nulo"}[suprema["resultado"]]
+        frases.append(f"El recurso de casación fue declarado {articulo} mediante resolución{cuando(suprema)}.")
+    return " ".join(frases) or None
+
+
+def _depurar_afirmaciones_sin_respaldo(texto: str, fuente: str) -> str:
+    """Quita de la narrativa de la IA toda oración que afirme un MONTO, una FECHA o un PORCENTAJE que no figura en los documentos
+    (p. ej. 'ofreció S/ 1,500.00' cuando nadie lo ofreció). Es una comprobación literal contra el expediente, no depende del modelo."""
+    if not texto:
+        return texto
+    plano = re.sub(r'\s+', ' ', fuente or '')
+    montos_fuente = _extraer_montos_reales(fuente or '')
+    porcentajes_fuente = {p.replace(',', '.') for p in re.findall(r'(\d+(?:[.,]\d+)?)\s*%', plano)}
+    fechas_fuente = set()
+    for m in re.finditer(_PATRON_FECHA_CUALQUIERA, plano, re.IGNORECASE):
+        fecha = _parse_fecha_literal(m.group(0))
+        if fecha:
+            fechas_fuente.add(fecha.date())
+    conservadas = []
+    for oracion in re.split(r'(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])', texto):
+        sin_respaldo = False
+        for m in re.finditer(_SOLES_CAPTURA, oracion):
+            valor = _normalizar_monto_texto(m.group(1))
+            if valor and not _validar_monto_con_texto(valor, montos_fuente, tolerancia=1.0):
+                sin_respaldo = True
+        for m in re.finditer(r'(\d+(?:[.,]\d+)?)\s*%', oracion):
+            if m.group(1).replace(',', '.') not in porcentajes_fuente:
+                sin_respaldo = True
+        for m in re.finditer(_PATRON_FECHA_CUALQUIERA, oracion, re.IGNORECASE):
+            fecha = _parse_fecha_literal(m.group(0))
+            if fecha and fecha.date() not in fechas_fuente:
+                sin_respaldo = True
+        if not sin_respaldo:
+            conservadas.append(oracion)
+    return " ".join(conservadas)
+
+
+def _aplicar_estado_verificado(resultado: dict, texto_plano: str) -> dict:
+    """Depura las afirmaciones procesales sin respaldo y reemplaza el recorrido apelación/casación de la síntesis
+    por el que consta en los documentos (ver funciones anteriores)."""
+    cierre = _cierre_procesal_verificado(texto_plano)
+    for bloque in ("resumen", "postura"):
+        datos = resultado.get(bloque)
+        if not isinstance(datos, dict):
+            continue
+        for tono in ("tecnico", "estandar"):
+            texto = _depurar_estado_procesal(str(datos.get(tono) or ""), texto_plano)
+            texto = _depurar_afirmaciones_sin_respaldo(texto, texto_plano)
+            if cierre and bloque == "resumen" and texto:
+                oraciones = [
+                    o for o in re.split(r'(?<=[.!?])\s+(?=[A-ZÁÉÍÓÚÑ])', texto)
+                    if not re.search(r'apelaci|casaci|sala suprema|sala revisora|improcedent|confirm', _normalizar_texto_busqueda_pdf(o))
+                ]
+                texto = " ".join(oraciones + [cierre])
+            datos[tono] = texto
+    return resultado
+
+
 def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
     import json, requests
 
@@ -4901,7 +6426,8 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
         if isinstance(analisis_json.get("puntos_controvertidos"), list):
             analisis_json["puntos_controvertidos"] = [
                 punto for punto in analisis_json["puntos_controvertidos"]
-                if not re.search(
+                if isinstance(punto, dict) and _punto_sugerido_fundamentado(punto, texto_plano)
+                and not re.search(
                     r'(monto\s+fijo|porcentaje).{0,120}(oferta|pensi[oó]n)|'
                     r'(oferta|pensi[oó]n).{0,120}(monto\s+fijo|porcentaje)|'
                     r'(inconsistencia|contradicci[oó]n).{0,160}(850|650|petitorio|sentencia|fundada\s+en\s+parte)|'
@@ -4931,13 +6457,13 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
                 ]
         
         puntos_acta = _extraer_puntos_controvertidos_acta(texto_plano)
-        return {
+        return _aplicar_estado_verificado({
             "resumen": analisis_json.get("resumen", {"estandar": "Error de generación.", "tecnico": "Error de generación."}),
             "postura": _integrar_oferta_contestacion(
                 analisis_json.get("postura", {"estandar": "Error.", "tecnico": "Error."}), texto_plano
             ),
             "puntos_controvertidos": puntos_acta or analisis_json.get("puntos_controvertidos", [])
-        }
+        }, texto_plano)
 
     except Exception as e:
         print(f"Error crítico en RAG: {e}")
@@ -4960,6 +6486,15 @@ def clasificar_documento_judicial(filename: str, texto: str) -> dict:
     ]:
         if re.search(patron, nombre, re.IGNORECASE):
             return {"tipo": tipo, "categoria": categoria, "confianza": 0.95, "senales": ["nombre del archivo"]}
+    # Sin nombre explícito (p. ej. "scan_001.pdf"): el título del propio documento.
+    por_titulo = _tipo_documental_por_titulo(texto)
+    if por_titulo:
+        categoria_titulo = {
+            "Indice": "Organizacion del expediente", "Demanda": "Escrito principal", "Contestacion": "Escrito principal",
+            "Sentencia": "Resolucion judicial", "Auto admisorio": "Resolucion judicial",
+            "Notificacion": "Acto de comunicacion", "Acta de audiencia": "Actuacion judicial", "Oficio": "Comunicacion oficial",
+        }[por_titulo]
+        return {"tipo": por_titulo, "categoria": categoria_titulo, "confianza": 0.9, "senales": ["titulo del documento"]}
     universo = f"{nombre} {contenido}"
     reglas = [
         {
@@ -7919,7 +9454,7 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
             if re.search(r'vista', nombre_doc, re.IGNORECASE):
                 continue
             texto_doc = str(doc.get("texto") or "")
-            m = re.search(r'AUDIENCIA\s+[UÚ]NICA[\s\S]{0,260}?((?:\d{1,2}[/-]\d{1,2}[/-]\d{4})|(?:\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})|(?:[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+?\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+))', texto_doc, re.IGNORECASE)
+            m = re.search(r'AUDIENCIA\s+[UÚ]NICA[\s\S]{0,260}?((?:\d{1,2}[/-]\d{1,2}[/-]\d{4})|(?:\d{1,2}\s+(?:d[ií]as?\s+del\s+mes\s+)?de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})|(?:[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+?\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+))', texto_doc, re.IGNORECASE)
             if m:
                 fecha = fecha_literal_a_str(m.group(1))
                 if fecha:
@@ -8407,7 +9942,7 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
         hallazgos = []
         patron_fecha = (
             r'(?<!\d)(\d{1,2}[/-]\d{1,2}[/-]\d{4})(?!\d)|'
-            r'(?<!\d)(\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})(?!\d)|'
+            r'(?<!\d)(\d{1,2}\s+(?:d[ií]as?\s+del\s+mes\s+)?de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})(?!\d)|'
             r'(?<!\d)([a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+?\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+)(?!\d)'
         )
         for match in re.finditer(patron_fecha, texto_completo, re.IGNORECASE):
@@ -8430,7 +9965,7 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
             return []
         patron_fecha = (
             r'(?<!\d)(\d{1,2}[/-]\d{1,2}[/-]\d{4})(?!\d)|'
-            r'(?<!\d)(\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})(?!\d)|'
+            r'(?<!\d)(\d{1,2}\s+(?:d[ií]as?\s+del\s+mes\s+)?de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})(?!\d)|'
             r'(?<!\d)([a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+?\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+)(?!\d)'
         )
         fechas = []
@@ -8457,7 +9992,7 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
             return None
         patron_fecha = (
             r'(?<!\d)(\d{1,2}[/-]\d{1,2}[/-]\d{4})(?!\d)|'
-            r'(?<!\d)(\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})(?!\d)|'
+            r'(?<!\d)(\d{1,2}\s+(?:d[ií]as?\s+del\s+mes\s+)?de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})(?!\d)|'
             r'(?<!\d)([a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+?\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+dos\s+mil\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ\s]+)(?!\d)'
         )
         for linea in (texto_completo or "").splitlines():
@@ -8478,7 +10013,7 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
         hallazgos = []
         patron_fecha = (
             r'(?<!\d)(\d{1,2}[/-]\d{1,2}[/-]\d{4})(?!\d)|'
-            r'(?<!\d)(\d{1,2}\s+de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})(?!\d)'
+            r'(?<!\d)(\d{1,2}\s+(?:d[ií]as?\s+del\s+mes\s+)?de\s+[a-zA-ZáéíóúñÁÉÍÓÚÑ]+\s+d(?:e|el)\s+\d{4})(?!\d)'
         )
         for linea in (texto_completo or "").splitlines():
             for patron in patrones_etiqueta:
@@ -9905,7 +11440,7 @@ def reconciliar_analisis_ia_guardado(resultados: dict, texto_plano: str) -> dict
     if not isinstance(sujetos, dict) or not isinstance(financiera, dict) or not isinstance(capacidad, dict):
         return resultados
 
-    texto_sentencia = _texto_documento_por_nombre(texto_plano, r'(?:^|[_ -])SENTENCIA(?:[_ .-]|$)') or texto_plano
+    texto_sentencia = _texto_documento(texto_plano, "sentencia", r'(?:^|[_ -])SENTENCIA(?:[_ .-]|$)') or texto_plano
     pension = _extraer_pension_ordenada_sentencia(texto_sentencia)
     ingresos_preparados, ingreso_base_preparado = _seleccionar_ingreso_base_hu14(
         capacidad.get("ingresos") or [], texto_plano
@@ -9959,6 +11494,12 @@ def reconciliar_analisis_ia_guardado(resultados: dict, texto_plano: str) -> dict
             continue
         monto = float(dep.get("monto_carga") or 0)
         evidencia = str(dep.get("evidencia") or "")
+        if dep.get("porcentaje_haber"):
+            # Obligación declarada como % de los haberes: su monto en soles es derivado, no figura en el texto.
+            dependientes.append(dict(dep))
+            if monto > 0:
+                montos_incluidos.add(round(monto, 2))
+            continue
         if monto > 0 and not _validar_monto_con_texto(monto, _extraer_montos_reales(evidencia), tolerancia=1.0):
             continue
         if monto > 0 and round(monto, 2) in montos_incluidos:

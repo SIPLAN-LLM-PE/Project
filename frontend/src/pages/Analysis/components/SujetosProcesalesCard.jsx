@@ -1,5 +1,6 @@
 import React from 'react';
 import { Users, User, MapPin, CreditCard, Baby, Briefcase, ExternalLink } from 'lucide-react';
+import { EstadoVerificacion } from './EstadoVerificacion';
 
 // 🚀 NUEVO: Recibimos onJumpToSource como propiedad (prop)
 export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
@@ -8,9 +9,16 @@ export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
   const mostrarValor = (valor) => valor && !["No detectado", "No encontrado", ""].includes(valor);
   const domicilios = data.domicilios || {};
 
+  // Mayúscula inicial por palabra. No se usa \b: en JavaScript solo reconoce letras sin tilde, así que
+  // "lucía" quedaba "LucÍA" y "cárdenas" "CÁRdenas". Las partículas (de, del, la...) quedan en minúscula.
+  const PARTICULAS = new Set(["de", "del", "la", "las", "los", "y", "e"]);
   const titleCase = (valor) => String(valor || "")
     .toLowerCase()
-    .replace(/\b([a-záéíóúüñ])/g, (letra) => letra.toUpperCase());
+    .split(/(\s+)/)
+    .map((palabra, i) => (/^\s*$/.test(palabra) || (i > 0 && PARTICULAS.has(palabra))
+      ? palabra
+      : palabra.charAt(0).toUpperCase() + palabra.slice(1)))
+    .join("");
 
   const limpiarNombreTarjeta = (valor) => {
     if (!mostrarValor(valor)) return "No detectado";
@@ -59,16 +67,33 @@ export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
           Sujetos Procesales
         </h4>
         <span className="bg-blue-100 text-blue-700 px-2.5 py-1 rounded-md text-[9px] font-bold tracking-wide">
-          Extracción spaCy + Regex
+          IA verificada con el texto + reglas
         </span>
       </div>
 
+      {(data.materia || data.pretensiones?.length > 0) && (
+        <div className="mb-3 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2">
+          <p className="text-[9px] font-black uppercase tracking-widest text-slate-400">Materia del proceso</p>
+          {data.materia && <p className="text-xs font-bold text-slate-700 mt-0.5 break-words">{data.materia}</p>}
+          {data.pretensiones?.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-1.5">
+              {data.pretensiones.map((pretension) => (
+                <span key={pretension} className="bg-white border border-slate-200 text-slate-600 px-2 py-0.5 rounded-md text-[9px] font-bold">
+                  {pretension}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="flex flex-col gap-4">
-        
+
         {/* PARTE DEMANDANTE */}
         <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm border-l-4 border-l-emerald-400">
           <div className="flex justify-between items-start mb-3">
             <h5 className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">Parte Demandante</h5>
+            <EstadoVerificacion verificacion={data.demandante?.verificacion} />
           </div>
           <div className="flex items-start gap-3 mb-3 min-w-0">
             <div className="bg-emerald-50 p-2 rounded-full text-emerald-600">
@@ -135,6 +160,7 @@ export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
         <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm border-l-4 border-l-rose-400">
           <div className="flex justify-between items-start mb-3">
             <h5 className="text-[10px] font-bold text-rose-600 uppercase tracking-widest">Parte Demandada</h5>
+            <EstadoVerificacion verificacion={data.demandado?.verificacion} />
           </div>
           <div className="flex items-start gap-3 mb-3 min-w-0">
             <div className="bg-rose-50 p-2 rounded-full text-rose-600">

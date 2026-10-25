@@ -8,6 +8,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD requerido}
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # Crea las tablas la primera vez que se inicializa el volumen (no toca una base ya existente).
+      - ./Backend/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-sigeja_db}"]
       interval: 10s
@@ -24,6 +26,8 @@ services:
       SIGEJA_JWT_EXP_MINUTES: ${SIGEJA_JWT_EXP_MINUTES:-480}
       SIGEJA_OLLAMA_RAG_TIMEOUT: ${SIGEJA_OLLAMA_RAG_TIMEOUT:-900}
       SIGEJA_OLLAMA_RAG_MAX_CTX: ${SIGEJA_OLLAMA_RAG_MAX_CTX:-32768}
+      SIGEJA_PARTES_IA: ${SIGEJA_PARTES_IA:-true}
+      SIGEJA_PARTES_IA_TIMEOUT: ${SIGEJA_PARTES_IA_TIMEOUT:-120}
       OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://ollama:11434}
       SIGEJA_OLLAMA_GENERATE_URLS: ${SIGEJA_OLLAMA_GENERATE_URLS:-http://ollama:11434/api/generate}
       SIGEJA_OLLAMA_EMBED_URLS: ${SIGEJA_OLLAMA_EMBED_URLS:-http://ollama:11434/api/embeddings}

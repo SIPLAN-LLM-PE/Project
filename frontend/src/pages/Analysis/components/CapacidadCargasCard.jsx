@@ -1,5 +1,6 @@
 import React from 'react';
 import { Briefcase, BrainCircuit, ExternalLink, HeartPulse, Users } from 'lucide-react';
+import { EstadoVerificacion } from './EstadoVerificacion';
 
 export const CapacidadCargasCard = ({ data, onOpenDetalle, onJumpToSource }) => {
   // Seguro de renderizado: Esperamos a que la IA devuelva los datos
@@ -85,7 +86,10 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle, onJumpToSource }) => 
 
             {/* Totalizador de Ingresos */}
             <div className="bg-slate-50 rounded-lg p-4 flex justify-between items-center border border-slate-100">
-              <p className="text-xs font-medium text-slate-500 max-w-[100px]">Ingreso Base Mensual:</p>
+              <div className="max-w-[120px]">
+                <p className="text-xs font-medium text-slate-500">Ingreso Base Mensual:</p>
+                <div className="mt-1"><EstadoVerificacion verificacion={data.verificacion?.ingreso} /></div>
+              </div>
               <p className="text-lg font-bold text-[#1a3059] font-mono">
                 {/* FIX 2: Uso de safeFormat */}
                 S/. {safeFormat(data.total_ingresos)}
