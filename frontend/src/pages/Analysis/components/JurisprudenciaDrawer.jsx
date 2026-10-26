@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { X, Library, Sparkles, AlertTriangle, ChevronRight, Loader2 } from 'lucide-react';
 
 const textoSeguro = (value) => {
@@ -26,25 +26,28 @@ const construirContextoJurisprudencia = (analysisData) => {
 export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente, numeroExpediente, analysisData }) => {
   const [casos, setCasos] = useState([]);
   const [isLoading, setIsLoading] = useState(false);
+  const [isIndexing, setIsIndexing] = useState(false);
+  const [canRetryIndex, setCanRetryIndex] = useState(false);
   const [diagnostico, setDiagnostico] = useState("");
   const [perfilConsulta, setPerfilConsulta] = useState(null);
   const [expandedIndex, setExpandedIndex] = useState(0); // El índice 0 estará abierto por defecto
+  const requestInFlightRef = useRef(false);
 
   // Disparar la búsqueda cuando se abre el Drawer
   const contextoBusqueda = (textoExpediente || "").trim() || construirContextoJurisprudencia(analysisData);
 
-  useEffect(() => {
-    if (isOpen && (contextoBusqueda || numeroExpediente)) {
-      buscarJurisprudencia();
+  const buscarJurisprudencia = useCallback(async ({ silent = false, retry = false } = {}) => {
+    if (requestInFlightRef.current) return;
+    requestInFlightRef.current = true;
+    if (!silent) {
+      setIsLoading(true);
+      setIsIndexing(false);
+      setCanRetryIndex(false);
+      setCasos([]);
+      setDiagnostico("");
+      setPerfilConsulta(null);
+      setExpandedIndex(0);
     }
-  }, [isOpen, contextoBusqueda, numeroExpediente]);
-
-  const buscarJurisprudencia = async () => {
-    setIsLoading(true);
-    setCasos([]);
-    setDiagnostico("");
-    setPerfilConsulta(null);
-    setExpandedIndex(0);
     try {
       const token = localStorage.getItem('access_token');
       const res = await fetch('/api/v1/jurisprudencia', {
@@ -55,23 +58,45 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente, numeroE
         },
         body: JSON.stringify({
           texto_expediente: contextoBusqueda,
-          numero_expediente: numeroExpediente || ""
+          numero_expediente: numeroExpediente || "",
+          reintentar_indice: retry
         })
       });
       const data = await res.json();
-      if (data.status === "success") {
-        setCasos(data.resultados);
+      if (data.status === "indexing") {
+        setIsIndexing(true);
+        setDiagnostico(data.diagnostico || "Preparando el historial de jurisprudencia.");
+      } else if (data.status === "success") {
+        setIsIndexing(false);
+        setCasos(data.resultados || []);
         setPerfilConsulta(data.perfil_consulta || null);
+        setDiagnostico(data.diagnostico || "");
       } else {
+        setIsIndexing(false);
+        setCanRetryIndex(Boolean(data.reintentar_indice));
         setDiagnostico(data.diagnostico || "No se pudo ejecutar la busqueda semantica.");
       }
     } catch (error) {
       console.error("Error buscando jurisprudencia:", error);
+      setIsIndexing(false);
       setDiagnostico("No se pudo conectar con el servicio de jurisprudencia.");
     } finally {
+      requestInFlightRef.current = false;
       setIsLoading(false);
     }
-  };
+  }, [contextoBusqueda, numeroExpediente]);
+
+  useEffect(() => {
+    if (!isOpen || (!contextoBusqueda && !numeroExpediente)) return;
+    const timer = setTimeout(() => buscarJurisprudencia(), 0);
+    return () => clearTimeout(timer);
+  }, [isOpen, contextoBusqueda, numeroExpediente, buscarJurisprudencia]);
+
+  useEffect(() => {
+    if (!isOpen || !isIndexing) return;
+    const timer = setInterval(() => buscarJurisprudencia({ silent: true }), 4000);
+    return () => clearInterval(timer);
+  }, [isOpen, isIndexing, buscarJurisprudencia]);
 
   return (
     <>
@@ -110,15 +135,22 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente, numeroE
           <div className="bg-[#eff6ff] border border-blue-100 p-4 rounded-xl flex gap-3 mb-6 shadow-sm">
             <Sparkles size={18} className="text-blue-500 shrink-0 mt-0.5 animate-pulse" />
             <p className="text-xs text-blue-800 font-medium leading-relaxed">
-              {isLoading 
-                ? "Buscando resoluciones similares en la base de datos basándose en los hechos..."
-                : `Se han encontrado ${casos.length} resoluciones similares en la Corte del Callao basándose en los hechos y la materia de este expediente.`}
+              {isLoading
+                ? "Buscando resoluciones similares entre los expedientes analizados..."
+                : isIndexing
+                  ? diagnostico
+                  : casos.length > 0
+                    ? `Se encontraron ${casos.length} expedientes comparables por hechos y materia.`
+                    : diagnostico || "No se encontraron expedientes comparables."}
             </p>
           </div>
 
-          {!isLoading && diagnostico && (
-            <div className="bg-amber-50 border border-amber-200 p-3 rounded-xl text-xs text-amber-800 font-semibold mb-5">
+          {!isLoading && !isIndexing && canRetryIndex && (
+            <div className="bg-amber-50 border border-amber-200 p-3 rounded-md text-xs text-amber-800 font-semibold mb-5">
               {diagnostico}
+              <button type="button" onClick={() => buscarJurisprudencia({ retry: true })} className="ml-2 underline font-bold">
+                Reintentar indexación
+              </button>
             </div>
           )}
 
@@ -134,10 +166,10 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente, numeroE
           )}
 
           {/* Estado de Carga */}
-          {isLoading && (
+          {(isLoading || isIndexing) && (
             <div className="flex flex-col items-center justify-center py-10 opacity-70">
               <Loader2 size={36} className="text-indigo-500 animate-spin mb-4" />
-              <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">Analizando Contexto</p>
+              <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">{isIndexing ? 'Indexando historial' : 'Analizando contexto'}</p>
             </div>
           )}
 
@@ -237,9 +269,11 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente, numeroE
                             <AlertTriangle size={12} />
                             <span className="text-[9px] font-bold uppercase tracking-wide">Carácter Referencial</span>
                           </div>
-                          <button className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 transition-colors">
-                            Ver Resolución Completa <ChevronRight size={14} />
-                          </button>
+                          {caso.numero_expediente && (
+                            <a href={`/analysis?exp=${encodeURIComponent(caso.numero_expediente)}`} target="_blank" rel="noopener noreferrer" className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1 transition-colors">
+                              Abrir expediente <ChevronRight size={14} />
+                            </a>
+                          )}
                         </div>
                       </div>
                     </div>

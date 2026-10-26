@@ -1,4 +1,4 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException, Body, APIRouter, Request
+from fastapi import FastAPI, File, UploadFile, HTTPException, Body, APIRouter, Request, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
@@ -83,6 +83,8 @@ _ANALYSIS_IN_PROGRESS: set[str] = set()
 _ANALYSIS_OCR_CACHE: dict[str, dict] = {}
 _ANALYSIS_OCR_CACHE_MAX = int(os.getenv("SIGEJA_OCR_CACHE_MAX", "80"))
 _ANALYSIS_PROGRESS: dict[str, dict] = {}
+_JURISPRUDENCIA_INDEX_LOCK = threading.Lock()
+_JURISPRUDENCIA_INDEX_STATE = {"running": False, "error": None}
 
 
 def _corriendo_en_docker() -> bool:
@@ -150,6 +152,7 @@ def actualizar_progreso_analisis(numero_expediente: str, porcentaje: int, etapa:
         previo = _ANALYSIS_PROGRESS.get(key, {})
         _ANALYSIS_PROGRESS[key] = {
             "numero_expediente": numero_expediente,
+            "started_at": previo.get("started_at"),
             "porcentaje": max(int(previo.get("porcentaje", 0) or 0), min(100, int(porcentaje))),
             "etapa": etapa,
             "detalle": detalle,
@@ -809,6 +812,7 @@ class EditarExpedienteRequest(BaseModel):
 class JurisprudenciaRequest(BaseModel):
     texto_expediente: str = ""
     numero_expediente: str = ""
+    reintentar_indice: bool = False
 
 class RegenerarRequest(BaseModel):
     texto_expediente: str       
@@ -6867,6 +6871,57 @@ def generar_embedding(texto: str) -> list:
         print("Error generando embedding RAG: respuesta sin embedding")
     return []
 
+
+def reconstruir_indice_jurisprudencia(numero_expediente: str = None):
+    conn = None
+    error = None
+    try:
+        conn = get_db_connection()
+        filas = conn.execute('''
+            SELECT id, json_resultados FROM registro_expedientes
+            WHERE jsonb_typeof(json_resultados) = 'object'
+              AND json_resultados <> '{}'::jsonb AND embedding IS NULL
+              AND (%s IS NULL OR numero_expediente = %s)
+            ORDER BY id
+        ''', (numero_expediente, numero_expediente)).fetchall()
+        for fila in filas:
+            resultados = cargar_json_bd(fila["json_resultados"], {})
+            if not isinstance(resultados, dict) or not resultados:
+                continue
+            vector = generar_embedding(preparar_texto_para_vector(resultados))
+            if not vector:
+                raise RuntimeError("No se pudo generar el vector. Verifica Ollama y nomic-embed-text.")
+            conn.execute('''
+                UPDATE registro_expedientes SET embedding = %s::vector
+                WHERE id = %s AND embedding IS NULL
+            ''', (str(vector), fila["id"]))
+            conn.commit()
+    except Exception as exc:
+        error = "No se pudo generar el indice. Revisa Ollama, nomic-embed-text y PostgreSQL."
+        if conn:
+            conn.rollback()
+        print(f"Error indexando jurisprudencia: {exc}")
+    finally:
+        if conn:
+            conn.close()
+        if numero_expediente is None:
+            with _JURISPRUDENCIA_INDEX_LOCK:
+                _JURISPRUDENCIA_INDEX_STATE["running"] = False
+                _JURISPRUDENCIA_INDEX_STATE["error"] = error
+
+
+def programar_indice_jurisprudencia(background_tasks: BackgroundTasks, reintentar: bool = False):
+    with _JURISPRUDENCIA_INDEX_LOCK:
+        if _JURISPRUDENCIA_INDEX_STATE["running"]:
+            return True, None
+        error = _JURISPRUDENCIA_INDEX_STATE["error"]
+        if error and not reintentar:
+            return False, error
+        _JURISPRUDENCIA_INDEX_STATE["running"] = True
+        _JURISPRUDENCIA_INDEX_STATE["error"] = None
+        background_tasks.add_task(reconstruir_indice_jurisprudencia)
+        return True, None
+
 # --- ENDPOINTS (API) ---
 
 @app.get("/api/v1/analysis-progress/{numero_expediente}")
@@ -6874,7 +6929,7 @@ async def obtener_progreso_analisis(numero_expediente: str):
     key = _progress_key(numero_expediente)
     with _ANALYSIS_LOCK:
         progreso = dict(_ANALYSIS_PROGRESS.get(key, {}))
-        progreso["activo"] = key in _ANALYSIS_IN_PROGRESS
+        activo = key in _ANALYSIS_IN_PROGRESS
     if not progreso:
         return {
             "numero_expediente": numero_expediente,
@@ -6883,11 +6938,13 @@ async def obtener_progreso_analisis(numero_expediente: str):
             "detalle": "Aun no inicia el analisis.",
             "activo": False
         }
+    progreso["activo"] = activo
     return progreso
 
 @app.post("/api/v1/analyze-document")
-async def analizar_expediente(
+def analizar_expediente(
     request: Request,
+    background_tasks: BackgroundTasks,
     files: List[UploadFile] = File(...),
     forzar_ocr: bool = Form(False),
     numero_expediente: str = Form(...),
@@ -6913,6 +6970,7 @@ async def analizar_expediente(
         _ANALYSIS_IN_PROGRESS.add(numero_lock)
         _ANALYSIS_PROGRESS[numero_lock] = {
             "numero_expediente": numero_expediente,
+            "started_at": int(time.time() * 1000),
             "porcentaje": 2,
             "etapa": "preparando",
             "detalle": "Preparando archivos del expediente.",
@@ -6959,7 +7017,7 @@ async def analizar_expediente(
                 "ocr",
                 f"Procesando documento {i + 1} de {len(files)}: {upload_file.filename}"
             )
-            contenido = await upload_file.read()
+            contenido = upload_file.file.read()
             try:
                 validar_nombre_y_tamano_pdf(upload_file, len(contenido))
             except HTTPException as limite_error:
@@ -7326,9 +7384,10 @@ async def analizar_expediente(
         ''', (json_resultados_string, timestamp_concluido, paginas_estimadas, tiempo_total,
               m_bert_score, m_f1_ner, m_ocr_precision, ocr_detalle_json, numero_expediente))
         conn.commit()
+        background_tasks.add_task(reconstruir_indice_jurisprudencia, numero_expediente)
         actualizar_progreso_analisis(numero_expediente, 100, "completado", "Analisis completado y guardado.")
         
-        print(f"💾 BASE DE DATOS: Análisis RAG indexado permanentemente para el caso {numero_expediente}")
+        print(f"💾 BASE DE DATOS: Análisis RAG guardado para el caso {numero_expediente}")
 
         # 6. RETORNO DE RESPUESTA SÍNCRONA AL FRONTEND
         return {
@@ -7347,6 +7406,7 @@ async def analizar_expediente(
         
     except HTTPException as he:
         # Re-lanzamos de manera íntegra los errores controlados (400) para que React los pinte en el cliente
+        actualizar_progreso_analisis(numero_expediente, 100, "error", str(he.detail))
         raise he
     except Exception as e:
         # En caso de fallas imprevistas del sistema, imprimimos la traza completa en la consola y enviamos un 500
@@ -7905,7 +7965,7 @@ async def guardar_borrador_analisis(numero: str, payload: AnalysisDraftRequest, 
 
 
 @app.post("/api/v1/save-analysis")
-async def guardar_analisis_aprobado(req: SaveAnalysisRequest, request: Request):
+def guardar_analisis_aprobado(req: SaveAnalysisRequest, request: Request):
     """
     Guarda o actualiza el análisis definitivo en la base de datos
     después de que el Especialista/Juez lo ha revisado y aprobado.
@@ -11207,7 +11267,7 @@ async def export_security_csv(request: Request):
 app.include_router(router) 
 
 @app.post("/api/v1/jurisprudencia")
-async def buscar_jurisprudencia_semantica(req: JurisprudenciaRequest, request: Request):
+def buscar_jurisprudencia_semantica(req: JurisprudenciaRequest, request: Request, background_tasks: BackgroundTasks):
     texto_base = (req.texto_expediente or "").strip()
     numero_actual = (req.numero_expediente or "").strip()
     conn = get_db_connection()
@@ -11237,6 +11297,28 @@ async def buscar_jurisprudencia_semantica(req: JurisprudenciaRequest, request: R
                 "status": "error",
                 "resultados": [],
                 "diagnostico": "No se recibio texto ni se pudo reconstruir el contexto desde el expediente."
+            }
+
+        conteo = conn.execute('''
+            SELECT COUNT(*) AS total,
+                   COUNT(*) FILTER (WHERE embedding IS NULL) AS pendientes
+            FROM registro_expedientes
+            WHERE jsonb_typeof(json_resultados) = 'object'
+              AND json_resultados <> '{}'::jsonb
+        ''').fetchone()
+        pendientes = int(conteo["pendientes"] or 0)
+        if pendientes:
+            indexando, error_indice = programar_indice_jurisprudencia(
+                background_tasks, reintentar=req.reintentar_indice
+            )
+            if not indexando:
+                return {
+                    "status": "error", "resultados": [], "reintentar_indice": True,
+                    "diagnostico": f"No se pudo completar el indice de jurisprudencia: {error_indice}"
+                }
+            return {
+                "status": "indexing", "resultados": [],
+                "diagnostico": f"Preparando jurisprudencia: {int(conteo['total']) - pendientes} de {conteo['total']} expedientes indexados."
             }
 
         perfil_consulta = _perfil_jurisprudencia_texto(texto_base)
@@ -11305,7 +11387,7 @@ async def buscar_jurisprudencia_semantica(req: JurisprudenciaRequest, request: R
                 "caracter_jurisprudencial": "Referencial; validar obligatoriedad normativa antes de citar como vinculante",
                 "explicacion_similitud": explicacion,
                 "factores_similitud": factores,
-                "juzgado": "Juzgado de Paz Letrado - Callao",
+                "juzgado": "Expediente registrado en SIGEJA",
                 "fecha": fila["fecha_analisis"].strftime("%Y-%m-%d") if fila["fecha_analisis"] else "Reciente",
                 "hechos": f"Demandante: {fila['demandante']}. Demandado: {fila['demandado']}. {fragmento_hechos}",
                 "decision": f"Petitorio: {formato_monto(fila['monto_petitorio'])}. {fragmento_decision}",
@@ -11313,12 +11395,10 @@ async def buscar_jurisprudencia_semantica(req: JurisprudenciaRequest, request: R
                 "puntos_comparables": puntos_texto
             })
 
-        if not casos_reales:
-            casos_reales = [{"expediente": "SISTEMA SIN HISTORIAL VECTORIAL", "similitud": "0%", "hechos": "Se necesita guardar al menos un expediente con análisis RAG para tener jurisprudencia base."}]
-
         return {
             "status": "success",
             "resultados": casos_reales,
+            "diagnostico": "No hay otros expedientes analizados para comparar." if not casos_reales else "",
             "perfil_consulta": {
                 "materia": perfil_consulta.get("materia"),
                 "petitorio": formato_monto(perfil_consulta.get("petitorio")),

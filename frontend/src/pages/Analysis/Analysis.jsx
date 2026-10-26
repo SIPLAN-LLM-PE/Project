@@ -37,6 +37,25 @@ let draftChatMessages = [
   { rol: 'assistant', contenido: 'Hola, soy el asistente IA de SIGEJA. \u00bfEn qu\u00e9 te puedo ayudar?' }
 ];
 let draftSessionKey = null;
+const PENDING_ANALYSIS_KEY = 'sigeja:pending-analysis';
+const readPendingAnalysis = (sessionKey) => {
+  try {
+    const pending = JSON.parse(sessionStorage.getItem(PENDING_ANALYSIS_KEY) || 'null');
+    if (pending?.sessionKey !== sessionKey || !pending.numeroExpediente ||
+        !Number.isFinite(pending.startedAt) || pending.startedAt > Date.now() ||
+        Date.now() - pending.startedAt > 24 * 60 * 60 * 1000) return null;
+    return pending;
+  } catch {
+    return null;
+  }
+};
+const savePendingAnalysis = (sessionKey, numeroExpediente) => {
+  sessionStorage.setItem(PENDING_ANALYSIS_KEY, JSON.stringify({ sessionKey, numeroExpediente, startedAt: Date.now() }));
+};
+const clearPendingAnalysis = (sessionKey, numeroExpediente) => {
+  const pending = readPendingAnalysis(sessionKey);
+  if (pending?.numeroExpediente === numeroExpediente) sessionStorage.removeItem(PENDING_ANALYSIS_KEY);
+};
 const MAX_UPLOAD_FILE_MB = 50;
 const MAX_UPLOAD_FILE_BYTES = MAX_UPLOAD_FILE_MB * 1024 * 1024;
 const formatFileSize = (bytes = 0) => `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
@@ -147,6 +166,7 @@ const getAnalysisSessionKey = () => {
 };
 
 export const clearAnalysisDraftCache = () => {
+  sessionStorage.removeItem(PENDING_ANALYSIS_KEY);
   draftAnalysisData = null;
   draftPdfFiles = [];
   draftActivePdfIndex = 0;
@@ -196,6 +216,7 @@ export const Analysis = () => {
   if (draftSessionKey && draftSessionKey !== sessionKey) {
     clearAnalysisDraftCache();
   }
+  const pendingOnMount = readPendingAnalysis(sessionKey);
   if (!draftSessionKey) {
     draftSessionKey = sessionKey;
   }
@@ -225,7 +246,7 @@ export const Analysis = () => {
   const [isSavedDB, setIsSavedDB] = useState(false);
   const [isExpedienteModalOpen, setIsExpedienteModalOpen] = useState(false);
   const [listaExpedientes, setListaExpedientes] = useState([]);
-  const [expedienteSeleccionado, setExpedienteSeleccionado] = useState(null);
+  const [expedienteSeleccionado, setExpedienteSeleccionado] = useState(() => pendingOnMount ? { numero_expediente: pendingOnMount.numeroExpediente } : null);
   const [isReadOnly, setIsReadOnly] = useState(false);
   const [pdfSearchTerm, setPdfSearchTerm] = useState("");
   const [pdfEvidence, setPdfEvidence] = useState(null);
@@ -250,12 +271,14 @@ export const Analysis = () => {
   const [historialEntries, setHistorialEntries] = useState(draftHistorialEntries);
   const [hasDocument, setHasDocument] = useState(draftHasDocument);
   const [accessDenied, setAccessDenied] = useState(null);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(Boolean(pendingOnMount));
   const [pdfFiles, setPdfFiles] = useState(draftPdfFiles);
   const [activePdfIndex, setActivePdfIndex] = useState(draftActivePdfIndex);
   const fileInputRef = useRef(null);
   const chatScrollRef = useRef(null);
   const uploadInProgressRef = useRef(false);
+  const mountedRef = useRef(true);
+  const recoveringRef = useRef(false);
   const backendProgressRef = useRef({
     stage: "",
     floor: 0,
@@ -297,6 +320,11 @@ export const Analysis = () => {
   // ==========================================
 
   useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
     if (chatScrollRef.current) {
       chatScrollRef.current.scrollTop = chatScrollRef.current.scrollHeight;
     }
@@ -315,6 +343,7 @@ export const Analysis = () => {
   useEffect(() => {
     const cargarAnalisisExistente = async () => {
       if (!expedienteSeleccionado) return;
+      if (readPendingAnalysis(sessionKey)?.numeroExpediente === expedienteSeleccionado.numero_expediente) return;
       setAccessDenied(null);
       setPdfFiles([]);
       setActivePdfIndex(0);
@@ -354,7 +383,7 @@ export const Analysis = () => {
       }
     };
     cargarAnalisisExistente();
-  }, [expedienteSeleccionado]);
+  }, [expedienteSeleccionado, sessionKey]);
 
   useEffect(() => {
     const handleBeforeUnload = (e) => {
@@ -426,7 +455,8 @@ export const Analysis = () => {
   }, [isLoading, usingBackendProgress]);
 
   useEffect(() => {
-    if (!isLoading || !expedienteSeleccionado?.numero_expediente) return;
+    if (!isLoading || !expedienteSeleccionado?.numero_expediente ||
+        readPendingAnalysis(sessionKey)?.numeroExpediente !== expedienteSeleccionado.numero_expediente) return;
     let cancelado = false;
     const consultarProgreso = async () => {
       try {
@@ -435,6 +465,50 @@ export const Analysis = () => {
         if (!res.ok) return;
         const data = await res.json();
         if (cancelado || !data) return;
+        const pending = readPendingAnalysis(sessionKey);
+        if (!pending || pending.numeroExpediente !== expedienteSeleccionado.numero_expediente) return;
+        if (Number(data.started_at || 0) < pending.startedAt - 5000) {
+          if (!data.activo && Date.now() - pending.startedAt > 5 * 60 * 1000) {
+            clearPendingAnalysis(sessionKey, expedienteSeleccionado.numero_expediente);
+            setIsLoading(false);
+            setAccessDenied('No hay un análisis activo. El servidor pudo haberse reiniciado; vuelve a cargar los PDFs.');
+          }
+          return;
+        }
+        if (data.etapa === 'completado' && !uploadInProgressRef.current && !recoveringRef.current) {
+          recoveringRef.current = true;
+          try {
+            const detalleRes = await fetch(`/api/v1/expedientes/${numero}`);
+            const detalle = await detalleRes.json();
+            if (cancelado || !mountedRef.current) return;
+            if (detalleRes.ok && detalle.data?.tiene_analisis) {
+              const resultados = detalle.data.resultados;
+              setAnalysisData(resultados);
+              setResumenPorPdf(resultados?.resumen_por_pdf || []);
+              setHistorialEntries(resultados?.historial || []);
+              setHasDocument(true);
+              setIsReadOnly(true);
+              await cargarPDFsDesdeServidor(expedienteSeleccionado.numero_expediente);
+              setCardVisibility({
+                resumen: true, postura: true, plazos: true, sujetos: true,
+                financiera: true, capacidad: true, controversias: true
+              });
+              clearPendingAnalysis(sessionKey, expedienteSeleccionado.numero_expediente);
+              setIsLoading(false);
+            }
+          } finally {
+            recoveringRef.current = false;
+          }
+          return;
+        }
+        if (!data.activo && ['error', 'requiere_confirmacion'].includes(data.etapa) && !uploadInProgressRef.current) {
+          clearPendingAnalysis(sessionKey, expedienteSeleccionado.numero_expediente);
+          setIsLoading(false);
+          setAccessDenied(data.etapa === 'error'
+            ? 'El análisis no terminó. Revisa el error del servidor e inténtalo nuevamente.'
+            : 'El análisis requiere una confirmación. Selecciona los PDFs nuevamente para continuar.');
+          return;
+        }
         const porcentaje = Number(data.porcentaje || 0);
         if (porcentaje > 0) {
           const etapa = String(data.etapa || "procesando").toLowerCase();
@@ -463,7 +537,7 @@ export const Analysis = () => {
       cancelado = true;
       clearInterval(timer);
     };
-  }, [isLoading, expedienteSeleccionado?.numero_expediente]);
+  }, [isLoading, expedienteSeleccionado?.numero_expediente, sessionKey]);
 
   useEffect(() => {
     const inicializarVistaAnalisis = async () => {
@@ -480,7 +554,7 @@ export const Analysis = () => {
 
           const params = new URLSearchParams(window.location.search);
           const expedienteUrl = params.get('exp');
-          if (expedienteUrl) {
+          if (expedienteUrl && !readPendingAnalysis(sessionKey)) {
             const casoEncontrado = listaMapeada.find(e => e.numero_expediente === expedienteUrl);
             if (casoEncontrado) {
               setExpedienteSeleccionado(casoEncontrado);
@@ -545,7 +619,7 @@ export const Analysis = () => {
       }
     };
     inicializarVistaAnalisis();
-  }, []);
+  }, [sessionKey]);
 
   const seleccionarExpedienteDeBandeja = (expediente, event) => {
     if (event) event.stopPropagation();
@@ -830,6 +904,7 @@ export const Analysis = () => {
     uploadInProgressRef.current = true;
     backendProgressRef.current = { stage: "", floor: 0, ceiling: 0, startedAt: 0, durationMs: 20000 };
     setIsLoading(true);
+    setAccessDenied(null);
     setLoadingProgress(0);
     setUsingBackendProgress(false);
     setLoadingText("Preparando archivos del expediente...");
@@ -855,6 +930,8 @@ export const Analysis = () => {
       formData.append("confirmacion_duplicados", opciones.confirmacionDuplicados ? "true" : "false");
       formData.append("inconsistencia_nombre", opciones.inconsistenciaNombre ? "true" : "false");
 
+      const numeroEnvio = expedienteSeleccionado.numero_expediente;
+      savePendingAnalysis(sessionKey, numeroEnvio);
       const res = await fetch("/api/v1/analyze-document", {
         method: "POST",
         body: formData
@@ -862,8 +939,10 @@ export const Analysis = () => {
       const response = await res.json().catch(() => ({
         detail: "No se pudo interpretar la respuesta del servidor."
       }));
+      if (!mountedRef.current) return;
 
       if (res.ok && response?.status === "requires_sensitive_confirmation") {
+        clearPendingAnalysis(sessionKey, numeroEnvio);
         setIsLoading(false);
         uploadInProgressRef.current = false;
         setSensitiveModal({
@@ -875,6 +954,7 @@ export const Analysis = () => {
       }
 
       if (res.ok && response?.status === "requires_duplicate_confirmation") {
+        clearPendingAnalysis(sessionKey, numeroEnvio);
         setIsLoading(false);
         const detalleDuplicados = (response.duplicados || [])
           .map((item, index) => `${index + 1}. ${item.tipo}: ${item.detalle}`)
@@ -896,6 +976,7 @@ export const Analysis = () => {
       }
 
       if (res.ok && response?.status === "requires_integrity_confirmation") {
+        clearPendingAnalysis(sessionKey, numeroEnvio);
         setIsLoading(false);
         uploadInProgressRef.current = false;
         setIntegrityModal({
@@ -911,12 +992,14 @@ export const Analysis = () => {
         setLoadingProgress(100);
         setLoadingText("¡Análisis Completado!");
         setTimeout(async () => {
+          if (!mountedRef.current) return;
           const data = response.resultados || response;
           setAnalysisData(data);
           setTextoExpediente(response.texto_ocr || response.texto_completo || "");
           if (response.resumen_por_pdf) setResumenPorPdf(response.resumen_por_pdf);
           setHasDocument(true);
           await cargarPDFsDesdeServidor(expedienteSeleccionado.numero_expediente);
+          if (!mountedRef.current) return;
           if (data && data.historial) {
             setHistorialEntries(data.historial);
           } else {
@@ -935,15 +1018,26 @@ export const Analysis = () => {
             resumen: true, postura: true, plazos: true, sujetos: true,
             financiera: true, capacidad: true, controversias: true
           });
+          clearPendingAnalysis(sessionKey, numeroEnvio);
           uploadInProgressRef.current = false;
           setIsLoading(false);
         }, 600);
       } else {
+        const progreso = await fetch(`/api/v1/analysis-progress/${encodeURIComponent(numeroEnvio)}`)
+          .then((r) => r.ok ? r.json() : null).catch(() => null);
+        if (!mountedRef.current) return;
+        if (progreso?.activo || progreso?.etapa === 'completado' || (res.status >= 500 && !progreso)) {
+          uploadInProgressRef.current = false;
+          setLoadingText('El servidor sigue analizando. El resultado aparecerá al terminar.');
+          return;
+        }
         const mensajeError = res.status === 413
           ? (response.detail || `Uno de los PDFs supera el límite permitido de ${MAX_UPLOAD_FILE_MB} MB.`)
           : (response.detail || "Error de validación en el expediente.");
         setLoadingText(mensajeError);
         setTimeout(() => {
+          if (!mountedRef.current) return;
+          clearPendingAnalysis(sessionKey, numeroEnvio);
           setIsLoading(false);
           setHasDocument(false);
           setPdfFiles([]);
@@ -954,8 +1048,20 @@ export const Analysis = () => {
       }
     } catch (error) {
       console.error("Error:", error);
+      if (!mountedRef.current) return;
+      const numeroEnvio = expedienteSeleccionado.numero_expediente;
+      const progreso = await fetch(`/api/v1/analysis-progress/${encodeURIComponent(numeroEnvio)}`)
+        .then((r) => r.ok ? r.json() : null).catch(() => null);
+      if (!mountedRef.current) return;
+      if (progreso?.activo || progreso?.etapa === 'completado' || !progreso) {
+        uploadInProgressRef.current = false;
+        setLoadingText('El servidor sigue analizando. El resultado aparecerá al terminar.');
+        return;
+      }
       setLoadingText("Error en el análisis. Revisa la conexión o intenta con un PDF más liviano.");
       setTimeout(() => {
+        if (!mountedRef.current) return;
+        clearPendingAnalysis(sessionKey, numeroEnvio);
         uploadInProgressRef.current = false;
         setIsLoading(false);
       }, 2000);
