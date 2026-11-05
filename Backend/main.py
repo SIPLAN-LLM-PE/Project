@@ -1,5 +1,5 @@
 from fastapi import FastAPI, File, UploadFile, HTTPException, Body, APIRouter, Request, BackgroundTasks
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import time
@@ -363,6 +363,11 @@ def obtener_ip_origen(request: Request) -> str:
 
 
 def registrar_log_seguridad(conn, usuario: str, accion: str, expediente: str, ip_origen: str):
+    tipo = tipo_evento_seguridad(accion)
+    severidad_rechazo = {"RECHAZO_ROL": "ADVERTENCIA", "RECHAZO_DOCUMENTO": "ADVERTENCIA",
+                         "LOGIN_RECHAZADO": "INFO", "LOGIN_BLOQUEADO": "CRITICO", "ANOMALIA": "ADVERTENCIA"}.get(tipo)
+    if severidad_rechazo:
+        accion = f"{severidad_rechazo} | {accion.split('|', 1)[1].strip()}" if "|" in accion else f"{severidad_rechazo} | {tipo}: {accion}"
     timestamp_actual = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     conn.execute('''
         INSERT INTO log_seguridad (timestamp, usuario, accion_registrada, expediente, ip_origen)
@@ -390,18 +395,39 @@ def registrar_evento_auditoria(conn, request: Request, tipo: str, usuario: str =
     registrar_log_seguridad(conn, usuario_final, accion, expediente or "-", obtener_ip_origen(request))
 
 
+def registrar_anomalias_resultado(conn, request, numero: str, resultados: dict, etapa: str):
+    financiera = resultados.get("revision_financiera") or {}
+    detalles = []
+    if financiera.get("alerta"):
+        datos = {k: financiera[k] for k in ("petitorio", "suma_gastos_sustentados", "brecha", "brecha_valor", "porcentaje_brecha", "mensaje") if k in financiera}
+        detalles.append("Brecha financiera HU18: " + json.dumps(datos, ensure_ascii=False))
+    for item in resultados.get("inconsistencias_detectadas") or []:
+        detalles.append("Inconsistencia documental: " + (json.dumps(item, ensure_ascii=False) if isinstance(item, (dict, list)) else str(item)))
+    for detalle in detalles:
+        registrar_evento_auditoria(conn, request, "ANOMALIA", expediente=numero,
+                                  detalle=f"{etapa}; version={resultados.get('version_analisis', '-')}; {detalle}", severidad="ADVERTENCIA")
+    return len(detalles)
+
+
+def tipo_evento_seguridad(accion: str) -> str:
+    texto = str(accion or "").upper()
+    # Compatibilidad con registros historicos clasificados como ANOMALIA.
+    for tipo in ("RECHAZO_DOCUMENTO", "RECHAZO_ROL", "LOGIN_BLOQUEADO", "LOGIN_RECHAZADO"):
+        if re.search(r"\b" + tipo + r"\b", texto):
+            return tipo
+    partes = texto.split("|")
+    return partes[1].strip().split(":")[0] if len(partes) > 1 else "GENERAL"
+
+
 def normalizar_notificacion_log(row: dict) -> dict:
     accion = str(row.get("accion_registrada") or "")
     accion_upper = accion.upper()
     severidad = "critico" if "CRITICO" in accion_upper else "advertencia" if "ADVERTENCIA" in accion_upper else "info"
-    tipo = "GENERAL"
-    if "|" in accion:
-        partes = [p.strip() for p in accion.split("|")]
-        if len(partes) > 1:
-            tipo = partes[1].split(":")[0].strip()
+    tipo = tipo_evento_seguridad(accion)
     detalle = accion.split(":", 1)[1].strip() if ":" in accion else accion
     titulos = {
         "RECHAZO_ROL": "Acceso rechazado por rol",
+        "RECHAZO_DOCUMENTO": "Documento rechazado por integridad",
         "LOGIN_RECHAZADO": "Intento de login rechazado",
         "LOGIN_BLOQUEADO": "Cuenta bloqueada temporalmente",
         "SUBIDA_DOCUMENTO": "Documento subido",
@@ -462,7 +488,7 @@ def verificar_acceso_expediente_o_rechazar(conn, request: Request, numero: str, 
             usuario=usuario_token.get("username") or "Invitado",
             expediente=numero,
             detalle=f"acceso denegado a {contexto}; rol={usuario_token.get('rol', 'sin_token')}",
-            severidad="CRITICO"
+            severidad="ADVERTENCIA"
         )
         conn.commit()
         raise HTTPException(status_code=403, detail="Acceso rechazado por rol o asignacion del expediente.")
@@ -950,6 +976,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def proteger_auditoria(request: Request, call_next):
+    if request.method == "OPTIONS" or not request.url.path.startswith("/api/v1/security/"):
+        return await call_next(request)
+    usuario = obtener_usuario_opcional(request)
+    if usuario.get("rol") in {"admin", "juez"}:
+        return await call_next(request)
+    conn = get_db_connection()
+    try:
+        registrar_evento_auditoria(
+            conn, request, "RECHAZO_ROL", usuario=usuario.get("username") or usuario.get("sub") or "Invitado",
+            detalle=f"Acceso rechazado a Auditoria; ruta={request.url.path}; rol={usuario.get('rol') or 'sin_sesion'}",
+            severidad="ADVERTENCIA")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return JSONResponse(status_code=403 if usuario else 401,
+                        content={"detail": "Acceso rechazado por rol. Auditoria requiere un perfil autorizado."})
+
 
 # Cargar el modelo NLP en español
 try:
@@ -6286,6 +6335,48 @@ def _aplicar_estado_verificado(resultado: dict, texto_plano: str) -> dict:
     return resultado
 
 
+def configuracion_desde_payload_ia(payload: dict, estado: str = "generado") -> dict:
+    """Registra solo opciones enviadas al motor; nunca reconstruye datos historicos."""
+    return {
+        "pipeline_version": "SIGEJA-RAG-trazabilidad-v1",
+        "modelo_principal": payload.get("model"),
+        "proveedor_modelo": "Ollama local" if payload else None,
+        "parametros": dict(payload.get("options") or {}),
+        "fecha_configuracion": datetime.now().astimezone().isoformat(),
+        "estado_generacion": estado,
+        "origen_configuracion": "payload_ejecutado" if payload else "fallback_extractivo",
+    }
+
+
+def versionar_resultado_ia(resultados: dict, anterior: dict, configuracion: dict, usuario: str, titulo: str) -> dict:
+    """Conserva los hitos previos y asocia la configuracion a la nueva version."""
+    import copy
+    historial = copy.deepcopy(anterior.get("historial") or anterior.get("trazabilidad_cambios") or [])
+    numeros = [int(str(h.get("version", ""))[1:]) for h in historial
+               if re.fullmatch(r"v[0-9]+", str(h.get("version", "")))]
+    version = f"v{max(numeros, default=0) + 1}"
+    for h in historial:
+        if h.get("isActual") and anterior.get("configuracion_ia") and not h.get("configuracion_ia"):
+            h["configuracion_ia"] = copy.deepcopy(anterior["configuracion_ia"])
+        h["isActual"] = False
+    config = {**configuracion, "version_analisis": version,
+              "tono_visualizacion": anterior.get("configuracion_ia", {}).get("tono_visualizacion", "tecnico")}
+    sujetos = resultados.get("sujetos_procesales") or {}
+    resumen = resultados.get("sintesis_rag") or {}
+    snapshot = {
+        "version_analisis": version,
+        "tono": config["tono_visualizacion"],
+        "sintesis": str(resumen.get("estandar") or resumen.get("tecnico") or "")[:500] if isinstance(resumen, dict) else str(resumen)[:500],
+        "demandante": (sujetos.get("demandante") or {}).get("nombre", "-"),
+        "demandado": (sujetos.get("demandado") or {}).get("nombre", "-"),
+    }
+    historial.append({"id": time.time_ns(), "version": version, "fecha": datetime.now().astimezone().isoformat(),
+                      "titulo": titulo, "usuario": usuario, "comentario": "Configuracion registrada durante la generacion.",
+                      "configuracion_ia": copy.deepcopy(config), "snapshot": snapshot, "isActual": True})
+    return {**resultados, "version_analisis": version, "configuracion_ia": config,
+            "historial": historial, "trazabilidad_cambios": historial}
+
+
 def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
     import json, requests
 
@@ -6383,7 +6474,9 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
                 f"🤖 RAG {etiqueta} ({RAG_ANALYZE_MODE}): ctx={num_ctx_intento}, salida={num_predict}, "
                 f"chars={max_chars_intento}/{len(texto_rag)} fuente={len(texto_plano)}"
             )
-            return post_ollama_generate(payload, timeout=OLLAMA_RAG_TIMEOUT_SECONDS)
+            respuesta = post_ollama_generate(payload, timeout=OLLAMA_RAG_TIMEOUT_SECONDS)
+            respuesta.sigeja_configuracion_ia = configuracion_desde_payload_ia(payload)
+            return respuesta
 
         techo_principal = OLLAMA_RAG_MAX_CTX if RAG_ANALYZE_MODE == "full" else min(OLLAMA_RAG_MAX_CTX, 12288)
         intentos_rag = [
@@ -6462,6 +6555,7 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
         
         puntos_acta = _extraer_puntos_controvertidos_acta(texto_plano)
         return _aplicar_estado_verificado({
+            "configuracion_ia": response.sigeja_configuracion_ia,
             "resumen": analisis_json.get("resumen", {"estandar": "Error de generación.", "tecnico": "Error de generación."}),
             "postura": _integrar_oferta_contestacion(
                 analisis_json.get("postura", {"estandar": "Error.", "tecnico": "Error."}), texto_plano
@@ -6472,6 +6566,7 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
     except Exception as e:
         print(f"Error crítico en RAG: {e}")
         fallback = _rag_fallback_extractivo(texto_plano, entidades, e)
+        fallback["configuracion_ia"] = configuracion_desde_payload_ia({}, "fallback_extractivo")
         fallback["postura"] = _integrar_oferta_contestacion(fallback.get("postura"), texto_plano)
         fallback["puntos_controvertidos"] = _extraer_puntos_controvertidos_acta(texto_plano) or fallback["puntos_controvertidos"]
         return fallback
@@ -7216,7 +7311,7 @@ def analizar_expediente(
             registrar_log_seguridad(
                 conn,
                 usuario_auditoria,
-                f"CRITICO | ANOMALIA | RECHAZO_DOCUMENTO: carga detenida por {len(inconsistencias_integridad)} documento(s) con expediente interno distinto",
+                f"ADVERTENCIA | RECHAZO_DOCUMENTO: carga detenida por {len(inconsistencias_integridad)} documento(s) con expediente interno distinto",
                 numero_expediente,
                 ip_origen
             )
@@ -7274,7 +7369,7 @@ def analizar_expediente(
                     conn.execute('''
                         INSERT INTO log_seguridad (timestamp, usuario, accion_registrada, expediente, ip_origen)
                         VALUES (%s, %s, %s, %s, %s)
-                    ''', (timestamp_actual, usuario_auditoria, f"CRITICO | ANOMALIA | RECHAZO_DOCUMENTO: '{upload_file.filename}' pertenecia a {num_interno}", numero_expediente, ip_origen))
+                    ''', (timestamp_actual, usuario_auditoria, f"ADVERTENCIA | RECHAZO_DOCUMENTO: '{upload_file.filename}' pertenecia a {num_interno}", numero_expediente, ip_origen))
                     conn.commit()
                     raise HTTPException(
                         status_code=400,
@@ -7350,6 +7445,7 @@ def analizar_expediente(
             "capacidad_cargas": analisis_cargas,
             "calculadora_economica": calculadora_economica,
             "resumen_por_pdf": resumenes_por_pdf,
+            "inconsistencias_detectadas": inconsistencias_integridad,
 
             "historial": [
                 {
@@ -7363,6 +7459,12 @@ def analizar_expediente(
                 }
             ]
         }
+
+        anterior = cargar_json_bd(expediente_existente["json_resultados"]) if expediente_existente else {}
+        diccionario_resultados = versionar_resultado_ia(
+            diccionario_resultados, anterior or {}, analisis_llm.get("configuracion_ia") or {},
+            usuario_auditoria, "Generacion RAG" if anterior else "Generacion Inicial RAG"
+        )
 
         # 💾 5. PERSISTENCIA EN BASE DE DATOS SQLITE (Elimina el Hardcodeo)
         # Convertimos el diccionario a una cadena JSON válida con soporte de caracteres latinos/tildes
@@ -7383,6 +7485,7 @@ def analizar_expediente(
             WHERE numero_expediente = %s
         ''', (json_resultados_string, timestamp_concluido, paginas_estimadas, tiempo_total,
               m_bert_score, m_f1_ner, m_ocr_precision, ocr_detalle_json, numero_expediente))
+        registrar_anomalias_resultado(conn, request, numero_expediente, diccionario_resultados, "Evaluacion inicial")
         conn.commit()
         background_tasks.add_task(reconstruir_indice_jurisprudencia, numero_expediente)
         actualizar_progreso_analisis(numero_expediente, 100, "completado", "Analisis completado y guardado.")
@@ -7840,6 +7943,7 @@ async def regenerar_resumen_con_feedback(req: RegenerarRequest, request: Request
         response = post_ollama_generate(payload, timeout=400)
         
         nuevo_analisis = cargar_json_llm(response.json().get("response", "{}"), {})
+        nuevo_analisis["configuracion_ia"] = configuracion_desde_payload_ia(payload)
         conn_feedback = get_db_connection()
         try:
             metadata_json = json.dumps({
@@ -7964,6 +8068,38 @@ async def guardar_borrador_analisis(numero: str, payload: AnalysisDraftRequest, 
         conn.close()
 
 
+@app.post("/api/v1/expedientes/{numero}/regenerate-traceability")
+async def regenerar_con_trazabilidad(numero: str, request: Request):
+    """Regenera resumen y postura desde OCR persistido y conserva el historial."""
+    conn = get_db_connection()
+    try:
+        fila = verificar_acceso_expediente_o_rechazar(conn, request, numero, "regeneracion con trazabilidad")
+        anterior = cargar_json_bd(fila["json_resultados"]) or {}
+        docs = conn.execute("SELECT nombre_archivo, texto_ocr FROM ocr_documentos WHERE numero_expediente = %s ORDER BY documento_index", (numero,)).fetchall()
+        texto = "\n".join(f"--- {d['nombre_archivo']} ---\n{d['texto_ocr']}" for d in docs if d.get("texto_ocr"))
+        if not texto.strip():
+            raise HTTPException(status_code=409, detail="No hay OCR guardado. Vuelve a cargar los PDFs para generar un analisis con trazabilidad.")
+        generado = modulo_rag_mistral(texto, anterior.get("sujetos_procesales") or {})
+        # Evita sobrescribir cambios concurrentes mientras se ejecuta la IA.
+        actual = conn.execute("SELECT json_resultados FROM registro_expedientes WHERE numero_expediente = %s FOR UPDATE", (numero,)).fetchone()
+        if cargar_json_bd(actual["json_resultados"]) != anterior:
+            raise HTTPException(status_code=409, detail="El analisis cambio durante la regeneracion. Recarga antes de intentarlo otra vez.")
+        resultados = versionar_resultado_ia(
+            {**anterior, "sintesis_rag": generado["resumen"], "postura_defensa": generado["postura"],
+             "puntos_sugeridos": generado["puntos_controvertidos"]}, anterior,
+            generado.get("configuracion_ia") or {}, nombre_usuario_auditoria(request), "Regeneracion con trazabilidad")
+        conn.execute("UPDATE registro_expedientes SET json_resultados = %s WHERE numero_expediente = %s", (json.dumps(resultados, ensure_ascii=False), numero))
+        registrar_evento_auditoria(conn, request, "EDICION_ANALISIS", expediente=numero,
+                                  detalle=f"Regeneracion con trazabilidad; version={resultados['version_analisis']}", severidad="INFO")
+        conn.commit()
+        return {"status": "success", "resultados": resultados}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 @app.post("/api/v1/save-analysis")
 def guardar_analisis_aprobado(req: SaveAnalysisRequest, request: Request):
     """
@@ -7984,19 +8120,7 @@ def guardar_analisis_aprobado(req: SaveAnalysisRequest, request: Request):
             or f"v{max(len(historial_guardado), 1)}"
         )
         config_ia.setdefault("version_analisis", version_analisis)
-        config_ia.setdefault("pipeline_version", "SIGEJA-RAG-2026.08")
-        config_ia.setdefault("modelo_principal", "mistral")
-        config_ia.setdefault("proveedor_modelo", "Ollama local")
-        config_ia.setdefault("endpoint_modelo", "ollama:11434")
         config_ia.setdefault("tono_visualizacion", "tecnico")
-        config_ia.setdefault("parametros", {
-            "temperature_resumen": 0.1,
-            "temperature_chat": 0.15,
-            "temperature_feedback": 0.1,
-            "top_p": 0.85,
-            "modelo_embeddings": "nomic-embed-text",
-            "vector_db": "PostgreSQL + pgvector"
-        })
         config_ia.setdefault("fecha_persistencia", datetime.now().isoformat())
         resultados_guardar["version_analisis"] = version_analisis
         resultados_guardar["configuracion_ia"] = config_ia
@@ -8082,15 +8206,7 @@ def guardar_analisis_aprobado(req: SaveAnalysisRequest, request: Request):
             detalle=f"version={version_analisis}; modelo={config_ia.get('modelo_principal')}; tono={config_ia.get('tono_visualizacion')}; estado_auditoria={estado_auditoria}; riesgo_capacidad={riesgo_capacidad}",
             severidad="INFO"
         )
-        if financiero.get("alerta") or estado_auditoria == "BRECHA DETECTADA":
-            registrar_evento_auditoria(
-                conn,
-                request,
-                "ANOMALIA",
-                expediente=req.numero_expediente,
-                detalle="brecha financiera detectada al aprobar analisis",
-                severidad="ADVERTENCIA"
-            )
+        registrar_anomalias_resultado(conn, request, req.numero_expediente, resultados_guardar, "Aprobacion del analisis")
         conn.commit()
         conn.close()
         
@@ -8971,7 +9087,7 @@ async def export_metadata_csv(request: Request):
     return response
 
 @app.get("/api/v1/security/dashboard-metrics")
-async def get_security_metrics():
+async def get_security_metrics(tipo_evento: str = ""):
     conn = get_db_connection()
     try:
         # Promedios por métrica (COUNT cuenta solo no-NULL; AVG ignora NULL automáticamente)
@@ -8989,7 +9105,17 @@ async def get_security_metrics():
         ''').fetchone()
 
         # Obtenemos los logs
-        logs_raw = conn.execute("SELECT * FROM log_seguridad ORDER BY id DESC LIMIT 100").fetchall()
+        tipo_evento = (tipo_evento or "").strip().upper()
+        if tipo_evento not in {"", "RECHAZO_ROL", "RECHAZO_DOCUMENTO", "ANOMALIA", "LOGIN_RECHAZADO", "LOGIN_BLOQUEADO"}:
+            raise HTTPException(status_code=422, detail="Tipo de evento no valido")
+        # Clasificar antes de limitar evita perder eventos antiguos al filtrar.
+        tipo_sql = r"""CASE
+            WHEN accion_registrada ~* '\mRECHAZO_DOCUMENTO\M' THEN 'RECHAZO_DOCUMENTO'
+            WHEN accion_registrada ~* '\mRECHAZO_ROL\M' THEN 'RECHAZO_ROL'
+            WHEN accion_registrada ~* '\mLOGIN_BLOQUEADO\M' THEN 'LOGIN_BLOQUEADO'
+            WHEN accion_registrada ~* '\mLOGIN_RECHAZADO\M' THEN 'LOGIN_RECHAZADO'
+            ELSE UPPER(TRIM(SPLIT_PART(SPLIT_PART(accion_registrada, '|', 2), ':', 1))) END"""
+        logs_raw = conn.execute(f"SELECT * FROM log_seguridad WHERE (%s = '' OR ({tipo_sql}) = %s) ORDER BY timestamp DESC NULLS LAST, id DESC LIMIT 100", (tipo_evento, tipo_evento)).fetchall()
         
         # Incidentes generales: eventos criticos o advertencias relevantes del sistema.
         incidentes_seguridad = conn.execute("""
@@ -9018,7 +9144,7 @@ async def get_security_metrics():
             item["ip"] = item.get("ip_origen")
             accion_upper = str(item.get("accion_registrada") or "").upper()
             item["severidad"] = "CRITICO" if "CRITICO" in accion_upper else "ADVERTENCIA" if "ADVERTENCIA" in accion_upper else "INFO"
-            item["tipo_evento"] = accion_upper.split("|")[1].strip().split(":")[0] if "|" in accion_upper else "GENERAL"
+            item["tipo_evento"] = tipo_evento_seguridad(item.get("accion_registrada"))
             logs.append(item)
 
         return {
@@ -9095,7 +9221,7 @@ async def get_live_notifications(username: str = "", rol: str = "", since_id: in
             SELECT l.id, l.timestamp, l.usuario, l.accion_registrada, l.expediente, l.ip_origen
             FROM log_seguridad l
             WHERE {where_sql}
-            ORDER BY l.id DESC
+            ORDER BY l.timestamp DESC NULLS LAST, l.id DESC
             LIMIT %s
         """, tuple(params + [limit])).fetchall()
 
@@ -11248,7 +11374,7 @@ async def export_security_csv(request: Request):
             severidad="ADVERTENCIA"
         )
         conn.commit()
-        registros = conn.execute("SELECT * FROM log_seguridad ORDER BY id DESC").fetchall()
+        registros = conn.execute("SELECT * FROM log_seguridad ORDER BY timestamp DESC NULLS LAST, id DESC").fetchall()
         
         stream = io.StringIO()
         writer = csv.writer(stream, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
@@ -11433,7 +11559,7 @@ async def obtener_lista_expedientes(request: Request, username: str = None, rol:
                 usuario="Invitado",
                 expediente="-",
                 detalle="consulta de bandeja sin credenciales validas",
-                severidad="CRITICO"
+                severidad="ADVERTENCIA"
             )
             conn.commit()
             raise HTTPException(status_code=403, detail="Acceso rechazado por rol.")
@@ -11466,7 +11592,7 @@ async def obtener_lista_expedientes(request: Request, username: str = None, rol:
                     usuario=username,
                     expediente="-",
                     detalle=f"rol desconocido en bandeja: {rol}",
-                    severidad="CRITICO"
+                    severidad="ADVERTENCIA"
                 )
                 query = "SELECT * FROM registro_expedientes WHERE 1=0"
                 parametros = ()
@@ -11789,7 +11915,7 @@ async def login_sistema(req: LoginRequest, request: Request):
             intentos = (usuario.get("failed_login_attempts", 0) + 1) if usuario else 1
             tipo = "LOGIN_RECHAZADO"
             detalle = "credenciales invalidas"
-            severidad = "ADVERTENCIA"
+            severidad = "INFO"
             if usuario:
                 locked_until = None
                 if intentos >= LOGIN_MAX_FAILED_ATTEMPTS:

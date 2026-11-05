@@ -233,7 +233,7 @@ export const Analysis = () => {
   // 1. ESTADOS DE INTERFAZ
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
-  const [isSimpleTone, setIsSimpleTone] = useState(false);
+  const [isSimpleTone, setIsSimpleTone] = useState(draftAnalysisData?.configuracion_ia?.tono_visualizacion === 'ciudadano');
   const [isChatExpanded, setIsChatExpanded] = useState(false);
   const [isJurisprudenciaOpen, setIsJurisprudenciaOpen] = useState(false);
   const [isHistorialOpen, setIsHistorialOpen] = useState(false);
@@ -572,6 +572,7 @@ export const Analysis = () => {
                 if (resDetalle.ok && dataDetalle.data && dataDetalle.data.tiene_analisis) {
                   const resData = dataDetalle.data.resultados;
                   setAnalysisData(resData);
+              setIsSimpleTone(resData?.configuracion_ia?.tono_visualizacion === 'ciudadano');
                   setHasDocument(true);
                   setIsReadOnly(true);
                   cargarPDFsDesdeServidor(casoEncontrado.numero_expediente);
@@ -600,6 +601,7 @@ export const Analysis = () => {
               if (resDetalle.ok && dataDetalle.data && dataDetalle.data.tiene_analisis) {
                 const resData = dataDetalle.data.resultados;
                 setAnalysisData(resData);
+              setIsSimpleTone(resData?.configuracion_ia?.tono_visualizacion === 'ciudadano');
                 setHasDocument(true);
                 setIsReadOnly(true);
                 cargarPDFsDesdeServidor(expedienteUrl);
@@ -641,6 +643,7 @@ export const Analysis = () => {
             if (data && data.data && (data.data.resultados_json || data.data.resultados)) {
               const resData = data.data.resultados_json || data.data.resultados;
               setAnalysisData(resData);
+              setIsSimpleTone(resData?.configuracion_ia?.tono_visualizacion === 'ciudadano');
               setHasDocument(true);
               setIsReadOnly(true);
               cargarPDFsDesdeServidor(expediente.numero_expediente);
@@ -726,7 +729,8 @@ export const Analysis = () => {
         titulo: 'Edición Manual',
         usuario: firmaUsuario,
         comentario: descripcion,
-        snapshot: construirSnapshotVersion(),
+        snapshot: { ...construirSnapshotVersion(), version_analisis: 'v' + (historialEntries.length + 1) },
+        configuracion_ia: construirConfiguracionIA({ version_analisis: 'v' + (historialEntries.length + 1) }),
         isActual: true
       };
       return prev.map(h => ({ ...h, isActual: false })).concat(nuevoHito);
@@ -736,22 +740,11 @@ export const Analysis = () => {
   const construirConfiguracionIA = (extra = {}) => {
     const usuarioActivo = JSON.parse(localStorage.getItem('usuario') || '{}');
     return {
-      version_analisis: extra.version_analisis || `v${historialEntries.length + 1}`,
-      pipeline_version: "SIGEJA-RAG-2026.08",
-      modelo_principal: "mistral",
-      proveedor_modelo: "Ollama local",
-      endpoint_modelo: "localhost:11434",
-      tono_visualizacion: isSimpleTone ? "ciudadano" : "tecnico",
-      parametros: {
-        temperature_resumen: 0.1,
-        temperature_chat: 0.15,
-        temperature_feedback: 0.1,
-        top_p: 0.85,
-        modelo_embeddings: "nomic-embed-text",
-        vector_db: "PostgreSQL + pgvector"
-      },
+      ...analysisData?.configuracion_ia,
+      version_analisis: extra.version_analisis || ('v' + (historialEntries.length + 1)),
+      tono_visualizacion: isSimpleTone ? 'ciudadano' : 'tecnico',
       usuario: usuarioActivo.username || usuarioActivo.nombre || "Usuario SIGEJA",
-      fecha_configuracion: new Date().toISOString(),
+      fecha_edicion: new Date().toISOString(),
       evento: extra.evento || "ANALISIS_IA",
       observacion: extra.observacion || ""
     };
@@ -769,7 +762,8 @@ export const Analysis = () => {
       titulo,
       usuario: firmaUsuario,
       comentario: descripcion,
-        snapshot: construirSnapshotVersion(),
+        snapshot: { ...construirSnapshotVersion(), version_analisis: 'v' + (historialEntries.length + 1) },
+        configuracion_ia: construirConfiguracionIA({ version_analisis: 'v' + (historialEntries.length + 1) }),
         isActual: true
     };
   };
@@ -829,8 +823,7 @@ export const Analysis = () => {
     }
   };
 
-  const handleCambiarTonoIA = () => {
-    const nuevoTonoSimple = !isSimpleTone;
+  const handleCambiarTonoIA = (nuevoTonoSimple = !isSimpleTone) => {
     setIsSimpleTone(nuevoTonoSimple);
     setAnalysisData(prev => {
       if (!prev) return prev;
@@ -838,15 +831,33 @@ export const Analysis = () => {
       return {
         ...prev,
         configuracion_ia: {
-          ...construirConfiguracionIA({
-            version_analisis: versionActual,
-            evento: "CAMBIO_TONO_VISUAL",
-            observacion: `Tono activo: ${nuevoTonoSimple ? 'lenguaje ciudadano' : 'lenguaje técnico'}`
-          }),
+          ...prev.configuracion_ia,
+          version_analisis: versionActual,
           tono_visualizacion: nuevoTonoSimple ? "ciudadano" : "tecnico"
         }
       };
     });
+  };
+
+  const handleRegenerarTrazabilidad = async () => {
+    const numero = expedienteSeleccionado?.numero_expediente;
+    if (!numero || isRegenerating) return;
+    setIsRegenerating(true);
+    try {
+      const token = localStorage.getItem('access_token');
+      const res = await fetch('/api/v1/expedientes/' + encodeURIComponent(numero) + '/regenerate-traceability', {
+        method: 'POST', headers: token ? { Authorization: 'Bearer ' + token } : {}
+      });
+      const data = await res.json();
+      if (!res.ok || data.status !== 'success') throw new Error(data.detail || 'No se pudo regenerar el resumen.');
+      setAnalysisData(data.resultados);
+      setHistorialEntries(data.resultados.historial || []);
+      setIsSimpleTone(data.resultados.configuracion_ia?.tono_visualizacion === 'ciudadano');
+    } catch (error) {
+      window.alert(error.message);
+    } finally {
+      setIsRegenerating(false);
+    }
   };
 
   const cargarPDFsDesdeServidor = async (numero) => {
@@ -1238,11 +1249,13 @@ export const Analysis = () => {
       if (data.status === "success") {
         const hitoCorreccion = construirHitoHistorial(`Regeneración IA por corrección de datos: "${correcciones}"`, 'Corrección IA');
         const historialActualizado = historialEntries.map(h => ({ ...h, isActual: false })).concat(hitoCorreccion);
-        const configCorreccion = construirConfiguracionIA({
+        const configCorreccion = { ...data.resultados_corregidos.configuracion_ia,
+          tono_visualizacion: isSimpleTone ? "ciudadano" : "tecnico",
           version_analisis: hitoCorreccion.version,
           evento: "CORRECCION_IA",
           observacion: correcciones
-        });
+        };
+        hitoCorreccion.configuracion_ia = configCorreccion;
         setAnalysisData(prev => ({
           ...prev,
           sujetos_procesales: data.resultados_corregidos.sujetos_procesales || prev.sujetos_procesales,
@@ -1300,6 +1313,7 @@ export const Analysis = () => {
         evento: "APROBACION_ANALISIS",
         observacion: "Análisis aprobado por usuario revisor"
       });
+      hitoAprobacion.configuracion_ia = configuracionIA;
       const resultadosVersionados = {
         ...analysisData,
         version_analisis: hitoAprobacion.version,
@@ -1867,6 +1881,19 @@ export const Analysis = () => {
             </div>
           </div>
 
+          {hasDocument && analysisData && (
+            <div className="flex flex-wrap items-center gap-3 px-4 py-3 bg-white border-b border-slate-200">
+              <label className="flex items-center gap-2 text-xs font-bold text-slate-700">
+                Tono del análisis
+                <select aria-label="Tono del análisis" value={isSimpleTone ? 'ciudadano' : 'tecnico'}
+                  onChange={event => handleCambiarTonoIA(event.target.value === 'ciudadano')}
+                  className="border border-slate-300 rounded-md px-2 py-1.5 bg-white">
+                  <option value="tecnico">Técnico</option><option value="ciudadano">Ciudadano</option>
+                </select>
+              </label>
+              <button type="button" onClick={() => setIsHistorialOpen(true)} className="text-xs font-bold text-indigo-700 border rounded-md px-3 py-2">Historial y parámetros IA</button>
+            </div>
+          )}
           <AnalysisMenu
             isMenuOpen={isMenuOpen}
             isSimpleTone={isSimpleTone}
@@ -2015,10 +2042,10 @@ export const Analysis = () => {
         onClose={() => setIsHistorialOpen(false)}
         historial={historialEntries}
         snapshotActual={construirSnapshotVersion(analysisData)}
-        configuracion={analysisData?.configuracion_ia || (analysisData ? construirConfiguracionIA({
-          version_analisis: analysisData.version_analisis || historialEntries[historialEntries.length - 1]?.version || "v1",
-          evento: "VISUALIZACION_ANALISIS"
-        }) : null)}
+        configuracion={analysisData?.configuracion_ia || null}
+        tonoActual={isSimpleTone ? 'ciudadano' : 'tecnico'}
+        onRegenerate={handleRegenerarTrazabilidad}
+        isRegenerating={isRegenerating}
       />
       <CapacidadDetalleDrawer
         isOpen={isDetalleOpen}

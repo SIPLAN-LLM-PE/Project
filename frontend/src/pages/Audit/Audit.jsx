@@ -103,6 +103,8 @@ const Audit = () => {
   const usuarioActivo = JSON.parse(localStorage.getItem('usuario')) || { nombre: 'Usuario SIGEJA', cargo: 'Personal Judicial' };
   // 1. Estados para almacenar los datos de seguridad y manejar las pantallas de carga
   const [securityData, setSecurityData] = useState(null);
+  const [accessError, setAccessError] = useState('');
+  const canAccessAudit = ['admin', 'juez'].includes(usuarioActivo.rol);
   const [isLoading, setIsLoading] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
   const [isOcrModalOpen, setIsOcrModalOpen] = useState(false);
@@ -134,6 +136,7 @@ const Audit = () => {
 
   // ESTADO DE PAGINACIÓN DEL LOG DE SEGURIDAD
   const [paginaLogs, setPaginaLogs] = useState(1);
+  const [tipoEventoLog, setTipoEventoLog] = useState('');
   const totalLogs = securityData?.logs?.length || 0;
   const logsPaginados = (securityData?.logs || []).slice(
     (paginaLogs - 1) * LOGS_POR_PAGINA,
@@ -159,18 +162,24 @@ const Audit = () => {
   useEffect(() => {
     const fetchSecurityData = async () => {
       try {
-        const response = await fetch('/api/v1/security/dashboard-metrics');
+        const response = await fetch('/api/v1/security/dashboard-metrics?tipo_evento=' + encodeURIComponent(tipoEventoLog), { headers: getAuthHeaders() });
         const data = await response.json();
+        if (!response.ok) {
+          setAccessError(data.detail || 'No se pudo cargar Auditoría.');
+          return;
+        }
+        setAccessError('');
         setSecurityData(data);
         setPaginaLogs(1);
       } catch (error) {
         console.error("Error al cargar las métricas de seguridad:", error);
+        setAccessError("No se pudo verificar el acceso a Auditoría. Vuelve a intentarlo.");
       } finally {
         setIsLoading(false);
       }
     };
     fetchSecurityData();
-  }, []);
+  }, [tipoEventoLog]);
 
   const getAuthHeaders = () => {
     const token = localStorage.getItem('access_token');
@@ -196,6 +205,7 @@ const Audit = () => {
 
   useEffect(() => {
     const fetchValidationData = async () => {
+      if (!canAccessAudit) return;
       try {
         const [expRes] = await Promise.all([
           fetch('/api/v1/validation-metrics/expedientes', { headers: getAuthHeaders() }),
@@ -247,7 +257,7 @@ const Audit = () => {
     if (ocrDetails) return; // ya cargado
     setIsLoadingOcr(true);
     try {
-      const res = await fetch('/api/v1/security/ocr-details');
+      const res = await fetch('/api/v1/security/ocr-details', { headers: getAuthHeaders() });
       const data = await res.json();
       setOcrDetails(data);
     } catch (e) {
@@ -262,7 +272,7 @@ const Audit = () => {
     if (bertDetails) return;
     setIsLoadingBert(true);
     try {
-      const res = await fetch('/api/v1/security/bertscore-details');
+      const res = await fetch('/api/v1/security/bertscore-details', { headers: getAuthHeaders() });
       setBertDetails(await res.json());
     } catch (e) {
       console.error('Error cargando detalle BERTScore:', e);
@@ -276,7 +286,7 @@ const Audit = () => {
     if (f1Details) return;
     setIsLoadingF1(true);
     try {
-      const res = await fetch('/api/v1/security/f1-details');
+      const res = await fetch('/api/v1/security/f1-details', { headers: getAuthHeaders() });
       setF1Details(await res.json());
     } catch (e) {
       console.error('Error cargando detalle F1:', e);
@@ -480,7 +490,7 @@ const Audit = () => {
   const handleExportarCSV = async () => {
     setIsExporting(true);
     try {
-      const response = await fetch('/api/v1/security/export-csv');
+      const response = await fetch('/api/v1/security/export-csv', { headers: getAuthHeaders() });
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -496,6 +506,14 @@ const Audit = () => {
       setIsExporting(false);
     }
   };
+
+  if (!canAccessAudit || accessError) return (
+    <main className="flex-1 p-8 bg-slate-50">
+      <h2 className="text-xl font-bold text-slate-800 mb-3">Acceso a Auditoría</h2>
+      <p role="alert" className="text-sm text-red-700">{!canAccessAudit ? 'Acceso rechazado por rol. Auditoría requiere un perfil autorizado.' : accessError}</p>
+      <button type="button" onClick={() => navigate('/dashboard')} className="mt-4 text-sm text-indigo-700 underline">Volver a la página principal</button>
+    </main>
+  );
 
   return (
     <div className="flex-1 bg-[#f8fafc] flex flex-col min-h-screen">
@@ -1161,6 +1179,16 @@ const Audit = () => {
                <div className="p-6 border-b border-slate-100">
                  <h4 className="text-lg font-bold text-[#1a3059] mb-1">Log de Seguridad y Auditoría</h4>
                  <p className="text-sm text-slate-500 font-medium">Registro inalterable de accesos y modificaciones críticas</p>
+                 <label className="mt-4 flex flex-wrap items-center gap-3 text-sm text-slate-700">
+                   Tipo de evento
+                   <select aria-label="Tipo de evento del log" value={tipoEventoLog}
+                     onChange={event => { setTipoEventoLog(event.target.value); setPaginaLogs(1); }}
+                     className="rounded-md border border-slate-300 bg-white px-3 py-2">
+                     <option value="">Todos los eventos</option>
+                     {['RECHAZO_ROL', 'RECHAZO_DOCUMENTO', 'ANOMALIA', 'LOGIN_RECHAZADO', 'LOGIN_BLOQUEADO'].map(tipo => <option key={tipo} value={tipo}>{tipo}</option>)}
+                   </select>
+                 </label>
+                 <p className="mt-2 text-xs text-slate-500">Hasta 100 eventos del tipo seleccionado, del más reciente al más antiguo.</p>
                </div>
                
                <div className="overflow-x-auto">
@@ -1198,7 +1226,7 @@ const Audit = () => {
                  {/* Mensaje si la tabla está vacía */}
                  {(!securityData?.logs || securityData.logs.length === 0) && (
                     <div className="p-8 text-center text-slate-500 font-medium">
-                      Aún no hay eventos registrados en el log de seguridad.
+                      No hay eventos para el filtro seleccionado.
                     </div>
                  )}
                </div>

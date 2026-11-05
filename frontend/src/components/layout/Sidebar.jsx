@@ -6,13 +6,15 @@ const menuItems = [
   { icon: Home, label: 'Página Principal', path: '/dashboard' },
   { icon: BrainCircuit, label: 'Análisis IA', path: '/analysis' },
   { icon: BarChart3, label: 'Reportes', path: '/reports' },
-  { icon: ShieldCheck, label: 'Auditoria', path: '/audit' },
+  { icon: ShieldCheck, label: 'Auditoria', path: '/audit', roles: ['admin', 'juez'] },
   { icon: UserCircle, label: 'Mi Perfil', path: '/profile' },
 ];
 
 export const Sidebar = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const usuarioActivo = JSON.parse(localStorage.getItem('usuario') || '{}');
+  const visibleMenuItems = menuItems.filter(item => !item.roles || item.roles.includes(usuarioActivo?.rol));
 
   const handleLogout = () => {
     clearAnalysisDraftCache();
@@ -32,7 +34,7 @@ export const Sidebar = () => {
       </div>
 
       <nav className="flex-1 mt-3 xl:mt-4">
-        {menuItems.map((item) => {
+        {visibleMenuItems.map((item) => {
           const isActive = location.pathname === item.path;
           return (
             <Link

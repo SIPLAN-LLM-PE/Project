@@ -25,7 +25,7 @@ const buildComparableFields = (snapshot = {}, currentSnapshot = {}) => {
   ]));
 
   return keys
-    .filter((key) => key in FIELDS_LABELS)
+    .filter((key) => key in FIELDS_LABELS && Object.hasOwn(snapshot, key) && Object.hasOwn(currentSnapshot, key))
     .map((key) => {
       const previous = normalizeValue(snapshot?.[key]);
       const actual = normalizeValue(currentSnapshot?.[key]);
@@ -47,7 +47,7 @@ const getChangeSummary = (fields) => {
   return `${changed} de ${total} campos cambiaron`;
 };
 
-export const HistorialDrawer = ({ isOpen, onClose, historial = [], snapshotActual = null, configuracion = null }) => {
+export const HistorialDrawer = ({ isOpen, onClose, historial = [], snapshotActual = null, configuracion = null, onRegenerate, isRegenerating = false, tonoActual = null }) => {
   const [selectedVersionId, setSelectedVersionId] = useState(null);
   const [compareEnabled, setCompareEnabled] = useState(false);
 
@@ -69,6 +69,20 @@ export const HistorialDrawer = ({ isOpen, onClose, historial = [], snapshotActua
   }, [selectedEntry, snapshotActual]);
 
   const selectedIsCurrent = Boolean(selectedEntry?.isActual);
+  const selectedConfig = selectedEntry
+    ? (selectedIsCurrent ? (configuracion || selectedEntry.configuracion_ia) : selectedEntry.configuracion_ia)
+    : configuracion;
+  const isViewingCurrent = !selectedEntry || selectedIsCurrent;
+  const displayedTone = isViewingCurrent ? (tonoActual || selectedConfig?.tono_visualizacion) : selectedConfig?.tono_visualizacion;
+  const configRows = selectedConfig ? [
+    ['Versión', selectedEntry?.version || selectedConfig.version_analisis],
+    ['Modelo', selectedConfig.modelo_principal], ['Proveedor', selectedConfig.proveedor_modelo],
+    ['Pipeline', selectedConfig.pipeline_version],
+    [isViewingCurrent ? 'Tono visualizado' : 'Tono guardado', displayedTone],
+    ['Fecha de generación', selectedConfig.fecha_configuracion],
+    ['Estado de generación', selectedConfig.estado_generacion],
+    ...Object.entries(selectedConfig.parametros || {})
+  ] : [];
 
   return (
     <>
@@ -88,12 +102,13 @@ export const HistorialDrawer = ({ isOpen, onClose, historial = [], snapshotActua
           <div className="flex items-center gap-3 text-[#1a3059]">
             <History size={18} className="text-[#2546b0]" />
             <div>
-              <h3 className="font-bold text-sm tracking-wide">Historial del análisis</h3>
+              <h3 className="font-bold text-sm tracking-wide">Historial y parámetros IA</h3>
               <p className="text-[10px] text-slate-500 uppercase tracking-[0.2em]">Versiones guardadas y snapshot actual</p>
             </div>
           </div>
           <button
             onClick={onClose}
+            aria-label="Cerrar historial y parámetros IA"
             className="text-slate-400 hover:text-slate-600 hover:bg-slate-100 p-1.5 rounded-md transition-colors"
           >
             <X size={18} />
@@ -109,6 +124,23 @@ export const HistorialDrawer = ({ isOpen, onClose, historial = [], snapshotActua
             </div>
           </div>
 
+          {onRegenerate && (
+            <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 mb-5">
+              <p className="text-xs text-slate-700 mb-3">Los parámetros antiguos que no se guardaron no pueden recuperarse. Puedes generar una nueva versión del resumen y la postura desde el OCR guardado, conservando el historial.</p>
+              <button type="button" onClick={onRegenerate} disabled={isRegenerating}
+                className="text-xs font-bold text-white bg-indigo-600 rounded-md px-3 py-2 disabled:opacity-50">
+                {isRegenerating ? 'Regenerando resumen…' : 'Regenerar resumen con trazabilidad'}
+              </button>
+            </div>
+          )}
+          <section className="bg-white border border-slate-200 rounded-xl p-4 mb-5" aria-label="Parámetros IA por versión">
+            <h4 className="text-sm font-bold mb-3">Parámetros IA · {selectedEntry?.version || 'versión actual'}</h4>
+            <p className="text-xs text-slate-500 mb-3">Los textos técnico y ciudadano se generan en la misma ejecución y comparten los parámetros de IA. Cambiar el tono solo cambia el texto visualizado.</p>
+            {selectedConfig ? <dl className="space-y-2 text-xs">{configRows.map(([label, value]) => (
+              <div key={label} className="grid grid-cols-2 gap-3"><dt className="text-slate-500 break-words">{label}</dt>
+                <dd className="break-words">{value == null ? 'No registrado' : typeof value === 'object' ? JSON.stringify(value) : String(value)}</dd></div>
+            ))}</dl> : <p className="text-xs text-slate-500">No se registraron parámetros de IA para esta versión.</p>}
+          </section>
           {!historial.length && (
             <div className="bg-white border border-slate-200 rounded-xl p-5 text-center shadow-sm">
               <FileClock size={28} className="mx-auto text-slate-300 mb-3" />
@@ -173,6 +205,9 @@ export const HistorialDrawer = ({ isOpen, onClose, historial = [], snapshotActua
             </div>
           )}
 
+          {selectedEntry && !Object.keys(selectedEntry.snapshot || {}).length && (
+            <p className="text-xs text-amber-800 bg-amber-50 rounded-lg p-3 mb-4">Esta versión no tiene un snapshot guardado. No se pueden determinar diferencias con la actual.</p>
+          )}
           {selectedEntry && (
             <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-sm mb-5">
               <div className="flex items-center justify-between gap-3 mb-3">
