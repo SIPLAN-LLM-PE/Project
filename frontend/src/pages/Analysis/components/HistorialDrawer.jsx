@@ -119,7 +119,7 @@ export const HistorialDrawer = ({ isOpen, onClose, historial = [], snapshotActua
           <div className="bg-[#eff6ff] border border-blue-100 p-4 rounded-xl flex gap-3 mb-5 shadow-sm">
             <Sparkles size={18} className="text-blue-500 shrink-0 mt-0.5 animate-pulse" />
             <div className="text-xs text-blue-800 font-medium leading-relaxed space-y-1">
-              <p>Selecciona un hito para comparar sus campos contra la versión actual.</p>
+              <p>Selecciona una versión, consulta su snapshot y pulsa Comparar para ver sus valores frente a la versión actual.</p>
               <p>{configuracion?.version_analisis ? `Versión actual: ${configuracion.version_analisis}` : 'Versión actual disponible en el snapshot del análisis.'}</p>
             </div>
           </div>
@@ -205,6 +205,20 @@ export const HistorialDrawer = ({ isOpen, onClose, historial = [], snapshotActua
             </div>
           )}
 
+          {selectedEntry && Object.keys(selectedEntry.snapshot || {}).length > 0 && (
+            <section className="bg-white border border-slate-200 rounded-xl p-4 mb-5" aria-label="Snapshot de la versión seleccionada">
+              <h4 className="text-sm font-bold text-slate-800 mb-2">Snapshot guardado · {selectedEntry.version}</h4>
+              <p className="text-xs text-slate-500 mb-3">Valores registrados al crear esta versión. Los campos ausentes no se pueden reconstruir con certeza.</p>
+              <dl className="space-y-2 text-xs">
+                {Object.entries(selectedEntry.snapshot).filter(([key]) => key in FIELDS_LABELS).map(([key, value]) => (
+                  <div key={key} className="border-t border-slate-100 pt-2">
+                    <dt className="font-bold text-slate-600">{FIELDS_LABELS[key]}</dt>
+                    <dd className="mt-1 text-slate-700 break-words whitespace-pre-wrap">{normalizeValue(value)}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          )}
           {selectedEntry && !Object.keys(selectedEntry.snapshot || {}).length && (
             <p className="text-xs text-amber-800 bg-amber-50 rounded-lg p-3 mb-4">Esta versión no tiene un snapshot guardado. No se pueden determinar diferencias con la actual.</p>
           )}

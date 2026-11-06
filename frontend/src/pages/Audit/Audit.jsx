@@ -1185,7 +1185,7 @@ const Audit = () => {
                      onChange={event => { setTipoEventoLog(event.target.value); setPaginaLogs(1); }}
                      className="rounded-md border border-slate-300 bg-white px-3 py-2">
                      <option value="">Todos los eventos</option>
-                     {['RECHAZO_ROL', 'RECHAZO_DOCUMENTO', 'ANOMALIA', 'LOGIN_RECHAZADO', 'LOGIN_BLOQUEADO'].map(tipo => <option key={tipo} value={tipo}>{tipo}</option>)}
+                     {['RECHAZO_ROL', 'RECHAZO_DOCUMENTO', 'ANOMALIA', 'LOGIN_RECHAZADO', 'LOGIN_BLOQUEADO', 'DUPLICADO', 'DUPLICADO_CONFIRMADO'].map(tipo => <option key={tipo} value={tipo}>{tipo}</option>)}
                    </select>
                  </label>
                  <p className="mt-2 text-xs text-slate-500">Hasta 100 eventos del tipo seleccionado, del más reciente al más antiguo.</p>

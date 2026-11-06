@@ -81,6 +81,8 @@ OCR_DEEP_MIN_TEXT_CHARS = int(os.getenv("SIGEJA_OCR_DEEP_MIN_TEXT_CHARS", "1200"
 _ANALYSIS_LOCK = threading.Lock()
 _ANALYSIS_IN_PROGRESS: set[str] = set()
 _ANALYSIS_OCR_CACHE: dict[str, dict] = {}
+_SENSITIVE_REVIEWS = {}
+_SENSITIVE_REVIEW_LOCK = threading.Lock()
 _ANALYSIS_OCR_CACHE_MAX = int(os.getenv("SIGEJA_OCR_CACHE_MAX", "80"))
 _ANALYSIS_PROGRESS: dict[str, dict] = {}
 _JURISPRUDENCIA_INDEX_LOCK = threading.Lock()
@@ -609,6 +611,7 @@ def asegurar_tabla_ocr_documentos():
                 UNIQUE (numero_expediente, nombre_archivo, modo_ocr)
             )
         """)
+        conn.execute("ALTER TABLE ocr_documentos ADD COLUMN IF NOT EXISTS detalle_paginas TEXT")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ocr_documentos_sha ON ocr_documentos (sha256, modo_ocr)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_ocr_documentos_exp ON ocr_documentos (numero_expediente, documento_index)")
         conn.commit()
@@ -623,7 +626,7 @@ def obtener_ocr_documento_cache(conn, sha256: str, modo_ocr: str = "std"):
     if not sha256:
         return None
     return conn.execute("""
-        SELECT texto_ocr, ocr_precision, metodo
+        SELECT texto_ocr, ocr_precision, metodo, detalle_paginas
         FROM ocr_documentos
         WHERE sha256 = %s AND modo_ocr = %s
         ORDER BY fecha_actualizacion DESC
@@ -640,16 +643,17 @@ def guardar_ocr_documento_cache(
     modo_ocr: str,
     texto_ocr: str,
     ocr_precision,
-    metodo: str
+    metodo: str,
+    detalle_paginas=None
 ):
     if not sha256 or not texto_ocr:
         return
     conn.execute("""
         INSERT INTO ocr_documentos (
             numero_expediente, nombre_archivo, documento_index, sha256, modo_ocr,
-            texto_ocr, ocr_precision, metodo, chars, fecha_actualizacion
+            texto_ocr, ocr_precision, metodo, chars, detalle_paginas, fecha_actualizacion
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
         ON CONFLICT (numero_expediente, nombre_archivo, modo_ocr)
         DO UPDATE SET
             documento_index = EXCLUDED.documento_index,
@@ -658,6 +662,7 @@ def guardar_ocr_documento_cache(
             ocr_precision = EXCLUDED.ocr_precision,
             metodo = EXCLUDED.metodo,
             chars = EXCLUDED.chars,
+            detalle_paginas = EXCLUDED.detalle_paginas,
             fecha_actualizacion = CURRENT_TIMESTAMP
     """, (
         numero_expediente,
@@ -668,7 +673,8 @@ def guardar_ocr_documento_cache(
         texto_ocr,
         float(ocr_precision or 0),
         metodo,
-        len(texto_ocr or "")
+        len(texto_ocr or ""),
+        json.dumps(detalle_paginas or [], ensure_ascii=False)
     ))
 
 
@@ -915,8 +921,8 @@ class ValidationRAGRequest(BaseModel):
 class SensitiveValidationRequest(BaseModel):
     numero_expediente: str
     usuario: str = "Desconocido"
-    decision: str = "cancelado"
-    hallazgos_count: int = 0
+    decision: str = Field(pattern="^(cancelado|confirmado)$")
+    hallazgos_count: int = Field(default=0, ge=0)
 
 class LoginRequest(BaseModel):
     username: str
@@ -1089,12 +1095,31 @@ def _nombre_posiblemente_pegado(nombre: str) -> bool:
     return bool(tokens)
 
 
+def validar_dni_estricto(valor, texto_fuente: str = None) -> str:
+    """No recorta, rellena ni transforma caracteres del identificador."""
+    dni = str(valor or "").strip()
+    if not re.fullmatch(r"[0-9]{8}", dni):
+        return "No detectado"
+    if texto_fuente is not None and not re.search(r"(?<!\w)" + re.escape(dni) + r"(?!\w)", texto_fuente):
+        return "No detectado"
+    return dni
+
+
+def validar_dnis_sujetos(sujetos: dict, texto_fuente: str = None) -> dict:
+    if isinstance(sujetos, dict):
+        for rol in ("demandante", "demandado"):
+            if isinstance(sujetos.get(rol), dict):
+                sujetos[rol]["dni"] = validar_dni_estricto(sujetos[rol].get("dni"), texto_fuente)
+    return sujetos
+
+
 def normalizar_sujetos_procesales_json(resultados: dict) -> dict:
     if not isinstance(resultados, dict):
         return resultados
     sujetos = resultados.get("sujetos_procesales")
     if not isinstance(sujetos, dict):
         return resultados
+    validar_dnis_sujetos(sujetos)
     for rol in ("demandante", "demandado"):
         persona = sujetos.get(rol)
         if isinstance(persona, dict) and persona.get("nombre"):
@@ -1395,7 +1420,7 @@ def modulo_ocr_tesseract(contenido_pdf: bytes, permitir_ocr_profundo: bool = Fal
                 texto_plumber = _extraer_con_pdfplumber_words(contenido_pdf)
                 if texto_plumber and len(texto_plumber) > 200:
                     print(f"✓ PyPDF2 (pdfplumber words): {len(texto_plumber)} chars, calidad={calidad}%")
-                    return texto_plumber, calidad, "PyPDF2"
+                    return texto_plumber, calcular_ocr_precision(texto_plumber), "pdfplumber"
                 return texto_extraido, calidad, "PyPDF2"
             texto_nativo = texto_extraido  # guardar como referencia antes de escalar
             print(f"⚠ Calidad {calidad}% < {_UMBRAL_CALIDAD_OCR}% — escalando a pdfplumber words...")
@@ -1449,6 +1474,33 @@ def modulo_ocr_tesseract(contenido_pdf: bytes, permitir_ocr_profundo: bool = Fal
 
     print("⚠ Sin texto detectado en ningún nivel")
     return "[TEXTO NO DETECTADO - REQUIERE OCR PROFUNDO]", 0.0, "error"
+
+def extraer_pdf_con_trazabilidad_paginas(contenido_pdf: bytes, forzar_ocr: bool = False):
+    lector = PyPDF2.PdfReader(io.BytesIO(contenido_pdf))
+    textos, detalle = [], []
+    for indice, pagina in enumerate(lector.pages, 1):
+        escritor = PyPDF2.PdfWriter()
+        escritor.add_page(pagina)
+        buffer = io.BytesIO()
+        escritor.write(buffer)
+        contenido_pagina = buffer.getvalue()
+        if forzar_ocr:
+            texto = modulo_ocr_avanzado_imagen(contenido_pagina)
+            if texto and texto != "[ERROR_OCR_PROFUNDO]":
+                metodo = "Tesseract"
+            else:
+                texto, _, metodo = modulo_ocr_tesseract(contenido_pagina, permitir_ocr_profundo=True)
+        else:
+            texto, _, metodo = modulo_ocr_tesseract(contenido_pagina)
+        error = metodo == "error" or texto == "[TEXTO NO DETECTADO - REQUIERE OCR PROFUNDO]"
+        calidad = 0.0 if error else calcular_ocr_precision(texto)
+        detalle.append({"pagina": indice, "metodo": metodo, "calidad_texto": calidad,
+                        "caracteres": 0 if error else len(texto.strip()), "criterio_calidad": "heuristica_textual"})
+        textos.append(texto if not error else "")
+    metodos = list(dict.fromkeys(p["metodo"] for p in detalle))
+    promedio = round(sum(p["calidad_texto"] for p in detalle) / len(detalle), 2) if detalle else 0.0
+    return "\n\n".join(textos), promedio, " / ".join(metodos) or "error", detalle
+
 
 def _preprocesar_imagen_ocr(imagen):
     """
@@ -1607,7 +1659,7 @@ Responde ÚNICAMENTE con este JSON (sin texto adicional):
 
         # Corregir DNI demandante
         if not v.get("demandante_dni_correcto", True):
-            m = re.search(r'\d{8}', str(v.get("demandante_dni", "")))
+            m = re.fullmatch(r'[0-9]{8}', str(v.get("demandante_dni", "")).strip())
             if m and m.group() != dem_dni:
                 # GUARDIA CRÍTICA: nunca asignar al demandante un DNI que ya pertenece al demandado
                 if m.group() == entidades_v["demandado"]["dni"]:
@@ -1629,7 +1681,7 @@ Responde ÚNICAMENTE con este JSON (sin texto adicional):
 
         # Corregir DNI demandado
         if not v.get("demandado_dni_correcto", True):
-            m = re.search(r'\d{8}', str(v.get("demandado_dni", "")))
+            m = re.fullmatch(r'[0-9]{8}', str(v.get("demandado_dni", "")).strip())
             if m and m.group() != ddo_dni:
                 # GUARDIA CRÍTICA: nunca asignar al demandado un DNI que ya pertenece al demandante
                 if m.group() == entidades_v["demandante"]["dni"]:
@@ -2032,7 +2084,7 @@ def _verificar_parte_ia(parte, base: str) -> list:
     if not isinstance(parte, dict):
         return ["la IA no devolvió esta parte"]
     nombre = _sin_puntuacion(parte.get("nombre"))
-    dni = re.sub(r'\D', '', str(parte.get("dni") or ""))
+    dni = str(parte.get("dni") or "").strip()
     motivos = []
     if len(nombre.split()) < 2:
         motivos.append("sin nombre completo")
@@ -2067,7 +2119,7 @@ def _aplicar_partes_ia(entidades: dict, texto_plano: str) -> dict:
     base = _sin_puntuacion(fragmento)
     partes = {rol: datos.get(rol) for rol in roles}
     motivos = {rol: _verificar_parte_ia(partes[rol], base) for rol in roles}
-    dnis = {rol: re.sub(r'\D', '', str(partes[rol].get("dni") or "")) if isinstance(partes[rol], dict) else "" for rol in roles}
+    dnis = {rol: str(partes[rol].get("dni") or "").strip() if isinstance(partes[rol], dict) else "" for rol in roles}
     if dnis["demandante"] and dnis["demandante"] == dnis["demandado"]:
         for rol in roles:
             motivos[rol].append("ambas partes tienen el mismo DNI")
@@ -2236,7 +2288,7 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
     # Un CUI aparece como "CUI N° XXXXXXXX", "Código Único de Identificación ... XXXXXXXX"
     _cui_menores = set()
     for _m_cui in re.finditer(
-        r'(?:C\.?U\.?I\.?|[Cc][oó]digo\s+[Úú]nico\s+de\s+[Ii]dentificaci[oó]n)\s*N[°º]?\s*(\d{8})',
+        r'(?:C\.?U\.?I\.?|[Cc][oó]digo\s+[Úú]nico\s+de\s+[Ii]dentificaci[oó]n)\s*N[°º]?\s*(?<!\w)([0-9]{8})(?!\w)',
         texto_plano
     ):
         _cui_menores.add(_m_cui.group(1))
@@ -2264,11 +2316,11 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
         _post_of = texto_plano[_m_of.end(): _m_of.end() + 400]
         
         # Estrategia 1: Buscar explícitamente la etiqueta "DNI" seguida del número (la más segura)
-        _m_dni_of = re.search(r'D\.?N\.?I\.?[\s:=_.-]{1,15}(?<!\d)(\d{8})(?!\d)', _post_of, re.IGNORECASE)
+        _m_dni_of = re.search(r'D\.?N\.?I\.?[\s:=_.-]{1,15}(?<!\d)(?<!\w)([0-9]{8})(?!\w)(?!\d)', _post_of, re.IGNORECASE)
         
         # Estrategia 2: Fallback, si no dice "DNI", atrapamos el primer número de 8 dígitos
         if not _m_dni_of:
-            _m_dni_of = re.search(r'(?<!\d)(\d{8})(?!\d)', _post_of)
+            _m_dni_of = re.search(r'(?<!\d)(?<!\w)([0-9]{8})(?!\w)(?!\d)', _post_of)
             
         if _m_dni_of:
             _dni_of = _m_dni_of.group(1)
@@ -2322,7 +2374,7 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
 
     # Paso 3: Asociar por proximidad (para documentos narrativos donde el contexto no alcanza)
     # Solo si la asignación por contexto aún no encontró el DNI
-    dni_matches = [m for m in re.finditer(r'(?<!\d)(\d{8})(?!\d)', texto_plano)
+    dni_matches = [m for m in re.finditer(r'(?<!\d)(?<!\w)([0-9]{8})(?!\w)(?!\d)', texto_plano)
                    if m.group(1) not in _cui_menores]
 
     if dem_te_match and entidades["demandante"]["dni"] == "No detectado":
@@ -2408,7 +2460,7 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
 
             if entidades["demandante"]["dni"] == "No detectado":
                 dni_str = str(ia_ner.get("demandante_dni", "")).strip()
-                dni_match = re.search(r'(\d{8})', dni_str)
+                dni_match = re.search(r'(?<!\w)([0-9]{8})(?!\w)', dni_str)
                 if dni_match:
                     entidades["demandante"]["dni"] = dni_match.group(1)
                     print(f"✓ Mistral detectó DNI demandante: {dni_match.group(1)}")
@@ -2422,7 +2474,7 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
 
             if entidades["demandado"]["dni"] == "No detectado":
                 dni_str = str(ia_ner.get("demandado_dni", "")).strip()
-                dni_match = re.search(r'(\d{8})', dni_str)
+                dni_match = re.search(r'(?<!\w)([0-9]{8})(?!\w)', dni_str)
                 if dni_match:
                     entidades["demandado"]["dni"] = dni_match.group(1)
                     print(f"✓ Mistral detectó DNI demandado: {dni_match.group(1)}")
@@ -2433,7 +2485,7 @@ def modulo_ner_spacy(texto_plano: str) -> dict:
     # 4. RED DE SEGURIDAD — solo actúa si NINGUNO de los pasos anteriores asignó el DNI
     # REGLA CRÍTICA: nunca asignar a demandante un DNI que ya está asignado al demandado
     if entidades["demandante"]["dni"] == "No detectado" or entidades["demandado"]["dni"] == "No detectado":
-        dnis_globales = [d for d in re.findall(r'(?<!\d)\d{8}(?!\d)', texto_plano)
+        dnis_globales = [d for d in re.findall(r'(?<!\w)[0-9]{8}(?!\w)', texto_plano)
                          if d not in _cui_menores]
         dnis_unicos = list(dict.fromkeys(dnis_globales))
         
@@ -3061,6 +3113,163 @@ def _posicion_fecha_emision(cuerpo: str, tipo: str = None):
     return None
 
 
+def normalizar_fecha_procesal(literal: str):
+    """Devuelve ISO o None; numericos en orden dia/mes/año, nunca mes/dia."""
+    valor = re.sub(r"\s+", " ", str(literal or "").strip()).lower()
+    meses = {"enero": 1, "febrero": 2, "marzo": 3, "abril": 4, "mayo": 5, "junio": 6,
+             "julio": 7, "agosto": 8, "septiembre": 9, "setiembre": 9, "octubre": 10,
+             "noviembre": 11, "diciembre": 12}
+    try:
+        if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", valor):
+            return date.fromisoformat(valor).isoformat()
+        numerica = re.fullmatch(r"([0-9]{1,2})([/.-])([0-9]{1,2})\2([0-9]{4}|[0-9]{2})", valor)
+        if numerica:
+            dia, _, mes, anio = numerica.groups()
+            year = int(anio)
+            # Regla explicita y estable, independiente de la fecha de ejecucion.
+            if len(anio) == 2:
+                year += 2000 if year <= 49 else 1900
+            return date(year, int(mes), int(dia)).isoformat()
+        larga = re.fullmatch(r"([0-9]{1,2}) de ([a-záéíóúñ]+) de ([0-9]{4})", valor)
+        if larga:
+            dia, mes, anio = larga.groups()
+            return date(int(anio), meses[mes], int(dia)).isoformat()
+    except (ValueError, KeyError):
+        pass
+    return None
+
+
+def extraer_fechas_procesales_por_oracion(texto: str, archivo: str = "") -> list:
+    """Una fila por ocurrencia; solo asocia eventos anteriores en la misma oracion."""
+    patron = (r"(?<![0-9])[0-9]{4}-[0-9]{2}-[0-9]{2}(?![0-9])|"
+              r"(?<![0-9])[0-9]{1,2}([/.-])[0-9]{1,2}\1(?:[0-9]{4}|[0-9]{2})(?![0-9])|"
+              r"(?<![0-9])[0-9]{1,2}\s+de\s+[a-záéíóúñ]+\s+de\s+[0-9]{4}(?![0-9])")
+    matches = list(re.finditer(patron, texto or "", re.IGNORECASE))
+    mascara = list(texto or "")
+    for m in matches:
+        for pos in range(m.start(), m.end()):
+            mascara[pos] = " "
+    mascara = "".join(mascara)
+    mascara = re.sub(r"\b(?:sr|sra|dr|dra|nro|num|art|exp|av|jr|n)\.", lambda m: m.group().replace(".", " "), mascara, flags=re.IGNORECASE)
+    patrones = {
+        "presentacion": r"\b(?:presentaci[oó]n(?:\s+de\s+(?:la\s+)?demanda)?|present[oó]|presentada|interposici[oó]n|interpuso|demanda)\b",
+        "admision": r"\b(?:admisori[oa]|admisi[oó]n|admiti[oó])(?:\s+de\s+(?:la\s+)?demanda)?\b",
+        "notificacion": r"\b(?:notificaci[oó]n|notific[oó]|notificada|notificado)(?:\s+de\s+(?:la\s+)?demanda)?\b",
+        "contestacion": r"\b(?:contestaci[oó]n|contest[oó])(?:\s+de\s+(?:la\s+)?demanda)?\b",
+        "audiencia": r"\baudiencia\b", "sentencia": r"\b(?:sentencia|fallo)\b",
+        "oficio": r"\boficio\b", "vencimiento_plazo": r"\b(?:vencimiento(?:\s+de\s+plazo)?|vence|vencer[aá])\b",
+        "consentimiento": r"\b(?:consentimiento|consentida|consentido)\b"
+    }
+    filas = []
+    for m in matches:
+        anteriores = list(re.finditer(r"[.!?]", mascara[:m.start()]))
+        inicio = anteriores[-1].end() if anteriores else 0
+        siguiente = re.search(r"[.!?]", mascara[m.end():])
+        fin = m.end() + siguiente.end() if siguiente else len(texto)
+        previo = texto[inicio:m.start()]
+        candidato = None
+        for tipo, regex in patrones.items():
+            for evento in re.finditer(regex, previo, re.IGNORECASE):
+                if candidato is None or (evento.end(), -evento.start()) > candidato[:2]:
+                    candidato = (evento.end(), -evento.start(), tipo)
+        tipo = candidato[2] if candidato else "no_determinado"
+        literal = m.group(0)
+        iso = normalizar_fecha_procesal(literal)
+        filas.append({"tipo": tipo, "evento": tipo, "fecha": literal, "fecha_original": literal,
+                      "fecha_iso": iso, "estado_normalizacion": "Normalizada" if iso else "No normalizada",
+                      "archivo": archivo, "contexto": texto[inicio:fin].strip(), "posicion": m.start()})
+    return filas
+
+
+def extraer_fechas_procesales_documentos(texto: str) -> list:
+    cabeceras = list(re.finditer(r"--- \[DOCUMENTO\s+[0-9]+:\s*([^\]]+)\] ---", texto or "", re.IGNORECASE))
+    if not cabeceras:
+        return extraer_fechas_procesales_por_oracion(texto or "")
+    filas = []
+    for index, cab in enumerate(cabeceras):
+        fin = cabeceras[index + 1].start() if index + 1 < len(cabeceras) else len(texto)
+        filas.extend(extraer_fechas_procesales_por_oracion(texto[cab.end():fin], cab.group(1)))
+    return filas
+
+
+@app.get("/api/v1/expedientes/{numero}/fechas-procesales")
+def consultar_fechas_procesales(numero: str, request: Request):
+    conn = get_db_connection()
+    try:
+        fila = verificar_acceso_expediente_o_rechazar(conn, request, numero, "fechas procesales")
+        docs = conn.execute("SELECT nombre_archivo, texto_ocr FROM ocr_documentos WHERE numero_expediente = %s ORDER BY documento_index, id", (numero,)).fetchall()
+        extraidas = []
+        for doc in docs:
+            extraidas.extend(extraer_fechas_procesales_por_oracion(doc.get("texto_ocr") or "", doc.get("nombre_archivo") or ""))
+        if not docs:
+            extraidas = (cargar_json_bd(fila["json_resultados"]) or {}).get("fechas_procesales_extraidas") or []
+        return {"status": "success", "fechas_extraidas": extraidas, "total": len(extraidas), "ocr_disponible": bool(docs)}
+    finally:
+        conn.close()
+
+
+def validar_fecha_evento_procesal(tipo: str, literal: str, hoy=None) -> list:
+    hoy = hoy or datetime.now().date()
+    hallazgos = []
+    iso = normalizar_fecha_procesal(literal)
+    if iso is None:
+        return [{"tipo": "FECHA_IMPOSIBLE", "fecha": literal, "detalle": "No normalizada: la fecha no existe en calendario o el formato no es convertible.", "severidad": "CRITICO"}]
+    fecha = date.fromisoformat(iso)
+    if fecha.year < 1990:
+        hallazgos.append({"tipo": "FECHA_ATIPICA", "fecha": literal, "detalle": "El año es anterior a 1990.", "severidad": "ADVERTENCIA"})
+    if fecha > hoy and tipo not in {"audiencia", "vencimiento_plazo"}:
+        hallazgos.append({"tipo": "FECHA_FUTURA", "fecha": literal, "detalle": "La fecha de un evento ya ocurrido no puede ser posterior a la fecha actual.", "severidad": "ADVERTENCIA"})
+    return hallazgos
+
+
+class FechaProcesalManual(BaseModel):
+    tipo: str
+    fecha: str = Field(min_length=1, max_length=80)
+
+
+class FechasProcesalesRequest(BaseModel):
+    fechas: List[FechaProcesalManual] = Field(default_factory=list, max_length=100)
+    guardar: bool = False
+
+
+@app.post("/api/v1/expedientes/{numero}/fechas-procesales")
+def validar_fechas_procesales(numero: str, payload: FechasProcesalesRequest, request: Request):
+    conn = get_db_connection()
+    try:
+        verificar_acceso_expediente_o_rechazar(conn, request, numero, "fechas procesales")
+        tipos = {"presentacion", "demanda", "admision", "notificacion", "contestacion", "sentencia", "oficio", "audiencia", "vencimiento_plazo", "consentimiento", "resolucion", "no_determinado"}
+        fechas, hallazgos = [], []
+        for index, item in enumerate(payload.fechas):
+            if item.tipo not in tipos:
+                raise HTTPException(status_code=422, detail="Tipo de evento procesal no permitido.")
+            literal = item.fecha.strip()
+            encontrados = validar_fecha_evento_procesal(item.tipo, literal)
+            iso = normalizar_fecha_procesal(literal)
+            fechas.append({"tipo": item.tipo, "fecha": literal, "fecha_original": literal, "fecha_iso": iso,
+                           "estado_normalizacion": "Normalizada" if iso else "No normalizada", "valida": not encontrados})
+            hallazgos.extend({**h, "evento": item.tipo, "indice": index} for h in encontrados)
+        resultado = {"estado": "revisar" if hallazgos else "ok", "hallazgos": hallazgos,
+                     "total_hallazgos": len(hallazgos), "fecha_validacion": datetime.now().astimezone().isoformat()}
+        if payload.guardar:
+            fila = conn.execute("SELECT json_resultados FROM registro_expedientes WHERE numero_expediente = %s FOR UPDATE", (numero,)).fetchone()
+            data = cargar_json_bd(fila["json_resultados"]) or {}
+            data["fechas_procesales"] = fechas
+            data["validacion_fechas_procesales"] = resultado
+            conn.execute("UPDATE registro_expedientes SET json_resultados = %s WHERE numero_expediente = %s", (json.dumps(data, ensure_ascii=False), numero))
+            registrar_evento_auditoria(conn, request, "EDICION_FECHAS_PROCESALES", expediente=numero,
+                                      detalle=f"Fechas revisadas={len(fechas)}; hallazgos={len(hallazgos)}", severidad="INFO")
+            for h in hallazgos:
+                registrar_evento_auditoria(conn, request, "ANOMALIA", expediente=numero,
+                    detalle=f"HU10; evento={h['evento']}; fecha={h['fecha']}; {h['detalle']}", severidad="ADVERTENCIA")
+            conn.commit()
+        return {"status": "success", "fechas": fechas, "validacion": resultado, "guardado": payload.guardar}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def _auditar_fechas_temporales(texto_plano: str) -> dict:
     """
     Detecta fechas imposibles, futuras y contradicciones temporales basicas.
@@ -3145,6 +3354,7 @@ def _auditar_fechas_temporales(texto_plano: str) -> dict:
         "notificacion": r'notificaci[oó]n|notifica|c[eé]dula|sinoe|emplazad[oa]',
         "contestacion": r'contestaci[oó]n|contesta\s+la\s+demanda|absuelve\s+traslado',
         "audiencia": r'audiencia',
+        "vencimiento_plazo": r'vencimiento|vence|vencer[aá]',
         "sentencia": r'sentencia|fallo',
         "consentimiento": r'consentid[ao]|consentimiento',
         "oficio": r'oficio|retenci[oó]n'
@@ -3202,29 +3412,14 @@ def _auditar_fechas_temporales(texto_plano: str) -> dict:
                 "CRITICO"
             )
             return
-        if fecha_obj.date() > hoy:
-            agregar_hallazgo(
-                "FECHA_FUTURA",
-                literal,
-                "La fecha es posterior a la fecha actual del sistema.",
-                contexto,
-                "ADVERTENCIA"
-            )
-        if fecha_obj.year < 1990 or fecha_obj.year > hoy.year + 5:
-            agregar_hallazgo(
-                "FECHA_ATIPICA",
-                literal,
-                "El anio de la fecha queda fuera del rango esperado.",
-                contexto,
-                "ADVERTENCIA"
-            )
         if rango and rango["tipo"] == "indice":
-            return  # el índice solo resume fechas de otros documentos: no define eventos propios
+            return
         if rango and rango["tipo"] and rango["emision_pos"] == match.start():
-            # La fecha de emisión del documento pesa más que una mención ("Sentencia de 31 de agosto de 2011" citada en el texto).
             tipo_detectado, score_evento = rango["tipo"], -1
         else:
             tipo_detectado, score_evento = tipo_evento_cercano(match, contexto, rango)
+        for h in validar_fecha_evento_procesal(tipo_detectado, fecha_obj.strftime("%d/%m/%Y"), hoy):
+            agregar_hallazgo(h["tipo"], literal, h["detalle"], contexto, h["severidad"])
         eventos.append({
             "tipo": tipo_detectado,
             "score": score_evento,
@@ -3473,10 +3668,10 @@ def modulo_extraccion_plazos(texto_plano: str) -> dict:
         return {
             "fecha_notificacion": fecha_notificacion_str or "No detectado",
             "fecha_presentacion": fecha_presentacion_str or "No detectado",
-            "dias_transcurridos": 0,
+            "dias_transcurridos": None,
             "estado": "No calculado",
-            "observacion": "No se detectaron fechas suficientes de notificacion y contestacion/presentacion para calcular el plazo sin inferencias.",
-            "calendario_judicial": {"dias_habiles": 0, "dias_no_habiles": [], "calendario": "judicial_peru"},
+            "observacion": "Fechas insuficientes para calcular el plazo.",
+            "calendario_judicial": {"dias_habiles": None, "dias_no_habiles": [], "calendario": "judicial_peru"},
             "auditoria_temporal": auditoria_temporal,
             "tipo_presentacion": tipo_presentacion or "No detectado"
         }
@@ -3488,7 +3683,7 @@ def modulo_extraccion_plazos(texto_plano: str) -> dict:
     observacion = "Presentacion oportuna."
     
     if dias_habiles > 5:
-        estado = "Vencido"
+        estado = "Extemporáneo"
         observacion = f"Excedió el plazo legal por {dias_habiles - 5} día(s) hábil(es)."
 
     return {
@@ -4050,6 +4245,66 @@ _VERBOS_DE_PUNTO = (r'(?:determinar|establecer|definir|verificar|dilucidar|anali
                     r'delimitar|examinar|decidir|se[ñn]alar)')
 
 
+def combinar_puntos_controvertidos(acta: list, sugeridos: list, texto: str) -> list:
+    demanda, contestacion = _obtener_bloques_demanda_contestacion(texto)
+    salida, vistos = [], set()
+    for punto in list(acta or []) + list(sugeridos or []):
+        if not isinstance(punto, dict):
+            continue
+        item = dict(punto)
+        if item.get("fuente") == "acta" and item not in (acta or []):
+            continue
+        if item.get("fuente") == "contradiccion" or item.get("evidencia_demanda") or item.get("evidencia_contestacion"):
+            cita_d = str(item.get("evidencia_demanda") or "").strip()
+            cita_c = str(item.get("evidencia_contestacion") or "").strip()
+            if not (len(cita_d) >= 20 and len(cita_c) >= 20 and demanda and contestacion):
+                continue
+            normalizar = lambda t: re.sub(r"\s+", " ", t).strip().lower()
+            if normalizar(cita_d) not in normalizar(demanda) or normalizar(cita_c) not in normalizar(contestacion):
+                continue
+            item["fuente"] = "contradiccion"
+            item["evidencia_demanda"] = cita_d
+            item["evidencia_contestacion"] = cita_c
+        clave = re.sub(r"\W+", "", str(item.get("redaccion_original") or item.get("sugerencia") or "").lower())
+        if clave and clave not in vistos:
+            vistos.add(clave)
+            salida.append(item)
+    return formalizar_puntos_controvertidos(salida)
+
+
+def formalizar_puntos_controvertidos(puntos: list) -> list:
+    """Formaliza sugerencias pendientes conservando su contenido de origen y revisiones humanas."""
+    resultado = []
+    for punto in puntos or []:
+        if not isinstance(punto, dict):
+            continue
+        item = dict(punto)
+        if item.get("estado_revision") in ("accepted", "edited", "discarded"):
+            resultado.append(item)
+            continue
+        original = str(item.get("redaccion_original") or item.get("sugerencia") or item.get("tema") or "").strip()
+        if not original:
+            resultado.append(item)
+            continue
+        texto = re.sub(r"\s+", " ", original).strip()
+        texto = re.sub(r"^(?:[0-9]+[.)]|[-•])\s*", "", texto)
+        for patron, expansion in [(r"\b[Dd]te\.", "parte demandante"), (r"\b[Dd]do\.", "parte demandada"), (r"\b[Dd]emandte\.", "parte demandante")]:
+            texto = re.sub(patron, expansion, texto)
+        texto = re.sub(r"^(?:es necesario|resulta necesario|se recomienda)\s+que\s+", "Verificar que ", texto, flags=re.I)
+        infinitivo = re.match(r"^(?:Determinar|Establecer|Precisar|Verificar|Evaluar|Identificar|Definir|Examinar|Contrastar|Revisar|Confirmar|Comprobar|Valorar|Dilucidar)\b", texto, re.I)
+        if not infinitivo:
+            texto = "Determinar " + texto[0].lower() + texto[1:]
+        if not re.search(r"\b(?:demandante|demandada|demandado|alimentista|alimentante|obligado|menor)\b", texto, re.I):
+            texto = texto.rstrip(".; ") + ", en relación con la parte demandante y la parte demandada"
+        texto = texto.rstrip(".; ") + "."
+        if texto != original:
+            item.setdefault("redaccion_original", original)
+            item["sugerencia"] = texto
+            item["redaccion_formalizada"] = True
+        resultado.append(item)
+    return resultado
+
+
 def _separar_puntos_controvertidos(bloque: str) -> list:
     """Separa el bloque de un acta en sus puntos: ítems numerados ("1. ...", "2) ...", "(a) ..."), con viñeta, separados por ";",
     o frases que empiezan con un verbo de fijación ("Determinar si...", "..., establecer si... y definir..."). Cada punto es un
@@ -4275,7 +4530,15 @@ def _redactar_hechos_postura(hechos: dict, tono: str) -> str:
 
 def _integrar_oferta_contestacion(postura: dict, texto_plano: str) -> dict:
     if not isinstance(postura, dict):
-        return postura
+        postura = {"tecnico": str(postura or ""), "estandar": str(postura or "")}
+    postura = dict(postura)
+    if texto_plano and texto_plano.strip():
+        _, escrito_contestacion = _obtener_bloques_demanda_contestacion(texto_plano)
+        postura["contestacion_detectada"] = bool(escrito_contestacion.strip())
+        if not postura["contestacion_detectada"]:
+            mensaje = "Sin absolución detectada. El sistema se mantiene a la espera del escrito de contestación de la parte demandada."
+            return {**postura, "estado": "sin_absolucion", "tecnico": mensaje, "estandar": mensaje}
+        postura["estado"] = "con_contestacion"
     hechos = _hechos_contestacion_y_audiencia(texto_plano)
     if not hechos.get("oferta") and not hechos.get("audiencia"):
         return postura
@@ -4444,6 +4707,72 @@ def _gasto_ia_aceptable(texto_plano: str, concepto: str, monto: float, petitorio
     return True, ""
 
 
+def clasificar_sustento_gasto_hu12(gasto: dict, texto_fuente: str = "") -> dict:
+    """La presencia del monto no prueba sustento; exige una pieza documental identificable."""
+    evidencia = str(gasto.get("observacion") or "")
+    estado, motivo = "No determinado", "La mención del gasto o la validación del monto no acredita sustento documental."
+    fuente = ""
+    evidencia_literal = bool(evidencia.strip() and evidencia.strip().lower() in (texto_fuente or "").lower())
+    if evidencia_literal and re.search(r"sin\s+(?:sustento|comprobante|boleta|recibo)|no\s+(?:se\s+)?(?:adjunta|acompaña|presenta|acredita)|no\s+est[aá]\s+sustentad", evidencia, re.I):
+        estado, motivo = "Sin sustento", "La evidencia textual indica expresamente ausencia de sustento documental."
+    else:
+        # Only a separately headed supporting piece with matching amount and concept can establish support.
+        partes = re.split(r"--- \[DOCUMENTO ", texto_fuente or "")
+        concepto = str(gasto.get("concepto") or "")
+        palabras = [p for p in re.findall(r"[a-záéíóúñ]{5,}", concepto.lower()) if p not in {"general", "gasto", "menor"}]
+        monto = _normalizar_monto_texto(gasto.get("monto"))
+        for parte in partes[1:]:
+            cabecera, _, cuerpo = parte.partition("---")
+            if not re.search(r"boleta|factura|recibo|comprobante|ticket", cabecera, re.I):
+                continue
+            if not re.search(r"(?:boleta|factura|recibo|comprobante|ticket)\s+(?:de\s+)?(?:venta|pago|n[°ºo.]|electr[oó]nic)", cuerpo[:1200], re.I):
+                continue
+            if not palabras or not any(p in cuerpo.lower() for p in palabras):
+                continue
+            if monto is None or not _validar_monto_con_texto(monto, _extraer_montos_reales(cuerpo), tolerancia=0.01):
+                continue
+            estado = "Sustentado"
+            motivo = "Importe y concepto encontrados en una pieza documental de sustento identificada; sujeto a revisión humana."
+            fuente = cabecera.strip().rstrip("]").strip()
+            break
+    return {"estado_sustento": estado, "motivo_sustento": motivo, "fuente_sustento": fuente}
+
+
+def normalizar_gastos_hu12(detalles: list, texto_fuente: str = "") -> float:
+    """Conserva importes originales y suma solo equivalentes mensuales en PEN con evidencia."""
+    total = 0.0
+    for gasto in detalles:
+        if not isinstance(gasto, dict):
+            continue
+        gasto.update(clasificar_sustento_gasto_hu12(gasto, texto_fuente))
+        evidencia = str(gasto.get("observacion") or "")
+        texto = evidencia.lower()
+        monedas = set()
+        if re.search(r"s/|\bsoles?\b|\bPEN\b", evidencia, re.I):
+            monedas.add("PEN")
+        if re.search(r"US\$|USD|d[oó]lares|\$", evidencia, re.I):
+            monedas.add("USD")
+        if re.search(r"EUR|€|euros", evidencia, re.I):
+            monedas.add("EUR")
+        moneda = next(iter(monedas)) if len(monedas) == 1 else "No determinada"
+        periodos = set()
+        if re.search(r"mensual(?:es|idad)?|al mes|por mes|cada mes", texto):
+            periodos.add("Mensual")
+        if re.search(r"anual(?:es)?|al a[nñ]o|por a[nñ]o|cada a[nñ]o", texto):
+            periodos.add("Anual")
+        if re.search(r"pago [uú]nico|por [uú]nica vez|una sola vez", texto):
+            periodos.add("Pago único")
+        periodo = next(iter(periodos)) if len(periodos) == 1 else "No determinada"
+        monto = _normalizar_monto_texto(gasto.get("monto"))
+        mensual = None
+        if moneda == "PEN" and monto is not None and periodo in ("Mensual", "Anual"):
+            mensual = round(monto / (12 if periodo == "Anual" else 1), 2)
+            total += mensual
+        gasto.update({"moneda": moneda, "periodicidad": periodo, "monto_mensual_pen": mensual,
+                      "conversion_mensual": "Monto anual / 12" if mensual is not None and periodo == "Anual" else "Monto mensual original" if mensual is not None else "No incluido en el total mensual"})
+    return round(total, 2)
+
+
 def _extraer_gastos_nativos(texto_plano: str, montos_reales: list, pa: float) -> list:
     """
     Fallback nativo: extrae gastos por categorías con regex contextual
@@ -4476,7 +4805,7 @@ def _extraer_gastos_nativos(texto_plano: str, montos_reales: list, pa: float) ->
         gastos.append({
             "concepto": f"Educación / {nombre_hijo}",
             "monto": val_validado,
-            "observacion": m.group(0)[:140].strip(),
+            "observacion": texto_plano[m.start():texto_plano.find("\n", m.end()) if texto_plano.find("\n", m.end()) != -1 else m.end() + 80].strip(),
             "tipo_documento": "texto nativo"
         })
 
@@ -4506,7 +4835,7 @@ def _extraer_gastos_nativos(texto_plano: str, montos_reales: list, pa: float) ->
             val_validado = _validar_monto_con_texto(val or 0, montos_reales, tolerancia=1.0)
             if not val_validado:
                 continue
-            evidencia = linea[categoria.start():categoria.end() + monto_literal.end()].strip()
+            evidencia = linea[categoria.start():].strip()
             if _texto_parece_petitorio_o_oferta(evidencia) or _monto_tiene_contexto_excluido(texto_plano, val_validado):
                 continue
             if abs(val_validado - pa) <= 10:
@@ -4902,6 +5231,28 @@ def _extraer_empleador_contextual(texto_plano: str, ingresos: list) -> dict:
     return {"nombre": "No detectado", "evidencia": ""}
 
 
+def actualizar_estado_ratio_hu14(capacidad: dict, texto_fuente: str = "") -> dict:
+    if not isinstance(capacidad, dict):
+        return capacidad
+    ingreso = float(capacidad.get("total_ingresos") or 0)
+    cargas = capacidad.get("total_cargas")
+    cargas_conocidas = cargas is not None and (
+        float(cargas or 0) > 0
+        or bool(re.search(r"\b(?:no\s+(?:tiene|tengo|registra|registro)|sin)\s+(?:otras?\s+)?(?:cargas|dependientes|obligaciones\s+familiares)\b", texto_fuente or "", re.I))
+    )
+    if ingreso <= 0:
+        capacidad.update({"ratio_disponibilidad": None, "carga_nivel": "No determinado", "estado_ratio": "no_determinado",
+                          "mensaje": "No se identificó un ingreso base positivo para calcular el ratio de disponibilidad.", "alerta_revision_hu14": True})
+    elif not cargas_conocidas:
+        capacidad.update({"ratio_disponibilidad": None, "carga_nivel": "Requiere revisión", "estado_ratio": "requiere_revision",
+                          "mensaje": "Se identificaron ingresos, pero no hay información suficiente sobre las cargas aplicables. La ausencia de montos no confirma cargas iguales a cero.", "alerta_revision_hu14": True})
+    else:
+        ratio = max(0.0, ingreso - float(cargas)) / ingreso * 100
+        nivel = "Carga Baja" if ratio >= 90 else "Carga Media" if ratio >= 75 else "Carga Alta" if ratio >= 60 else "Carga Crítica"
+        capacidad.update({"ratio_disponibilidad": round(ratio, 1), "carga_nivel": nivel, "estado_ratio": "calculado"})
+    return capacidad
+
+
 def _extraer_contexto_social_hu14(texto_plano: str, ingresos: list, dependientes: list, carga_especie: dict, ratio: float, carga_nivel: str) -> dict:
     condiciones = []
     vulnerabilidades = []
@@ -4940,6 +5291,22 @@ def _extraer_contexto_social_hu14(texto_plano: str, ingresos: list, dependientes
         if len(vulnerabilidades) >= 6:
             break
 
+    # Categorías CP041: solo menciones específicas y con contexto de carga/condición.
+    reglas_adicionales = [
+        (vulnerabilidades, "Ingresos irregulares", r"\bingresos?\s+(?:irregulares?|variables?|inestables?|espor[aá]dicos?)\b|\btrabajo\s+(?:eventual|espor[aá]dico)\b"),
+        (condiciones, "Adulto mayor o dependiente a cargo", r"\b(?:adult[oa]\s+mayor|persona\s+(?:mayor|dependiente)|madre|padre)\b.{0,90}\b(?:a\s+(?:su|mi|el)\s+cargo|depende\s+econ[oó]micamente|dependiente|mantiene|sostiene)\b|\b(?:tiene|tengo|mantiene|mantengo|sostiene|sostengo)\b.{0,50}\b(?:a\s+(?:su|mi)\s+cargo|econ[oó]micamente)\b.{0,60}\b(?:adult[oa]\s+mayor|madre|padre|persona\s+dependiente)\b"),
+        (condiciones, "Deuda o carga financiera", r"\b(?:deuda|pr[eé]stamo|cr[eé]dito)\s+(?:bancari[oa]|financier[oa]|hipotecari[oa]|personal)\b|\bcuota\s+(?:bancaria|hipotecaria|del\s+pr[eé]stamo)\b"),
+    ]
+    for destino, tipo, patron in reglas_adicionales:
+        for oracion in re.split(r"(?<=[.!?])\s+|\n+", texto):
+            match = re.search(patron, oracion, re.I)
+            if not match:
+                continue
+            prefijo = oracion[max(0, match.start() - 50):match.start()]
+            if re.search(r"\b(?:no|sin|niega)\b(?:\s+\w+){0,6}\s*$", prefijo, re.I):
+                continue
+            agregar(destino, tipo, oracion, oracion)
+
     for dep in dependientes or []:
         detalle = str(dep.get("detalle", "")).strip()
         if detalle:
@@ -4953,7 +5320,7 @@ def _extraer_contexto_social_hu14(texto_plano: str, ingresos: list, dependientes
             carga_especie.get("evidencia", "")
         )
 
-    if str(carga_nivel).lower().find("cr") >= 0 or ratio < 60:
+    if str(carga_nivel).lower().find("cr") >= 0:
         agregar(
             vulnerabilidades,
             "Riesgo economico",
@@ -5183,6 +5550,8 @@ def modulo_auditoria_financiera(texto_plano: str, monto_p_spacy: float):
         }
         items_educacion = [d for d in detalles_finales if str(d.get("concepto", "")).lower().startswith("educación")]
         validacion_hu12 = len(items_educacion) >= len(hijos_escolar) if hijos_escolar else True
+
+        suma_gn = normalizar_gastos_hu12(detalles_finales, texto_plano)
 
         # Cálculos finales de la HU18
         brecha = max(0.0, pa - suma_gn)
@@ -6366,6 +6735,8 @@ def versionar_resultado_ia(resultados: dict, anterior: dict, configuracion: dict
     snapshot = {
         "version_analisis": version,
         "tono": config["tono_visualizacion"],
+        "monto_petitorio": (resultados.get("revision_financiera") or {}).get("petitorio", "-"),
+        "postura": str((resultados.get("postura_defensa") or {}).get("tecnico") or (resultados.get("postura_defensa") or {}).get("estandar") or "")[:500] if isinstance(resultados.get("postura_defensa"), dict) else str(resultados.get("postura_defensa") or "Sin postura registrada")[:500],
         "sintesis": str(resumen.get("estandar") or resumen.get("tecnico") or "")[:500] if isinstance(resumen, dict) else str(resumen)[:500],
         "demandante": (sujetos.get("demandante") or {}).get("nombre", "-"),
         "demandado": (sujetos.get("demandado") or {}).get("nombre", "-"),
@@ -6412,11 +6783,13 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
     1. EXTENSIÓN OBLIGATORIA: Los campos 'tecnico' y 'estandar' DEBEN tener al menos 2 o 3 párrafos robustos. PROHIBIDO dar respuestas de una sola oración.
     2. ESTRUCTURA DEL RESUMEN: Debes detallar los antecedentes, la pretensión exacta, quiénes son las autoridades (Juez y Especialista con nombres completos y cargos correctos) y la fecha LITERAL de la audiencia o resolución. El párrafo de conclusión DEBE reflejar el estado procesal MÁS AVANZADO detectado en el paso previo (resuelto/consentida/en ejecución), no asumir que sigue en trámite. NO inventes años.
     3. ESTRUCTURA DE LA POSTURA — DISTINGUE PETITORIO DE FALLO: El monto/porcentaje que la parte demandante PIDIÓ (petitorio) y lo que el juez REALMENTE ORDENÓ en el FALLO pueden ser distintos (ej. se pidió un monto fijo, pero el juez ordenó un PORCENTAJE de los ingresos). Si hay sentencia, reporta la ORDEN REAL DEL FALLO (monto fijo o porcentaje, tal como está escrito), NUNCA el petitorio como si fuera lo ordenado. Detalla también la actitud procesal (ej. rebeldía, asistencia), fechas de pago, banco, y acuerdos accesorios (devengados, costas, etc.).
-    4. PUNTOS CONTROVERTIDOS (CRÍTICO): Genera minimo 3 sugerencias ESPECÍFICAS Y REALES basadas SOLO en el texto.
+    4. PUNTOS CONTROVERTIDOS (CRÍTICO): Genera minimo 3 sugerencias ESPECÍFICAS Y REALES basadas SOLO en el texto. Cada sugerencia debe ser una oración completa en tercera persona, sin abreviaturas, que empiece con un verbo en infinitivo (Determinar, Establecer o Verificar) y mencione expresamente la parte demandante, la parte demandada o el alimentista involucrado. No uses frases nominales como oración ni instrucciones dirigidas a tú o usted. No inventes nombres, hechos ni montos. Ejemplo de forma: Determinar las necesidades económicas del alimentista que la parte demandante debe acreditar.
        - Si hay errores ortográficos del OCR o de formato, DEBES citar la palabra exacta usando comillas y REDACTAR UNA ORACIÓN COMPLETA explicando el problema.
        - NO des respuestas de pocas palabras. Explica siempre el contexto de tu sugerencia.
        - Las sugerencias deben ser prácticas y accionables para mejorar el expediente o la redacción del mismo.
        - Las sugerencias deben ser reales y basadas en el texto, NO inventes problemas que no existan.
+       - Identifica también contradicciones FÁCTICAS entre demanda y contestación (afirmación frente a negación del mismo hecho, ingresos o cargas incompatibles). Una petición y una oferta diferentes no prueban por sí solas una contradicción. No inventes contradicciones ni exijas una cantidad mínima cuando no hay evidencia.
+       - Para cada contradicción agrega los campos "fuente": "contradiccion", "evidencia_demanda" y "evidencia_contestacion" con citas LITERALES de al menos 20 caracteres de cada escrito; la sugerencia debe precisar qué hecho incompatible debe determinarse y qué parte lo sostiene. Conserva las sugerencias adicionales aunque el acta ya tenga puntos fijados.
        - No cuestiones la ortografía de nombres propios por ser inusuales; señala un error solo si dos documentos del expediente presentan variantes verificables.
        - NO sugieras "falta especificar el monto de la pensión" ni "falta información de capacidad económica" si el expediente ya contiene una sentencia con esos datos — verifica el expediente completo antes de sugerir vacíos de información.
        - NO sugieras que una oferta en soles requiere aclarar si es monto fijo o porcentaje cuando el texto dice "S/.", "soles" o "mensuales"; eso ya identifica un monto fijo.
@@ -6560,7 +6933,7 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
             "postura": _integrar_oferta_contestacion(
                 analisis_json.get("postura", {"estandar": "Error.", "tecnico": "Error."}), texto_plano
             ),
-            "puntos_controvertidos": puntos_acta or analisis_json.get("puntos_controvertidos", [])
+            "puntos_controvertidos": combinar_puntos_controvertidos(puntos_acta, analisis_json.get("puntos_controvertidos", []), texto_plano)
         }, texto_plano)
 
     except Exception as e:
@@ -6568,7 +6941,7 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
         fallback = _rag_fallback_extractivo(texto_plano, entidades, e)
         fallback["configuracion_ia"] = configuracion_desde_payload_ia({}, "fallback_extractivo")
         fallback["postura"] = _integrar_oferta_contestacion(fallback.get("postura"), texto_plano)
-        fallback["puntos_controvertidos"] = _extraer_puntos_controvertidos_acta(texto_plano) or fallback["puntos_controvertidos"]
+        fallback["puntos_controvertidos"] = combinar_puntos_controvertidos(_extraer_puntos_controvertidos_acta(texto_plano), fallback["puntos_controvertidos"], texto_plano)
         return fallback
 
 
@@ -6670,6 +7043,8 @@ def resumir_pdf_individual(filename: str, texto: str) -> dict:
     chars = len(texto)
     paginas_est = max(1, chars // 1500)
     clasificacion = clasificar_documento_judicial(filename, texto)
+    if clasificacion.get("confianza", 0) < 0.5:
+        clasificacion = {**clasificacion, "tipo": "Documento no clasificado", "categoria": "Otros"}
 
     if es_vacio:
         return {
@@ -6692,8 +7067,8 @@ def resumir_pdf_individual(filename: str, texto: str) -> dict:
 
     # DNIs con contexto expandido
     dnis = list(dict.fromkeys(re.findall(
-        r'(?:D\.?N\.?I\.?|n[uú]mero|n°)\s*[:\s]*\s*(\d{8})', texto, re.IGNORECASE
-    ) + re.findall(r'(?<!\d)(\d{8})(?!\d)', texto)))[:5]
+        r'(?:D\.?N\.?I\.?|n[uú]mero|n°)\s*[:\s]*\s*(?<!\w)([0-9]{8})(?!\w)', texto, re.IGNORECASE
+    ) + re.findall(r'(?<!\d)(?<!\w)([0-9]{8})(?!\w)(?!\d)', texto)))[:5]
 
     # Fechas
     fechas = list(dict.fromkeys(re.findall(
@@ -6767,6 +7142,66 @@ def _float_seguro(valor, default=0.0) -> float:
         return float(str(valor).replace("S/.", "").replace("S/", "").replace(",", "").strip())
     except Exception:
         return default
+
+
+def enmascarar_resultado_jurisprudencia(resultado: dict, datos_caso: dict, fila=None) -> dict:
+    """Crea una copia de presentacion; no altera el expediente ni el indice."""
+    nombres, identificadores = set(), set()
+    fila = fila or {}
+    for rol in ("demandante", "demandado"):
+        if fila.get(rol):
+            nombres.add(str(fila[rol]))
+    def recoger(valor, campo=""):
+        if isinstance(valor, dict):
+            for k, v in valor.items():
+                recoger(v, str(k).lower())
+        elif isinstance(valor, list):
+            for v in valor:
+                recoger(v, campo)
+        elif isinstance(valor, str) and valor.strip():
+            if campo in {"nombre", "nombres", "nombre_completo", "demandante", "demandado", "menores", "alimentistas"}:
+                if valor.lower().strip() not in {"no detectado", "no encontrado", "desconocido", "sin datos"}:
+                    nombres.add(valor.strip())
+            if campo in {"dni", "cui", "documento_identidad", "direccion", "domicilio", "domicilio_real", "telefono", "correo", "email"}:
+                if len(valor.strip()) >= 5:
+                    identificadores.add(valor.strip())
+    recoger(datos_caso)
+    def mascara_nombre(nombre):
+        return " ".join(p[:2].upper() + "***" for p in nombre.split() if p)
+    def patron_nombre(nombre):
+        base = unicodedata.normalize("NFKD", nombre)
+        base = "".join(c for c in base if not unicodedata.combining(c))
+        letras = {"a": "[aáàä]", "e": "[eéèë]", "i": "[iíìï]", "o": "[oóòö]", "u": "[uúùü]", "n": "[nñ]"}
+        return r"(?<!\w)" + r"\s+".join("".join(letras.get(c.lower(), re.escape(c)) for c in p) for p in base.split()) + r"(?!\w)"
+    def limpiar(texto):
+        for nombre in sorted(nombres, key=len, reverse=True):
+            if len(nombre.strip()) >= 3:
+                texto = re.sub(patron_nombre(nombre), lambda m: mascara_nombre(m.group()), texto, flags=re.IGNORECASE)
+        for valor in sorted(identificadores, key=len, reverse=True):
+            texto = re.sub(re.escape(valor), "[DATO ENMASCARADO]", texto, flags=re.IGNORECASE)
+        texto = re.sub(r"(?<![0-9])[0-9]{8}(?![0-9])", lambda m: "******" + m.group()[-2:], texto)
+        texto = re.sub(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", "[CORREO ENMASCARADO]", texto, flags=re.IGNORECASE)
+        # Nombres adicionales presentes solo en el relato, no en los sujetos estructurados.
+        modelo = globals().get("nlp")
+        if callable(modelo) and texto.strip():
+            try:
+                entidades = [e for e in modelo(texto).ents if e.label_ in {"PER", "PERSON"}]
+                for entidad in reversed(entidades):
+                    texto = texto[:entidad.start_char] + mascara_nombre(entidad.text) + texto[entidad.end_char:]
+            except Exception:
+                pass
+        return texto
+    def copiar(valor, campo=""):
+        if isinstance(valor, dict):
+            return {k: copiar(v, k) for k, v in valor.items()}
+        if isinstance(valor, list):
+            return [copiar(v, campo) for v in valor]
+        if isinstance(valor, str) and campo not in {"numero_expediente", "expediente", "fecha", "similitud", "nivel_relevancia", "caracter_jurisprudencial"}:
+            return limpiar(valor)
+        return valor
+    copia = copiar(resultado)
+    copia["datos_enmascarados"] = True
+    return copia
 
 
 def _perfil_jurisprudencia_json(obj_json: dict, fila: dict = None) -> dict:
@@ -6894,7 +7329,7 @@ def detectar_datos_sensibles_menor(texto: str, limite: int = 12) -> list:
         hallazgos.append({
             "tipo": tipo,
             "valor": _mascarar_dato_sensible(valor),
-            "contexto": re.sub(r'\s+', ' ', contexto or '').strip()[:140]
+            "contexto": "Posible dato de menor detectado. Consulte la fuente autorizada para revisarlo."
         })
 
     for match in re.finditer(patrones_menor, texto_limpio, re.IGNORECASE):
@@ -6903,8 +7338,12 @@ def detectar_datos_sensibles_menor(texto: str, limite: int = 12) -> list:
         contexto = texto_limpio[inicio:fin]
         hallazgos_antes_contexto = len(hallazgos)
 
-        for dni in re.findall(r'\b(?:DNI|CUI|CU[IÍ]|documento|identificaci[oóó]n)?\s*[:.-]?\s*(\d{8})\b', contexto, re.IGNORECASE):
-            agregar("DNI/CUI de posible menor", dni, contexto)
+        for identificador in re.finditer(r'\b(DNI|CUI|CU[IÍ])\s*(?:N[°º.]?\s*)?[:.-]?\s*([0-9]{8})(?!\w)', contexto, re.IGNORECASE):
+            prefijo = contexto[max(0, identificador.start() - 100):identificador.start()]
+            es_cui = identificador.group(1).upper() != "DNI"
+            asociado_menor = bool(re.search(r"\b(?:menor|alimentista|ni[nñ]o|ni[nñ]a|adolescente)\b", prefijo, re.I)) and not re.search(r"\b(?:demandante|demandad[oa])\b", prefijo, re.I)
+            if es_cui or asociado_menor:
+                agregar("DNI/CUI de posible menor", identificador.group(2), contexto)
 
         for fecha in re.findall(r'\b(?:naci[oóó]|nacimiento|nac\.?)\w*\s*[:.-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{4})', contexto, re.IGNORECASE):
             agregar("Fecha de nacimiento", fecha, contexto)
@@ -6918,13 +7357,14 @@ def detectar_datos_sensibles_menor(texto: str, limite: int = 12) -> list:
             r'\s*[:,-]?\s+([A-ZÁÉÍÓÚÑ]{3,}(?:\s+[A-ZÁÉÍÓÚÑ]{3,}){1,3})'
         )
         for nombre in re.findall(patron_nombre, contexto, re.IGNORECASE):
+            nombre = re.split(r"\b(?:hij[oa]|identificad[oa]|CUI|DNI|nacid[oa])\b", nombre, maxsplit=1, flags=re.IGNORECASE)[0].strip()
             nombre_limpio = _normalizar_posible_nombre_menor(nombre)
             conector_nombre = re.search(
                 r'\b(?:de\s+nombre|llamad[oa]|identificad[oa]\s+como|representad[oa]\s+por)\b',
                 contexto,
                 re.IGNORECASE
             )
-            if nombre_limpio and conector_nombre:
+            if nombre_limpio:
                 agregar("Nombre de posible menor", nombre_limpio, contexto)
 
         if len(hallazgos) == hallazgos_antes_contexto and re.search(
@@ -7052,6 +7492,7 @@ def analizar_expediente(
     Endpoint principal multi-PDF. Recibe uno o más PDFs de un mismo expediente,
     concatena los textos extraídos y ejecuta el pipeline cognitivo sobre el texto unificado.
     """
+    usuario_auditoria = nombre_usuario_auditoria(request)
     for f in files:
         validar_nombre_y_tamano_pdf(f)
 
@@ -7138,35 +7579,19 @@ def analizar_expediente(
             cache_key = f"{hash_archivo}:{modo_ocr}"
             cache_ocr = _ANALYSIS_OCR_CACHE.get(cache_key)
             cache_db = None if cache_ocr else obtener_ocr_documento_cache(conn, hash_archivo, modo_ocr)
-            if cache_ocr:
-                texto_doc = cache_ocr["texto"]
-                ocr_prec_doc = cache_ocr["precision"]
-                ocr_met_doc = cache_ocr["metodo"]
-                print(f"♻ OCR memoria [{ocr_met_doc}] {upload_file.filename}: {ocr_prec_doc}%")
-            elif cache_db:
+            paginas_doc = []
+            if cache_ocr and cache_ocr.get("paginas"):
+                texto_doc, ocr_prec_doc, ocr_met_doc = cache_ocr["texto"], cache_ocr["precision"], cache_ocr["metodo"]
+                paginas_doc = cache_ocr["paginas"]
+            elif cache_db and cargar_json_bd(cache_db.get("detalle_paginas"), []):
                 texto_doc = cache_db.get("texto_ocr") or ""
                 ocr_prec_doc = cache_db.get("ocr_precision") or 0
-                ocr_met_doc = cache_db.get("metodo") or "cache"
-                _ANALYSIS_OCR_CACHE[cache_key] = {"texto": texto_doc, "precision": ocr_prec_doc, "metodo": ocr_met_doc}
-                print(f"♻ OCR persistido [{ocr_met_doc}] {upload_file.filename}: {ocr_prec_doc}%")
-            elif forzar_ocr:
-                print(f"🚀 OCR Profundo: {upload_file.filename}")
-                texto_doc = modulo_ocr_avanzado_imagen(contenido)
-                if texto_doc == "[ERROR_OCR_PROFUNDO]" or not texto_doc.strip():
-                    texto_doc, ocr_prec_doc, ocr_met_doc = modulo_ocr_tesseract(contenido, permitir_ocr_profundo=True)
-                else:
-                    ocr_prec_doc = calcular_ocr_precision(texto_doc)
-                    ocr_met_doc = "Tesseract"
-                _ANALYSIS_OCR_CACHE[cache_key] = {"texto": texto_doc, "precision": ocr_prec_doc, "metodo": ocr_met_doc}
-                guardar_ocr_documento_cache(conn, numero_expediente, nombre_archivo, i + 1, hash_archivo, modo_ocr, texto_doc, ocr_prec_doc, ocr_met_doc)
+                ocr_met_doc = cache_db.get("metodo") or "No registrado"
+                paginas_doc = cargar_json_bd(cache_db.get("detalle_paginas"), [])
             else:
-                print(f"⚡ Lectura estándar: {upload_file.filename}")
-                texto_doc, ocr_prec_doc, ocr_met_doc = modulo_ocr_tesseract(contenido, permitir_ocr_profundo=forzar_ocr)
-                _ANALYSIS_OCR_CACHE[cache_key] = {"texto": texto_doc, "precision": ocr_prec_doc, "metodo": ocr_met_doc}
-                guardar_ocr_documento_cache(conn, numero_expediente, nombre_archivo, i + 1, hash_archivo, modo_ocr, texto_doc, ocr_prec_doc, ocr_met_doc)
-
-            if cache_db:
-                guardar_ocr_documento_cache(conn, numero_expediente, nombre_archivo, i + 1, hash_archivo, modo_ocr, texto_doc, ocr_prec_doc, ocr_met_doc)
+                texto_doc, ocr_prec_doc, ocr_met_doc, paginas_doc = extraer_pdf_con_trazabilidad_paginas(contenido, forzar_ocr)
+            _ANALYSIS_OCR_CACHE[cache_key] = {"texto": texto_doc, "precision": ocr_prec_doc, "metodo": ocr_met_doc, "paginas": paginas_doc}
+            guardar_ocr_documento_cache(conn, numero_expediente, nombre_archivo, i + 1, hash_archivo, modo_ocr, texto_doc, ocr_prec_doc, ocr_met_doc, paginas_doc)
 
             if len(_ANALYSIS_OCR_CACHE) > _ANALYSIS_OCR_CACHE_MAX:
                 _ANALYSIS_OCR_CACHE.pop(next(iter(_ANALYSIS_OCR_CACHE)))
@@ -7175,11 +7600,11 @@ def analizar_expediente(
             ocr_precisions_doc.append({
                 "archivo": upload_file.filename,
                 "ocr_precision": ocr_prec_doc,
+                "paginas": paginas_doc,
                 "metodo": ocr_met_doc
             })
             textos_por_doc.append(texto_doc)
             texto_total += f"\n\n--- [DOCUMENTO {i+1}: {upload_file.filename}] ---\n\n{texto_doc}"
-            resumenes_por_pdf.append(resumir_pdf_individual(nombre_archivo, texto_doc))
 
         texto_extraido = texto_total.strip()
         actualizar_progreso_analisis(numero_expediente, 42, "validaciones", "Validando duplicados e indicios de datos sensibles.")
@@ -7263,7 +7688,19 @@ def analizar_expediente(
             conn.commit()
 
         hallazgos_sensibles = detectar_datos_sensibles_menor(texto_extraido)
-        if hallazgos_sensibles and not confirmacion_datos_sensibles:
+        review_key = (nombre_usuario_auditoria(request), numero_expediente)
+        review_hash = hashlib.sha256(json.dumps([a["sha256"] for a in archivos_preparados]).encode()).hexdigest()
+        with _SENSITIVE_REVIEW_LOCK:
+            revision = _SENSITIVE_REVIEWS.get(review_key)
+        autorizada = bool(revision and revision.get("decision") == "confirmado" and revision["hash"] == review_hash
+                          and time.time() - revision["created"] < 1800)
+        if hallazgos_sensibles and (not confirmacion_datos_sensibles or not autorizada):
+            with _SENSITIVE_REVIEW_LOCK:
+                if len(_SENSITIVE_REVIEWS) >= 500:
+                    _SENSITIVE_REVIEWS.pop(next(iter(_SENSITIVE_REVIEWS)))
+                _SENSITIVE_REVIEWS[review_key] = {"count": len(hallazgos_sensibles), "hash": review_hash,
+                                                 "decision": None, "created": time.time()}
+
             registrar_log_seguridad(
                 conn,
                 usuario_auditoria,
@@ -7284,11 +7721,15 @@ def analizar_expediente(
             registrar_log_seguridad(
                 conn,
                 usuario_auditoria,
-                f"INFO | ANONIMIZACION: confirmacion de documentos anonimizados ({len(hallazgos_sensibles)} hallazgo(s))",
+                f"INFO | ANONIMIZACION: decision=confirmado; analisis=continuado; hallazgos={len(hallazgos_sensibles)}",
                 numero_expediente,
                 ip_origen
             )
             conn.commit()
+
+        # CP026: interpretar documentos solo despues de la confirmacion exigida.
+        resumenes_por_pdf = [resumir_pdf_individual(a["nombre_archivo"], t)
+                            for a, t in zip(archivos_preparados, textos_por_doc)]
 
         str_esperado = re.sub(r'(?i)^(expediente|exp_?|exp\.\s*)', '', numero_expediente)
         clean_esperado = re.sub(r'[^a-zA-Z0-9]', '', str_esperado).lower()
@@ -7398,7 +7839,8 @@ def analizar_expediente(
         analisis_llm = modulo_rag_mistral(texto_extraido, entidades_ner)
         actualizar_progreso_analisis(numero_expediente, 82, "plazos", "Calculando plazos y admisibilidad.")
         analisis_plazos = modulo_extraccion_plazos(texto_extraido)
-        analisis_admisibilidad = modulo_verificacion_admisibilidad(texto_extraido)
+        docs_admisibilidad = conn.execute("SELECT nombre_archivo, texto_ocr FROM ocr_documentos WHERE numero_expediente = %s ORDER BY documento_index, id", (numero_expediente,)).fetchall()
+        analisis_admisibilidad = contrastar_anexos_documentales(numero_expediente, {"sujetos_procesales": entidades_ner}, docs_admisibilidad)
         actualizar_progreso_analisis(numero_expediente, 88, "financiera", "Validando auditoria financiera con Mistral.")
         analisis_financiero = modulo_auditoria_financiera(texto_extraido, monto_p)
         actualizar_progreso_analisis(numero_expediente, 93, "cargas", "Analizando capacidad economica y cargas familiares.")
@@ -7434,6 +7876,9 @@ def analizar_expediente(
         m_f1_ner = calcular_f1_ner(entidades_ner)
 
 # Estructuramos el diccionario exclusivo de resultados procesados por los módulos
+        entidades_ner = validar_dnis_sujetos(entidades_ner, texto_extraido)
+        analisis_cargas = actualizar_estado_ratio_hu14(analisis_cargas, texto_extraido)
+
         diccionario_resultados = {
             "sujetos_procesales": entidades_ner,
             "sintesis_rag": analisis_llm["resumen"],
@@ -7445,7 +7890,9 @@ def analizar_expediente(
             "capacidad_cargas": analisis_cargas,
             "calculadora_economica": calculadora_economica,
             "resumen_por_pdf": resumenes_por_pdf,
+            "extraccion_documentos": ocr_precisions_doc,
             "inconsistencias_detectadas": inconsistencias_integridad,
+            "fechas_procesales_extraidas": extraer_fechas_procesales_documentos(texto_extraido),
 
             "historial": [
                 {
@@ -7526,30 +7973,53 @@ def analizar_expediente(
         if conn:
             conn.close()
 
-@app.post("/api/v1/audit/sensitive-validation")
-async def registrar_validacion_sensible(request: Request, payload: SensitiveValidationRequest):
+@app.get("/api/v1/expedientes/{numero}/sensitive-validation")
+def consultar_validacion_sensible(numero: str, request: Request):
     conn = get_db_connection()
     try:
-        accion = "ADVERTENCIA | ANONIMIZACION: analisis detenido por datos sensibles"
-        if payload.decision.lower() == "confirmado":
-            accion = "INFO | ANONIMIZACION: documentos anonimizados revisados"
-        if payload.hallazgos_count:
-            accion = f"{accion} ({payload.hallazgos_count} hallazgo(s))"
-        registrar_log_seguridad(
-            conn,
-            payload.usuario,
-            accion,
-            payload.numero_expediente,
-            obtener_ip_origen(request)
-        )
-        conn.commit()
-        return {"status": "success"}
-    except Exception as e:
-        conn.rollback()
-        raise HTTPException(status_code=500, detail=str(e))
+        verificar_acceso_expediente_o_rechazar(conn, request, numero, "revision de datos sensibles")
+        docs = conn.execute("SELECT texto_ocr FROM ocr_documentos WHERE numero_expediente = %s ORDER BY documento_index, id", (numero,)).fetchall()
+        texto = "\n".join(d.get("texto_ocr") or "" for d in docs)
+        hallazgos = detectar_datos_sensibles_menor(texto)
+        return {"status": "success", "hallazgos": hallazgos, "total": len(hallazgos), "ocr_disponible": bool(texto.strip())}
     finally:
         conn.close()
-        
+
+
+@app.post("/api/v1/audit/sensitive-validation")
+def registrar_validacion_sensible(request: Request, payload: SensitiveValidationRequest):
+    conn = get_db_connection()
+    try:
+        verificar_acceso_expediente_o_rechazar(conn, request, payload.numero_expediente, "decision sobre datos sensibles")
+        usuario = nombre_usuario_auditoria(request)
+        key = (usuario, payload.numero_expediente)
+        # Serializa decisiones simultaneas y evita duplicar el log al reintentar.
+        with _SENSITIVE_REVIEW_LOCK:
+            revision = _SENSITIVE_REVIEWS.get(key)
+            if not revision or time.time() - revision["created"] >= 1800:
+                raise HTTPException(status_code=409, detail="La revision ha vencido. Vuelve a cargar los documentos para revisarlos.")
+            if revision["count"] != payload.hallazgos_count:
+                raise HTTPException(status_code=409, detail="Los hallazgos cambiaron. Vuelve a abrir la validacion.")
+            if revision.get("decision"):
+                if revision["decision"] != payload.decision:
+                    raise HTTPException(status_code=409, detail="Esta revision ya tiene una decision registrada.")
+                return {"status": "success", "hallazgos_count": revision["count"], "decision": payload.decision}
+            estado = "detenido" if payload.decision == "cancelado" else "continuacion_autorizada"
+            registrar_evento_auditoria(conn, request, "ANONIMIZACION", usuario=usuario, expediente=payload.numero_expediente,
+                detalle=f"decision={payload.decision}; analisis={estado}; hallazgos={revision['count']}",
+                severidad="ADVERTENCIA" if payload.decision == "cancelado" else "INFO")
+            conn.commit()
+            revision["decision"] = payload.decision
+        if payload.decision == "cancelado":
+            actualizar_progreso_analisis(payload.numero_expediente, 48, "cancelado", "Analisis cancelado durante la revision de datos sensibles. No se envio al modelo.")
+        return {"status": "success", "hallazgos_count": revision["count"], "decision": payload.decision}
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def _normalizar_texto_chat(texto: str) -> str:
     texto = unicodedata.normalize("NFD", str(texto or ""))
     texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
@@ -8239,6 +8709,143 @@ def _wrap_pdf_text(texto: str, max_chars: int = 92) -> list:
     return lineas or [""]
 
 
+def contrastar_anexos_documentales(numero: str, resultados: dict, docs: list) -> list:
+    """Contrasta piezas/paginas legibles; las menciones no acreditan presencia."""
+    normalizar = _normalizar_texto_busqueda_pdf
+    sujetos = resultados.get("sujetos_procesales") or {}
+    demandante = sujetos.get("demandante") or {}
+    dni = re.sub(r"\D", "", str(demandante.get("dni") or ""))
+    nombre = normalizar(str(demandante.get("nombre") or ""))
+    nombres_menores = []
+    for clave in ("menores", "alimentistas"):
+        datos = sujetos.get(clave) or []
+        if isinstance(datos, list):
+            for menor in datos:
+                valor = menor.get("nombre") if isinstance(menor, dict) else menor
+                if valor and len(normalizar(str(valor)).split()) >= 2:
+                    nombres_menores.append(normalizar(str(valor)))
+    piezas, texto_total = [], "\n".join(d.get("texto_ocr") or "" for d in docs)
+    base = os.path.realpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "pdfs_guardados"))
+    carpeta = re.sub(r'[^a-zA-Z0-9-]', '_', numero)
+    for doc in docs:
+        archivo = os.path.basename(doc.get("nombre_archivo") or "")
+        ruta = os.path.realpath(os.path.join(base, carpeta, archivo))
+        paginas = []
+        if archivo and os.path.commonpath([base, ruta]) == base and os.path.isfile(ruta):
+            try:
+                lector = PyPDF2.PdfReader(ruta)
+                for i, pagina in enumerate(lector.pages, 1):
+                    texto = _extraer_texto_pypdf2_pagina(pagina) or ""
+                    if not texto.strip() and len(lector.pages) == 1:
+                        texto = doc.get("texto_ocr") or ""
+                    paginas.append((i, texto))
+            except Exception:
+                pass
+        if not paginas:
+            paginas = [(None, doc.get("texto_ocr") or "")]
+        for pagina, texto in paginas:
+            normal = normalizar(texto)
+            cabecera = normal[:1200]
+            narrativa = bool(re.search(r'\b(?:sumilla|interpongo|medios probatorios|anexos)\b', cabecera))
+            identidad = (not narrativa and "documento nacional de identidad" in cabecera
+                         and bool(re.search(r'\b(?:reniec|republica del peru|registro nacional)\b', cabecera)))
+            nacimiento = (not narrativa and bool(re.search(r'\b(?:acta|partida) de nacimiento\b', cabecera))
+                          and bool(re.search(r'\b(?:registro civil|registrador|reniec|municipalidad)\b', normal)))
+            poder = (not narrativa and bool(re.search(r'\b(?:poder especial|poder por escritura|poder fuera de registro|vigencia de poder|carta poder)\b', cabecera))
+                     and bool(re.search(r'\b(?:otorgante|apoderado|notario|firma|sunarp)\b', normal)))
+            piezas.append({"archivo": archivo, "pagina": pagina, "texto": normal,
+                           "identidad": identidad, "nacimiento": nacimiento, "poder": poder,
+                           "narrativa": narrativa, "disponible": os.path.isfile(ruta)})
+    catalogo = [
+        {"id": "dni_demandante", "anexo": "Copia del DNI del demandante", "obligatorio": True},
+        {"id": "nacimiento_alimentista", "anexo": "Partida de nacimiento del alimentista", "obligatorio": True},
+        {"id": "representacion", "anexo": "Documento de representación (cuando corresponda)", "obligatorio": True},
+    ]
+    normal_total = normalizar(texto_total)
+    requiere_representacion = resultados.get("representacion_requerida")
+    if requiere_representacion is None and re.search(r'\b(?:actua por apoderado|representado por su apoderado|en calidad de apoderado)\b', normal_total):
+        requiere_representacion = True
+    declarados = []
+    for match in re.finditer(r'\banexo\s*([0-9]+)\s*[-–]?\s*([a-z])\b', texto_total, re.IGNORECASE):
+        codigo = match.group(1) + "-" + match.group(2).upper()
+        if codigo not in declarados:
+            declarados.append(codigo)
+            catalogo.append({"id": "anexo_" + codigo, "anexo": "Medio probatorio / Anexo " + codigo, "codigo": codigo, "obligatorio": True})
+    for item in catalogo:
+        candidatos, confirmados = [], []
+        for pieza in piezas:
+            propio = False
+            if item["id"] == "dni_demandante" and pieza["identidad"]:
+                propio = (len(dni) == 8 and dni in re.sub(r"[^0-9]", "", pieza["texto"])) or (len(nombre.split()) >= 2 and nombre in pieza["texto"])
+                candidatos.append(pieza)
+            elif item["id"] == "nacimiento_alimentista" and pieza["nacimiento"]:
+                propio = any(n in pieza["texto"] for n in nombres_menores)
+                candidatos.append(pieza)
+            elif item["id"] == "representacion" and pieza["poder"]:
+                propio = requiere_representacion is True
+                candidatos.append(pieza)
+            elif item.get("codigo"):
+                codigo = item["codigo"].split("-")
+                patron = r'\banexo\s*' + re.escape(codigo[0]) + r'\s*[-_ ]?\s*' + re.escape(codigo[1]) + r'\b'
+                cabecera = pieza["texto"][:500]
+                # Exige una pieza/pagina propia con contenido, no una referencia en la demanda.
+                propio = not pieza["narrativa"] and bool(re.search(patron, cabecera, re.IGNORECASE)) and len(pieza["texto"].strip()) >= 100
+                if propio:
+                    candidatos.append(pieza)
+            nombre_archivo = normalizar(pieza["archivo"])
+            candidata_por_nombre = (
+                (item["id"] == "dni_demandante" and "dni" in nombre_archivo)
+                or (item["id"] == "nacimiento_alimentista" and "nacimiento" in nombre_archivo)
+                or (item["id"] == "representacion" and "poder" in nombre_archivo)
+                or (item.get("codigo") and item["codigo"].lower().replace("-", "") in re.sub(r"[^a-z0-9]", "", nombre_archivo))
+            )
+            if candidata_por_nombre and pieza not in candidatos:
+                candidatos.append(pieza)
+            if propio and pieza["disponible"]:
+                confirmados.append(pieza)
+        if item["id"] == "representacion" and requiere_representacion is False:
+            item["estado"] = "no aplica"
+            item["obligatorio"] = False
+            item["observacion"] = "El expediente indica que no requiere documento de representacion."
+        elif confirmados:
+            item["estado"] = "encontrado"
+            item["observacion"] = "Presencia sustentada en pieza/pagina propia del expediente."
+        elif candidatos or (item["id"] == "representacion" and requiere_representacion is None):
+            item["estado"] = "por verificar"
+            item["observacion"] = "Requiere revision documental de identidad o aplicabilidad; no se marca como conforme."
+        else:
+            item["estado"] = "no encontrado"
+            item["observacion"] = "No se encontro evidencia verificable de una pieza propia; una mencion en la demanda no acredita el anexo."
+        item["fuentes"] = [{"archivo": p["archivo"], "pagina": p["pagina"]} for p in (confirmados or candidatos)]
+    return catalogo
+
+
+def obtener_reporte_admisibilidad(conn, request: Request, numero: str) -> dict:
+    fila = verificar_acceso_expediente_o_rechazar(conn, request, numero, "reporte de anexos y admisibilidad")
+    resultados = cargar_json_bd(fila["json_resultados"]) or {}
+    docs = conn.execute("SELECT nombre_archivo, texto_ocr FROM ocr_documentos WHERE numero_expediente = %s ORDER BY documento_index, id", (numero,)).fetchall()
+    items = contrastar_anexos_documentales(numero, resultados, docs) if docs else []
+    obligatorios = [item for item in items if item.get("obligatorio")]
+    conformes = sum(1 for item in obligatorios if item["estado"] == "encontrado")
+    faltantes = sum(1 for item in obligatorios if item["estado"] == "no encontrado")
+    pendientes = sum(1 for item in obligatorios if item["estado"] == "por verificar")
+    sugerencia = "Sin evaluacion disponible" if not items else ("Requiere revision documental" if pendientes else "Requiere subsanacion" if faltantes else "Admisible")
+    return {"numero_expediente": numero, "usuario": nombre_usuario_auditoria(request),
+            "fecha_generacion": datetime.now().astimezone().isoformat(), "admisibilidad": items,
+            "sugerencia": sugerencia, "conformes": conformes, "faltantes": faltantes, "pendientes": pendientes,
+            "advertencia": "Sugerencia referencial: la calificación de admisibilidad corresponde al órgano jurisdiccional.",
+            "alcance": "La contrastación exige evidencia de piezas o páginas propias. Las menciones de anexos en la demanda no se consideran conformes. Las piezas ilegibles o de identidad/aplicabilidad incierta requieren revisión documental."}
+
+
+@app.get("/api/v1/expedientes/{numero}/admisibilidad")
+def consultar_reporte_admisibilidad(numero: str, request: Request):
+    conn = get_db_connection()
+    try:
+        return {"status": "success", "reporte": obtener_reporte_admisibilidad(conn, request, numero)}
+    finally:
+        conn.close()
+
+
 def generar_pdf_admisibilidad_bytes(payload: dict) -> bytes:
     expediente = payload.get("numero_expediente") or payload.get("expediente") or "Expediente"
     usuario = payload.get("usuario") or "Sistema SIGEJA"
@@ -8246,36 +8853,35 @@ def generar_pdf_admisibilidad_bytes(payload: dict) -> bytes:
     sujetos = payload.get("sujetos_procesales") or {}
     financiera = payload.get("revision_financiera") or {}
     total = len(items)
-    conformes = sum(1 for item in items if str(item.get("estado", "")).lower() == "encontrado")
-    faltantes = max(0, total - conformes)
-    conclusion = "ADMISIBLE" if faltantes == 0 and total > 0 else "REQUIERE SUBSANACION"
+    conformes = sum(1 for item in items if str(item.get("estado", "")).lower() in {"encontrado", "conforme"})
+    conformes = payload.get("conformes", conformes)
+    faltantes = payload.get("faltantes", max(0, total - conformes))
+    pendientes = payload.get("pendientes", 0)
+    conclusion = payload.get("sugerencia") or ("SIN EVALUACION" if not total else "ADMISIBLE" if faltantes == 0 else "REQUIERE SUBSANACION")
 
     lineas = [
         ("B", 16, "SIGEJA - Checklist de Admisibilidad"),
         ("", 10, f"Expediente: {expediente}"),
-        ("", 10, f"Generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}"),
+        ("", 10, f"Generado: {payload.get('fecha_generacion') or datetime.now().astimezone().isoformat()}"),
         ("", 10, f"Usuario: {usuario}"),
         ("", 10, ""),
         ("B", 12, "Resumen"),
         ("", 10, f"Resultado sugerido: {conclusion}"),
         ("", 10, f"Requisitos conformes: {conformes}/{total}"),
         ("", 10, f"Requisitos faltantes: {faltantes}"),
-        ("", 10, f"Petitorio economico: {formato_monto(financiera.get('petitorio', financiera.get('monto_petitorio')))}"),
+        ("", 10, f"Requisitos por verificar: {pendientes}"),
         ("", 10, ""),
-        ("B", 12, "Sujetos procesales"),
     ]
-
-    for rol in ("demandante", "demandado"):
-        persona = sujetos.get(rol, {}) if isinstance(sujetos, dict) else {}
-        lineas.append(("", 10, f"{rol.title()}: {persona.get('nombre', 'No detectado')} | DNI: {persona.get('dni', 'No detectado')}"))
 
     lineas.extend([("", 10, ""), ("B", 12, "Checklist de admisibilidad")])
     if items:
         for idx, item in enumerate(items, 1):
-            estado = "CONFORME" if str(item.get("estado", "")).lower() == "encontrado" else "FALTA"
+            estado = {"encontrado": "CONFORME", "conforme": "CONFORME", "por verificar": "POR VERIFICAR", "no aplica": "NO APLICA"}.get(str(item.get("estado", "")).lower(), "FALTA")
             anexo = item.get("anexo") or item.get("requisito") or f"Requisito {idx}"
             lineas.append(("B", 10, f"{idx}. [{estado}] {anexo}"))
             detalle = item.get("observacion") or item.get("detalle") or item.get("evidencia") or ""
+            for fuente in item.get("fuentes") or []:
+                lineas.append(("", 9, f"   Fuente: {fuente.get('archivo')}; pagina: {fuente.get('pagina') or 'por verificar'}"))
             for sub in _wrap_pdf_text(detalle, 86)[:3]:
                 if sub:
                     lineas.append(("", 9, f"   {sub}"))
@@ -8284,47 +8890,40 @@ def generar_pdf_admisibilidad_bytes(payload: dict) -> bytes:
 
     lineas.extend([
         ("", 10, ""),
-        ("B", 12, "Nota"),
-        ("", 9, "Documento generado automaticamente a partir del analisis IA. Debe ser revisado por el usuario responsable antes de incorporarse al expediente."),
+        ("B", 12, "Advertencia de caracter referencial"),
+        ("", 9, payload.get("advertencia") or "Sugerencia referencial: la calificacion de admisibilidad corresponde al organo jurisdiccional."),
+        ("", 9, payload.get("alcance") or "Los indicadores requieren revision documental."),
     ])
 
-    commands = ["BT", "/F1 10 Tf", "50 800 Td"]
-    y = 800
+    paginas, commands, y = [], ["BT", "/F1 10 Tf", "50 800 Td"], 800
     for weight, size, texto in lineas:
-        if y < 60:
-            commands.append("ET")
-            commands.extend(["BT", "/F1 10 Tf", "50 800 Td"])
-            y = 800
-        font = "F2" if weight == "B" else "F1"
-        commands.append(f"/{font} {size} Tf")
-        for linea in _wrap_pdf_text(texto, 92):
-            commands.append(f"({_pdf_escape(linea)}) Tj")
-            commands.append("0 -15 Td")
+        for linea in _wrap_pdf_text(texto, 86):
+            if y < 60:
+                commands.append("ET")
+                paginas.append("\n".join(commands).encode("latin-1", "replace"))
+                commands, y = ["BT", "/F1 10 Tf", "50 800 Td"], 800
+            font = "F2" if weight == "B" else "F1"
+            commands.extend([f"/{font} {size} Tf", f"({_pdf_escape(linea)}) Tj", "0 -15 Td"])
             y -= 15
     commands.append("ET")
-    stream = "\n".join(commands).encode("latin-1", "replace")
-
-    objects = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R /F2 5 0 R >> >> /Contents 6 0 R >>",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
-        b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream",
-    ]
-    pdf = bytearray(b"%PDF-1.4\n")
-    offsets = [0]
+    paginas.append("\n".join(commands).encode("latin-1", "replace"))
+    ids = [5 + i * 2 for i in range(len(paginas))]
+    kids = " ".join(f"{i} 0 R" for i in ids)
+    objects = [b"<< /Type /Catalog /Pages 2 0 R >>",
+               f"<< /Type /Pages /Kids [{kids}] /Count {len(paginas)} >>".encode(),
+               b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+               b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>"]
+    for page_id, stream in zip(ids, paginas):
+        objects.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {page_id + 1} 0 R >>".encode())
+        objects.append(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream")
+    pdf, offsets = bytearray(b"%PDF-1.4\n"), [0]
     for i, obj in enumerate(objects, 1):
-        offsets.append(len(pdf))
-        pdf.extend(f"{i} 0 obj\n".encode("ascii"))
-        pdf.extend(obj)
-        pdf.extend(b"\nendobj\n")
+        offsets.append(len(pdf)); pdf.extend(f"{i} 0 obj\n".encode() + obj + b"\nendobj\n")
     xref = len(pdf)
-    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
-    pdf.extend(b"0000000000 65535 f \n")
+    pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode() + b"0000000000 65535 f \n")
     for offset in offsets[1:]:
-        pdf.extend(f"{offset:010d} 00000 n \n".encode("ascii"))
-    pdf.extend(f"trailer << /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode("ascii"))
+        pdf.extend(f"{offset:010d} 00000 n \n".encode())
+    pdf.extend(f"trailer << /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode())
     return bytes(pdf)
 
 
@@ -8333,8 +8932,11 @@ async def export_admisibilidad_pdf(request: Request, data: dict = Body(...)):
     numero = data.get("numero_expediente") or data.get("expediente") or "-"
     conn = get_db_connection()
     try:
-        if numero and numero != "-":
-            verificar_acceso_expediente_o_rechazar(conn, request, numero, "exportacion PDF de admisibilidad")
+        if not numero or numero == "-":
+            raise HTTPException(status_code=422, detail="Debes indicar el expediente.")
+        data = obtener_reporte_admisibilidad(conn, request, numero)
+        if not data["admisibilidad"]:
+            raise HTTPException(status_code=409, detail="No hay reporte disponible. Primero carga y analiza los documentos.")
         registrar_evento_auditoria(
             conn,
             request,
@@ -9106,7 +9708,7 @@ async def get_security_metrics(tipo_evento: str = ""):
 
         # Obtenemos los logs
         tipo_evento = (tipo_evento or "").strip().upper()
-        if tipo_evento not in {"", "RECHAZO_ROL", "RECHAZO_DOCUMENTO", "ANOMALIA", "LOGIN_RECHAZADO", "LOGIN_BLOQUEADO"}:
+        if tipo_evento not in {"", "RECHAZO_ROL", "RECHAZO_DOCUMENTO", "ANOMALIA", "LOGIN_RECHAZADO", "LOGIN_BLOQUEADO", "DUPLICADO", "DUPLICADO_CONFIRMADO"}:
             raise HTTPException(status_code=422, detail="Tipo de evento no valido")
         # Clasificar antes de limitar evita perder eventos antiguos al filtrar.
         tipo_sql = r"""CASE
@@ -9165,12 +9767,12 @@ async def get_security_metrics(tipo_evento: str = ""):
         conn.close()
 
 @app.get("/api/v1/notifications/live")
-async def get_live_notifications(username: str = "", rol: str = "", since_id: int = 0, limit: int = 8):
+async def get_live_notifications(username: str = "", rol: str = "", since_id: int = 0, limit: int = 20):
     conn = get_db_connection()
     try:
         username = (username or "").strip()
         rol_norm = (rol or "").strip().lower()
-        limit = max(1, min(int(limit or 8), 25))
+        limit = max(1, min(int(limit or 20), 20))
 
         columnas_roles = {
             "juez": "asignado_juez",
@@ -9216,6 +9818,10 @@ async def get_live_notifications(username: str = "", rol: str = "", since_id: in
                         OR l.accion_registrada ILIKE '%%RECHAZO_ROL%%'
                     )
                 """
+
+        ahora = datetime.now()
+        where_sql = f"({where_sql}) AND l.timestamp >= %s AND l.timestamp <= %s"
+        params.extend([ahora - timedelta(hours=24), ahora])
 
         logs_raw = conn.execute(f"""
             SELECT l.id, l.timestamp, l.usuario, l.accion_registrada, l.expediente, l.ip_origen
@@ -10046,10 +10652,10 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
         dnis = []
         vistos = set()
         patrones = [
-            r'Yo,\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6}\s*,\s*identificad[oa]\s+con\s+DNI[^0-9]{0,25}(\d{8})',
-            r'Parte\s+accionante\s*/\s*demandante[^\n]{0,260}?\bDNI\b[^0-9]{0,25}(\d{8})',
-            r'Demandante[^\n]{0,260}?\bDNI\b[^0-9]{0,25}(\d{8})',
-            r'DNI\s+(?:ficticio\s+)?(?:de\s+la\s+)?demandante[^0-9]{0,25}(\d{8})',
+            r'Yo,\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6}\s*,\s*identificad[oa]\s+con\s+DNI[^0-9]{0,25}(?<!\w)([0-9]{8})(?!\w)',
+            r'Parte\s+accionante\s*/\s*demandante[^\n]{0,260}?\bDNI\b[^0-9]{0,25}(?<!\w)([0-9]{8})(?!\w)',
+            r'Demandante[^\n]{0,260}?\bDNI\b[^0-9]{0,25}(?<!\w)([0-9]{8})(?!\w)',
+            r'DNI\s+(?:ficticio\s+)?(?:de\s+la\s+)?demandante[^0-9]{0,25}(?<!\w)([0-9]{8})(?!\w)',
         ]
         for patron in patrones:
             for m in re.finditer(patron, texto_completo, re.IGNORECASE):
@@ -10070,14 +10676,14 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
         dni_demandante_guardado = str(demandante.get("dni") or "") if isinstance(demandante, dict) else ""
 
         def agregar_dnis(segmento: str):
-            for dni in re.findall(r'\b(?:DNI|D\.N\.I\.)\b[^0-9]{0,18}(\d{8})', segmento or '', re.IGNORECASE):
+            for dni in re.findall(r'\b(?:DNI|D\.N\.I\.)\b[^0-9]{0,18}(?<!\w)([0-9]{8})(?!\w)', segmento or '', re.IGNORECASE):
                 if dni == dni_demandante_guardado:
                     continue
                 if dni not in vistos:
                     vistos.add(dni)
                     dnis.append(dni)
 
-        for m in re.finditer(r'Demandad[oa]s?\s+[^\n]{0,260}?\bDNI\b[^0-9]{0,18}(\d{8})', texto_completo, re.IGNORECASE):
+        for m in re.finditer(r'Demandad[oa]s?\s+[^\n]{0,260}?\bDNI\b[^0-9]{0,18}(?<!\w)([0-9]{8})(?!\w)', texto_completo, re.IGNORECASE):
             dni = m.group(1)
             if dni != dni_demandante_guardado and dni not in vistos:
                 vistos.add(dni)
@@ -10086,9 +10692,9 @@ def _extraer_predicciones_ner(data: dict, numero_expediente: str = "") -> dict:
             return dnis[:3]
 
         patrones_directos_demandado = [
-            r'demanda\s+(?:de\s+alimentos\s+)?contra\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6}\s*,\s*identificad[oa]\s+con\s+DNI[^0-9]{0,25}(\d{8})',
-            r'contra\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6}\s*,\s*identificad[oa]\s+con\s+DNI[^0-9]{0,25}(\d{8})',
-            r'DNI\s+(?:ficticio\s+)?(?:del\s+)?demandad[oa][^0-9]{0,25}(\d{8})',
+            r'demanda\s+(?:de\s+alimentos\s+)?contra\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6}\s*,\s*identificad[oa]\s+con\s+DNI[^0-9]{0,25}(?<!\w)([0-9]{8})(?!\w)',
+            r'contra\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+(?:\s+[A-ZÁÉÍÓÚÜÑ][A-Za-zÁÉÍÓÚÜÑáéíóúüñ]+){2,6}\s*,\s*identificad[oa]\s+con\s+DNI[^0-9]{0,25}(?<!\w)([0-9]{8})(?!\w)',
+            r'DNI\s+(?:ficticio\s+)?(?:del\s+)?demandad[oa][^0-9]{0,25}(?<!\w)([0-9]{8})(?!\w)',
         ]
         for patron_dni in patrones_directos_demandado:
             for m in re.finditer(patron_dni, texto_completo, re.IGNORECASE):
@@ -11500,26 +12106,31 @@ def buscar_jurisprudencia_semantica(req: JurisprudenciaRequest, request: Request
             puntos_texto = []
             for punto in (perfil_caso.get("puntos") or [])[:3]:
                 if isinstance(punto, dict):
-                    puntos_texto.append(_texto_corto(punto.get("descripcion") or punto.get("punto") or json.dumps(punto, ensure_ascii=False), 120))
+                    puntos_texto.append(str(punto.get("descripcion") or punto.get("punto") or json.dumps(punto, ensure_ascii=False)))
                 else:
-                    puntos_texto.append(_texto_corto(str(punto), 120))
+                    puntos_texto.append(str(punto))
 
-            casos_reales.append({
+            caso_presentacion = {
                 "expediente": f"EXP. {fila['numero_expediente']}",
                 "numero_expediente": fila["numero_expediente"],
                 "similitud": f"{similitud:.2f}%",
                 "score_semantico": round(similitud / 100, 4),
                 "nivel_relevancia": nivel,
-                "caracter_jurisprudencial": "Referencial; validar obligatoriedad normativa antes de citar como vinculante",
+                "caracter_jurisprudencial": "El caso sugerido es referencial; no constituye jurisprudencia ni precedente vinculante. Su obligatoriedad normativa debe validarse antes de citarlo.",
                 "explicacion_similitud": explicacion,
                 "factores_similitud": factores,
                 "juzgado": "Expediente registrado en SIGEJA",
                 "fecha": fila["fecha_analisis"].strftime("%Y-%m-%d") if fila["fecha_analisis"] else "Reciente",
-                "hechos": f"Demandante: {fila['demandante']}. Demandado: {fila['demandado']}. {fragmento_hechos}",
-                "decision": f"Petitorio: {formato_monto(fila['monto_petitorio'])}. {fragmento_decision}",
+                "hechos": f"Demandante: {fila['demandante']}. Demandado: {fila['demandado']}. {resumen_guardado}",
+                "decision": f"Petitorio: {formato_monto(fila['monto_petitorio'])}. {decision_guardada}",
                 "fundamento": f"Riesgo de Capacidad: {fila['riesgo_capacidad']}.",
                 "puntos_comparables": puntos_texto
-            })
+            }
+            caso_presentacion = enmascarar_resultado_jurisprudencia(caso_presentacion, obj_json, fila)
+            caso_presentacion["hechos"] = _texto_corto(caso_presentacion["hechos"], 420)
+            caso_presentacion["decision"] = _texto_corto(caso_presentacion["decision"], 280)
+            caso_presentacion["puntos_comparables"] = [_texto_corto(p, 120) for p in caso_presentacion["puntos_comparables"]]
+            casos_reales.append(caso_presentacion)
 
         return {
             "status": "success",
@@ -11666,7 +12277,7 @@ def reconciliar_analisis_ia_guardado(resultados: dict, texto_plano: str) -> dict
                 detalles.append({**gasto, "validado_en_texto": True, "fuente_validacion": "Regex nativo en la demanda"})
                 montos_existentes.add(monto_gasto)
         financiera["detalles_gastos"] = detalles
-        suma_gastos = round(sum(float(item.get("monto") or 0) for item in detalles if isinstance(item, dict)), 2)
+        suma_gastos = normalizar_gastos_hu12(detalles, texto_plano)
         financiera["suma_gastos_sustentados"] = financiera["suma_gastos"] = suma_gastos
         traza_gastos = financiera.setdefault("trazabilidad_financiera", {}).setdefault("gastos", {})
         traza_gastos["items_aceptados"] = len(detalles)
@@ -11814,7 +12425,7 @@ def reconciliar_analisis_ia_guardado(resultados: dict, texto_plano: str) -> dict
     ]
     puntos_acta = _extraer_puntos_controvertidos_acta(texto_plano)
     revisados = any(punto.get("estado_revision") in ("accepted", "edited", "discarded") for punto in puntos_actuales)
-    resultados["puntos_sugeridos"] = puntos_actuales if revisados else (puntos_acta or puntos_actuales)
+    resultados["puntos_sugeridos"] = formalizar_puntos_controvertidos(puntos_actuales) if revisados else combinar_puntos_controvertidos(puntos_acta, puntos_actuales, texto_plano)
     return resultados
 
 
@@ -11832,6 +12443,7 @@ async def obtener_detalle_expediente(numero: str, request: Request):
         # Postgres puede devolver json_resultados como dict; SQLite lo devolvía como texto.
         resultados_dict = normalizar_sujetos_procesales_json(cargar_json_bd(fila["json_resultados"]))
         if isinstance(resultados_dict, dict) and resultados_dict:
+            resultados_dict["puntos_sugeridos"] = formalizar_puntos_controvertidos(resultados_dict.get("puntos_sugeridos") or [])
             documentos_ocr = conn.execute("""
                 SELECT documento_index, nombre_archivo, texto_ocr
                 FROM ocr_documentos WHERE numero_expediente = %s
@@ -11846,6 +12458,12 @@ async def obtener_detalle_expediente(numero: str, request: Request):
                     for idx, doc in enumerate(documentos_ocr, 1)
                 )
                 resultados_dict = reconciliar_analisis_ia_guardado(resultados_dict, texto_guardado)
+            texto_dni_guardado = "\n".join(str(doc.get("texto_ocr") or "") for doc in documentos_ocr)
+            validar_dnis_sujetos(resultados_dict.get("sujetos_procesales"), texto_dni_guardado if texto_dni_guardado.strip() else None)
+            if texto_dni_guardado.strip():
+                texto_postura_guardado = "\n".join(f"--- [DOCUMENTO {i}: {doc['nombre_archivo']}] ---\n{doc.get('texto_ocr') or ''}" for i, doc in enumerate(documentos_ocr, 1))
+                resultados_dict["postura_defensa"] = _integrar_oferta_contestacion(resultados_dict.get("postura_defensa"), texto_postura_guardado)
+            actualizar_estado_ratio_hu14(resultados_dict.get("capacidad_cargas"), texto_dni_guardado)
         if isinstance(resultados_dict, dict) and "calculadora_economica" not in resultados_dict:
             resultados_dict["calculadora_economica"] = modulo_calculadora_economica(
                 resultados_dict.get("revision_financiera", {}),
@@ -12270,6 +12888,10 @@ async def crear_expediente_manual(req: CrearExpedienteRequest, request: Request)
     Registra un nuevo expediente en la base de datos (Mesa de Partes/Admin).
     Permite opcionalmente inyectar los encargados desde su creación.
     """
+    usuario_creador = obtener_usuario_desde_token(request)
+    if usuario_creador.get("rol") not in {"admin", "mesapartes"}:
+        raise HTTPException(status_code=403, detail="La creación de expedientes requiere Administrador o Mesa de Partes.")
+    asignado_mesa = usuario_creador.get("username") if usuario_creador.get("rol") == "mesapartes" else req.asignado_mesapartes
     conn = get_db_connection()
     try:
         # Validación de duplicados
@@ -12296,7 +12918,7 @@ async def crear_expediente_manual(req: CrearExpedienteRequest, request: Request)
             req.asignado_juez if req.asignado_juez else None,
             req.asignado_secretario if req.asignado_secretario else None,
             req.asignado_asistente if req.asignado_asistente else None,
-            req.asignado_mesapartes if req.asignado_mesapartes else None,
+            asignado_mesa if asignado_mesa else None,
             req.asignado_liquidador if req.asignado_liquidador else None
         ))
         registrar_evento_auditoria(
@@ -12309,6 +12931,8 @@ async def crear_expediente_manual(req: CrearExpedienteRequest, request: Request)
         )
         conn.commit()
         return {"status": "success", "message": "Expediente pre-registrado exitosamente en la base de datos."}
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"Error al registrar expediente manual: {e}")
         raise HTTPException(status_code=500, detail="Error interno al registrar el caso.")
@@ -12352,6 +12976,39 @@ async def eliminar_expediente(numero: str):
         raise HTTPException(status_code=500, detail="Error interno al eliminar el caso.")
     finally:
         conn.close()
+
+@app.get("/api/v1/expedientes/{numero}/documentos-clasificacion")
+def consultar_clasificacion_documentos(numero: str, request: Request):
+    conn = get_db_connection()
+    try:
+        fila = verificar_acceso_expediente_o_rechazar(conn, request, numero, "clasificacion de documentos")
+        resultados = cargar_json_bd(fila["json_resultados"]) or {}
+        guardados = resultados.get("resumen_por_pdf") or []
+        detalle_extraccion = cargar_json_bd(fila.get("ocr_detalle"), []) or resultados.get("extraccion_documentos") or []
+        docs = conn.execute("SELECT nombre_archivo, texto_ocr FROM ocr_documentos WHERE numero_expediente = %s ORDER BY documento_index, id", (numero,)).fetchall()
+        clave = lambda nombre: re.sub(r'[^a-zA-Z0-9._-]', '_', str(nombre or "")).lower()
+        por_nombre = {clave(d.get("nombre_archivo")): d for d in docs}
+        resumenes = {clave(d.get("archivo")): d for d in guardados if isinstance(d, dict)}
+        archivos = [os.path.basename(r) for r in _rutas_pdf_guardados_expediente(numero)]
+        if not archivos:
+            archivos = list(dict.fromkeys([d.get("nombre_archivo") for d in docs if d.get("nombre_archivo")]))
+        respuesta = []
+        for archivo in archivos:
+            previo = resumenes.get(clave(archivo))
+            if previo and previo.get("tipo_documental") and previo.get("categoria_documental") and isinstance(previo.get("confianza_clasificacion"), (int, float)) and previo.get("entidades_detectadas"):
+                resumen = {**previo, "archivo": archivo}
+            else:
+                doc = por_nombre.get(clave(archivo)) or {}
+                resumen = resumir_pdf_individual(archivo, doc.get("texto_ocr") or "")
+            resumen["extraccion"] = next((d for d in detalle_extraccion if clave(d.get("archivo")) == clave(archivo)), None)
+            confianza = resumen.get("confianza_clasificacion")
+            if isinstance(confianza, (int, float)) and not isinstance(confianza, bool) and 0 <= confianza < 0.5:
+                resumen = {**resumen, "tipo_documental": "Documento no clasificado", "categoria_documental": "Otros"}
+            respuesta.append(resumen)
+        return {"status": "success", "documentos": respuesta}
+    finally:
+        conn.close()
+
 
 @app.get("/api/v1/expedientes/{numero}/pdfs")
 async def listar_pdfs_expediente(numero: str, request: Request):
@@ -12433,7 +13090,7 @@ def _rutas_pdf_guardados_expediente(numero: str) -> list:
     return [ruta_antigua] if os.path.exists(ruta_antigua) else []
 
 
-def _localizar_evidencia_pdf(numero: str, term: str, documento_preferido: str = "") -> dict:
+def _localizar_evidencia_pdf(numero: str, term: str, documento_preferido: str = "", dni_exacto: bool = False) -> dict:
     rutas = _rutas_pdf_guardados_expediente(numero)
     if not rutas:
         raise HTTPException(status_code=404, detail="No hay PDFs guardados para este expediente.")
@@ -12442,6 +13099,10 @@ def _localizar_evidencia_pdf(numero: str, term: str, documento_preferido: str = 
     if preferido_norm:
         rutas.sort(key=lambda ruta: 0 if preferido_norm in _normalizar_texto_busqueda_pdf(os.path.basename(ruta)) else 1)
 
+    dni_exacto = dni_exacto or bool(re.fullmatch(r"[0-9]{8}", term.strip()))
+    if dni_exacto and not re.fullmatch(r"[0-9]{8}", term.strip()):
+        raise HTTPException(status_code=422, detail="El DNI debe contener exactamente ocho digitos.")
+    patron_dni = re.compile(r"(?<![0-9])" + r"\s*".join(re.escape(d) for d in term.strip()) + r"(?![0-9])") if dni_exacto else None
     candidatos = _terminos_candidatos_evidencia(term)
     candidatos_norm = [_normalizar_texto_busqueda_pdf(c) for c in candidatos if c]
     candidatos_compactos = [re.sub(r'[^a-z0-9]', '', c) for c in candidatos_norm if c]
@@ -12454,9 +13115,12 @@ def _localizar_evidencia_pdf(numero: str, term: str, documento_preferido: str = 
                     texto_pagina = _extraer_texto_pypdf2_pagina(pagina)
                     texto_norm = _normalizar_texto_busqueda_pdf(texto_pagina)
                     texto_compacto = re.sub(r'[^a-z0-9]', '', texto_norm)
-                    encontrado = next((c for c in candidatos_norm if c and c in texto_norm), None)
-                    if not encontrado:
-                        encontrado = next((c for c in candidatos_compactos if c and c in texto_compacto), None)
+                    if dni_exacto:
+                        encontrado = bool(patron_dni.search(texto_pagina or ""))
+                    else:
+                        encontrado = next((c for c in candidatos_norm if c and c in texto_norm), None)
+                        if not encontrado:
+                            encontrado = next((c for c in candidatos_compactos if c and c in texto_compacto), None)
                     if encontrado:
                         return {
                             "status": "success",
@@ -12480,18 +13144,27 @@ def _localizar_evidencia_pdf(numero: str, term: str, documento_preferido: str = 
 
 
 @app.get("/api/v1/expedientes/{numero}/buscar-evidencia")
-async def buscar_evidencia_pdf(numero: str, request: Request, term: str):
+async def buscar_evidencia_pdf(numero: str, request: Request, term: str, modo: str = "texto", sujeto: str = ""):
     """Ubica en que PDF y pagina aparece una evidencia textual."""
     if not term or not term.strip():
         raise HTTPException(status_code=400, detail="Termino de busqueda requerido.")
 
     conn = get_db_connection()
     try:
-        verificar_acceso_expediente_o_rechazar(conn, request, numero, "busqueda de evidencia documental")
+        fila = verificar_acceso_expediente_o_rechazar(conn, request, numero, "busqueda de evidencia documental")
+        if modo not in {"texto", "dni"}:
+            raise HTTPException(status_code=422, detail="Modo de busqueda no permitido.")
+        if modo == "dni":
+            if sujeto not in {"demandante", "demandado"} or not re.fullmatch(r"[0-9]{8}", term.strip()):
+                raise HTTPException(status_code=422, detail="DNI o sujeto procesal no valido.")
+            datos = cargar_json_bd(fila.get("json_resultados")) or {}
+            esperado = str(((datos.get("sujetos_procesales") or {}).get(sujeto) or {}).get("dni") or "").strip()
+            if esperado != term.strip():
+                raise HTTPException(status_code=409, detail="El DNI consultado no coincide con el sujeto del analisis guardado. Recarga el analisis.")
     finally:
         conn.close()
 
-    return _localizar_evidencia_pdf(numero, term)
+    return _localizar_evidencia_pdf(numero, term.strip(), dni_exacto=modo == "dni")
 
 @app.get("/api/v1/expedientes/{numero}/pdf/{filename}")
 async def obtener_pdf_especifico(numero: str, filename: str, request: Request):
@@ -12547,7 +13220,7 @@ async def debug_extraer_texto(files: List[UploadFile] = File(...)):
         texto, _, _ = modulo_ocr_tesseract(contenido)
         # Encontrar todos los 8-digit numbers con contexto
         dnis_debug = []
-        for m in re.finditer(r'(?<!\d)(\d{8})(?!\d)', texto):
+        for m in re.finditer(r'(?<!\d)(?<!\w)([0-9]{8})(?!\w)(?!\d)', texto):
             ctx_inicio = max(0, m.start() - 200)
             ctx_fin = min(len(texto), m.end() + 100)
             dnis_debug.append({

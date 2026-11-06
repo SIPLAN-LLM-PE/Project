@@ -19,15 +19,10 @@ export const PosturaCard = ({ data, isSimpleTone }) => {
     contenido = String(data);
   }
 
-  // 3. LÓGICA DE DETECCIÓN INTELIGENTE
-  // Si el texto es muy corto o contiene la frase mágica, es pendiente.
-  // Pero si el texto es largo (> 50 caracteres), asumimos que SÍ hay una respuesta real.
-  const textoLimpio = contenido.toLowerCase();
-  const esTextoPendiente = textoLimpio.includes("pendiente de contestación") || textoLimpio.length < 25;
-  const tieneAnalisisReal = contenido.length > 60; // Si hay más de 60 letras, hay análisis.
-
-  // Solo es pendiente si no detectamos un análisis real acompañando
-  const mostrarComoPendiente = esTextoPendiente && !tieneAnalisisReal;
+  // CP045: una mención de pendiente no oculta una síntesis suficientemente desarrollada.
+  const textoNormalizado = contenido.replace(/\s+/g, " ").trim();
+  const sinAbsolucion = data?.contestacion_detectada === false || data?.estado === "sin_absolucion";
+  const mostrarComoPendiente = sinAbsolucion || textoNormalizado.length < 150;
 
   return (
     <div className="mb-8 transition-all duration-500">
@@ -62,9 +57,9 @@ export const PosturaCard = ({ data, isSimpleTone }) => {
           <div className="flex items-start gap-3 bg-amber-50 border border-amber-200 p-4 rounded-lg">
             <Clock size={18} className="text-amber-600 shrink-0 mt-0.5" />
             <div>
-              <h5 className="text-xs font-bold text-amber-800 mb-1">Estado: Sin absolución detectada</h5>
+              <h5 className="text-xs font-bold text-amber-800 mb-1">{sinAbsolucion ? "Estado: Sin absolución detectada" : "Estado: Análisis en espera"}</h5>
               <p className="text-[11px] text-amber-700/80 font-medium leading-relaxed">
-                El motor RAG no ha identificado un escrito de contestación en este expediente. El sistema se mantiene a la espera de la pieza procesal de defensa.
+                {sinAbsolucion ? "No se identificó el escrito de contestación en los documentos analizados. El sistema se mantiene a la espera de la pieza procesal de defensa." : "No hay una síntesis de postura suficientemente desarrollada para mostrar el análisis (mínimo 150 caracteres). Revise la disponibilidad del escrito de contestación o genere nuevamente el análisis."}
               </p>
             </div>
           </div>
@@ -85,8 +80,8 @@ export const PosturaCard = ({ data, isSimpleTone }) => {
             <p className={`text-xs leading-relaxed font-medium text-justify transition-colors duration-500 ${
               !isSimpleTone ? 'text-slate-800' : 'text-slate-700'
             }`}>
-              {/* Eliminamos frases de "pendiente" si se colaron en el análisis real */}
-              {contenido.replace(/pendiente de contestación\.?/gi, "").trim()}
+              {/* Conservamos la síntesis completa sin eliminar menciones procesales. */}
+              {contenido.trim()}
             </p>
 
             {!isSimpleTone && (

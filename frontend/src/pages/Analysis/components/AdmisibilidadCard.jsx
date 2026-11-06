@@ -39,7 +39,7 @@ export const AdmisibilidadCard = ({ data, onJumpToSource, onExportPdf }) => {
       <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
         <div className="p-4 border-b border-slate-100 bg-slate-50/50">
           <p className="text-[10px] text-slate-500 font-medium leading-relaxed">
-            Menciones detectadas en el texto extraído. Una mención no acredita que el anexo esté incorporado al expediente.
+            Contrastación de piezas y páginas del expediente. Una mención en la demanda no acredita que el anexo esté incorporado. Los casos sin evidencia suficiente requieren revisión.
           </p>
         </div>
 
@@ -50,7 +50,7 @@ export const AdmisibilidadCard = ({ data, onJumpToSource, onExportPdf }) => {
                 <FileCheck size={16} className="text-slate-400" />
                 <span className="text-xs font-bold text-slate-700">{item.anexo}</span>
                 {item.estado === "encontrado" && (
-                  <SourceButton value={item.anexo} label={`Anexo: ${item.anexo}`} />
+                  <SourceButton value={item.evidencia} label={`Anexo: ${item.anexo}`} />
                 )}
               </div>
               
@@ -62,12 +62,12 @@ export const AdmisibilidadCard = ({ data, onJumpToSource, onExportPdf }) => {
                 {item.estado === "encontrado" ? (
                   <>
                     <CheckCircle2 size={12} />
-                    MENCIÓN
+                    CONFORME
                   </>
                 ) : (
                   <>
                     <XCircle size={12} />
-                    SIN MENCIÓN
+                    {item.estado === 'por verificar' ? 'POR VERIFICAR' : item.estado === 'no aplica' ? 'NO APLICA' : 'FALTA'}
                   </>
                 )}
               </div>
@@ -81,7 +81,7 @@ export const AdmisibilidadCard = ({ data, onJumpToSource, onExportPdf }) => {
             <span className="text-[11px] font-bold">
               {data.some((item) => item.estado !== "encontrado")
                 ? "Revisión documental pendiente"
-                : "Menciones detectadas; verificar anexos"}
+                : "Presencia documental detectada; evaluación referencial"}
             </span>
           </div>
         </div>

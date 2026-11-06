@@ -26,6 +26,26 @@ const shouldHighlightItem = (itemText, term) => {
   return getTokens(target).some((token) => item.includes(token) || token.includes(item));
 };
 
+const exactDniRanges = (items, term) => {
+  const ranges = new Map();
+  if (!/^\d{8}$/.test(term)) return {ranges, count: 0};
+  let joined = ''; const offsets = [];
+  items.forEach(item => { offsets.push(joined.length); joined += String(item.str || '') + ' '; });
+  const regex = new RegExp('(?<![0-9])' + term.split('').join('\\s*') + '(?![0-9])', 'g');
+  let match; let count = 0;
+  while ((match = regex.exec(joined)) !== null) {
+    count += 1;
+    items.forEach((item,index) => {
+      const start = Math.max(match.index, offsets[index]);
+      const end = Math.min(match.index + match[0].length, offsets[index] + String(item.str || '').length);
+      if (start < end && /\d/.test(joined.slice(start,end))) {
+        const values = ranges.get(index) || []; values.push([start - offsets[index], end - offsets[index]]); ranges.set(index,values);
+      }
+    });
+  }
+  return {ranges, count};
+};
+
 export const PdfEvidenceViewer = ({ file, evidence }) => {
   const canvasRef = useRef(null);
   const layerRef = useRef(null);
@@ -98,6 +118,7 @@ export const PdfEvidenceViewer = ({ file, evidence }) => {
 
       try {
         const page = await pdfDoc.getPage(pageNumber);
+        if (cancelled) return;
         const scale = zoom;
         const viewport = page.getViewport({ scale });
         const canvas = canvasRef.current;
@@ -120,25 +141,31 @@ export const PdfEvidenceViewer = ({ file, evidence }) => {
         if (cancelled) return;
 
         const textContent = await page.getTextContent();
+        if (cancelled || !layerRef.current) return;
+        const dniExacto = /^\d{8}$/.test(evidenceTerm);
+        const exact = dniExacto ? exactDniRanges(textContent.items, evidenceTerm) : null;
         let matches = 0;
-        textContent.items.forEach((item) => {
-          if (!shouldHighlightItem(item.str, evidenceTerm)) return;
+        textContent.items.forEach((item,index) => {
+          const ranges = dniExacto ? (exact.ranges.get(index) || []) : (shouldHighlightItem(item.str, evidenceTerm) ? [[0,item.str.length]] : []);
+          if (!ranges.length) return;
           const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
-          const x = tx[4];
-          const y = tx[5];
           const width = Math.max(8, (item.width || item.str.length * 5) * scale);
           const height = Math.max(10, Math.abs(tx[3]) || 12);
-
-          const mark = document.createElement('div');
-          mark.className = 'absolute bg-yellow-300/55 border border-yellow-500/70 rounded-sm pointer-events-none';
-          mark.style.left = `${x}px`;
-          mark.style.top = `${y - height}px`;
-          mark.style.width = `${width}px`;
-          mark.style.height = `${height + 3}px`;
-          layerRef.current.appendChild(mark);
-          matches += 1;
+          context.font = height + 'px ' + (textContent.styles?.[item.fontName]?.fontFamily || 'sans-serif');
+          const measured = context.measureText(item.str).width || 1;
+          ranges.forEach(([start,end]) => {
+            const left = context.measureText(item.str.slice(0,start)).width / measured;
+            const span = context.measureText(item.str.slice(start,end)).width / measured;
+            const mark = document.createElement('div');
+            mark.className = 'absolute bg-yellow-300/55 border border-yellow-500/70 rounded-sm pointer-events-none';
+            mark.style.left = (tx[4] + width * left) + 'px';
+            mark.style.top = (tx[5] - height) + 'px';
+            mark.style.width = Math.max(2,width * span) + 'px';
+            mark.style.height = (height + 3) + 'px';
+            layerRef.current.appendChild(mark); matches += 1;
+          });
         });
-        setHighlightCount(matches);
+        setHighlightCount(dniExacto ? exact.count : matches);
       } catch (err) {
         if (!cancelled && err?.name !== 'RenderingCancelledException') {
           setError(err?.message || 'No se pudo renderizar la página.');

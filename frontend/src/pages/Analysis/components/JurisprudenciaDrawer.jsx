@@ -145,6 +145,8 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente, numeroE
             </p>
           </div>
 
+          <p className="text-xs text-slate-500 mb-4">Los datos personales de las partes y menores se muestran enmascarados en esta consulta de jurisprudencia.</p>
+
           {!isLoading && !isIndexing && canRetryIndex && (
             <div className="bg-amber-50 border border-amber-200 p-3 rounded-md text-xs text-amber-800 font-semibold mb-5">
               {diagnostico}
@@ -219,11 +221,9 @@ export const JurisprudenciaDrawer = ({ isOpen, onClose, textoExpediente, numeroE
                               ))}
                             </div>
                           )}
-                          {caso.caracter_jurisprudencial && (
-                            <p className="text-[10px] text-indigo-700 mt-3 font-semibold">
-                              {caso.caracter_jurisprudencial}
-                            </p>
-                          )}
+                          <p className="text-[11px] text-amber-900 bg-amber-50 border border-amber-200 rounded-lg p-3 mt-3 font-semibold" role="note">
+                            El caso sugerido es referencial; no constituye jurisprudencia ni precedente vinculante. Su obligatoriedad normativa debe validarse antes de citarlo.
+                          </p>
                         </div>
 
                         <div className="mb-4">

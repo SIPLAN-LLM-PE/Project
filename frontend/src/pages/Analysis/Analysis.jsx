@@ -7,6 +7,7 @@ import {
 import { AnalysisMenu } from './components/AnalysisMenu';
 import { ResumenCard } from './components/ResumenCard';
 import { PosturaCard } from './components/PosturaCard';
+import { FechasProcesales } from './components/FechasProcesales';
 import { PlazosCard } from './components/PlazosCard';
 import { AdmisibilidadCard } from './components/AdmisibilidadCard';
 import { NecesidadesCard } from './components/NecesidadesCard';
@@ -233,10 +234,12 @@ export const Analysis = () => {
   // 1. ESTADOS DE INTERFAZ
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [isProfileMenuOpen, setIsProfileMenuOpen] = useState(false);
+  const [showFechasProcesales, setShowFechasProcesales] = useState(false);
   const [isSimpleTone, setIsSimpleTone] = useState(draftAnalysisData?.configuracion_ia?.tono_visualizacion === 'ciudadano');
   const [isChatExpanded, setIsChatExpanded] = useState(false);
   const [isJurisprudenciaOpen, setIsJurisprudenciaOpen] = useState(false);
   const [isHistorialOpen, setIsHistorialOpen] = useState(false);
+  const [mobilePanel, setMobilePanel] = useState("documento");
   const [isDetalleOpen, setIsDetalleOpen] = useState(false);
   const [isRatingOpen, setIsRatingOpen] = useState(false);
 
@@ -250,9 +253,15 @@ export const Analysis = () => {
   const [isReadOnly, setIsReadOnly] = useState(false);
   const [pdfSearchTerm, setPdfSearchTerm] = useState("");
   const [pdfEvidence, setPdfEvidence] = useState(null);
+  const sourceRequestRef = useRef(0);
+  const sourceTimerRef = useRef(null);
   const [activeEvidence, setActiveEvidence] = useState(null);
   const [isResumenPdfsOpen, setIsResumenPdfsOpen] = useState(false);
   const [resumenPorPdf, setResumenPorPdf] = useState([]);
+  const [clasificacionPorPdf, setClasificacionPorPdf] = useState([]);
+  const documentLoadRef = useRef(0);
+  const [savingSensitiveDecision, setSavingSensitiveDecision] = useState(false);
+  const [sensitiveDecisionError, setSensitiveDecisionError] = useState('');
   const [sensitiveModal, setSensitiveModal] = useState({
     isOpen: false,
     hallazgos: [],
@@ -370,7 +379,7 @@ export const Analysis = () => {
           cargarPDFsDesdeServidor(expedienteSeleccionado.numero_expediente);
           setCardVisibility({
             resumen: true, postura: true, plazos: true, sujetos: true,
-            financiera: true, capacidad: true, controversias: true
+            financiera: true, capacidad: true, controversias: true, necesidades: true
           });
         } else {
           setAnalysisData(null);
@@ -491,7 +500,7 @@ export const Analysis = () => {
               await cargarPDFsDesdeServidor(expedienteSeleccionado.numero_expediente);
               setCardVisibility({
                 resumen: true, postura: true, plazos: true, sujetos: true,
-                financiera: true, capacidad: true, controversias: true
+                financiera: true, capacidad: true, controversias: true, necesidades: true
               });
               clearPendingAnalysis(sessionKey, expedienteSeleccionado.numero_expediente);
               setIsLoading(false);
@@ -583,7 +592,7 @@ export const Analysis = () => {
                   }
                   setCardVisibility({
                     resumen: true, postura: true, plazos: true, sujetos: true,
-                    financiera: true, capacidad: true, controversias: true
+                    financiera: true, capacidad: true, controversias: true, necesidades: true
                   });
                 }
               }
@@ -608,7 +617,7 @@ export const Analysis = () => {
                 setHistorialEntries(resData?.historial || []);
                 setCardVisibility({
                   resumen: true, postura: true, plazos: true, sujetos: true,
-                  financiera: true, capacidad: true, controversias: true
+                  financiera: true, capacidad: true, controversias: true, necesidades: true
                 });
               } else {
                 setAccessDenied(`No se pudo abrir el expediente ${expedienteUrl}.`);
@@ -654,7 +663,7 @@ export const Analysis = () => {
               }
               setCardVisibility({
                 resumen: true, postura: true, plazos: true, sujetos: true,
-                financiera: true, capacidad: true, controversias: true
+                financiera: true, capacidad: true, controversias: true, necesidades: true
               });
             }
           })
@@ -697,17 +706,17 @@ export const Analysis = () => {
     }
 
     const sujetos = data.sujetos_procesales || {};
-    const plazos = data.plazos_legales || {};
+    const plazos = data.plazos || data.plazos_legales || {};
     const financiera = data.revision_financiera || {};
     const sintesis = data.sintesis_rag?.estandar || data.sintesis_rag?.tecnico || data.sintesis || data.resumen || "";
-    const postura = data.postura_contestacion?.resumen || data.postura_contestacion || data.postura || "";
+    const postura = data.postura_defensa?.tecnico || data.postura_defensa?.estandar || (typeof data.postura_defensa === "string" ? data.postura_defensa : null) || data.postura_contestacion?.resumen || data.postura_contestacion || data.postura || "";
 
     return {
       sintesis: String(sintesis || "Sin sintesis registrada").slice(0, 500),
       postura: String(postura || "Sin postura registrada").slice(0, 500),
       demandante: sujetos.demandante?.nombre || data.demandante || "-",
       demandado: sujetos.demandado?.nombre || data.demandado || "-",
-      monto_petitorio: data.monto_petitorio || data.pretension_economica || financiera.monto_petitorio || "-",
+      monto_petitorio: financiera.petitorio ?? data.monto_petitorio ?? data.pretension_economica ?? financiera.monto_petitorio ?? "-",
       plazo_principal: plazos.fecha_presentacion
         ? `Presentacion: ${plazos.fecha_presentacion}`
         : (plazos.dias_habiles_transcurridos ? `${plazos.dias_habiles_transcurridos} dias habiles` : "-"),
@@ -861,12 +870,15 @@ export const Analysis = () => {
   };
 
   const cargarPDFsDesdeServidor = async (numero) => {
+    const loadId = ++documentLoadRef.current;
+    setClasificacionPorPdf([]);
     setPdfFiles([]);
     setActivePdfIndex(0);
     if (!numero) return;
     try {
       const res = await fetch(`/api/v1/expedientes/${numero}/pdfs`);
       const data = await res.json();
+      if (!mountedRef.current || loadId !== documentLoadRef.current) return;
       if (res.ok && data.files && data.files.length > 0) {
         const archivos = data.files.map(nombre => ({
           name: nombre,
@@ -874,6 +886,16 @@ export const Analysis = () => {
         }));
         setPdfFiles(archivos);
         setActivePdfIndex(0);
+        try {
+          const token = localStorage.getItem('access_token');
+          const clsRes = await fetch('/api/v1/expedientes/' + encodeURIComponent(numero) + '/documentos-clasificacion', { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+          const clsData = await clsRes.json();
+          if (!mountedRef.current || loadId !== documentLoadRef.current) return;
+          if (clsRes.ok && clsData.status === 'success') {
+            setClasificacionPorPdf(clsData.documentos || []);
+            setResumenPorPdf(clsData.documentos || []);
+          }
+        } catch (error) { console.error('No se pudo recuperar la clasificación por documento:', error); }
       } else {
         setPdfFiles([]);
         setActivePdfIndex(0);
@@ -888,6 +910,11 @@ export const Analysis = () => {
   const handleFileUpload = (event) => {
     if (uploadInProgressRef.current || isLoading) {
       if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+    if (!expedienteSeleccionado?.numero_expediente) {
+      window.alert('Selecciona un expediente antes de cargar los archivos PDF.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
     const files = Array.from(event.target.files);
@@ -956,9 +983,11 @@ export const Analysis = () => {
         clearPendingAnalysis(sessionKey, numeroEnvio);
         setIsLoading(false);
         uploadInProgressRef.current = false;
+        setSensitiveDecisionError('');
         setSensitiveModal({
           isOpen: true,
           hallazgos: response.hallazgos_sensibles || [],
+          opciones,
           files
         });
         return;
@@ -1027,7 +1056,7 @@ export const Analysis = () => {
           }
           setCardVisibility({
             resumen: true, postura: true, plazos: true, sujetos: true,
-            financiera: true, capacidad: true, controversias: true
+            financiera: true, capacidad: true, controversias: true, necesidades: true
           });
           clearPendingAnalysis(sessionKey, numeroEnvio);
           uploadInProgressRef.current = false;
@@ -1080,40 +1109,56 @@ export const Analysis = () => {
   };
 
   const registrarDecisionDatosSensibles = async (decision, hallazgosCount) => {
-    const usuarioActivo = JSON.parse(localStorage.getItem('usuario'));
-    const firmaUsuario = usuarioActivo ? `${usuarioActivo.username}` : 'm.gomez';
-    try {
-      await fetch("/api/v1/audit/sensitive-validation", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          numero_expediente: expedienteSeleccionado?.numero_expediente || "",
-          usuario: firmaUsuario,
-          decision,
-          hallazgos_count: hallazgosCount
-        })
-      });
-    } catch (err) {
-      console.error("No se pudo registrar la validacion sensible:", err);
-    }
+    const token = localStorage.getItem('access_token');
+    const res = await fetch('/api/v1/audit/sensitive-validation', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
+      body: JSON.stringify({ numero_expediente: expedienteSeleccionado?.numero_expediente || '', decision, hallazgos_count: hallazgosCount })
+    });
+    const data = await res.json();
+    if (!res.ok || data.status !== 'success') throw new Error(typeof data.detail === 'string' ? data.detail : 'No se pudo registrar la decisión.');
   };
 
   const confirmarDatosAnonimizados = async () => {
-    const filesPendientes = sensitiveModal.files;
-    setSensitiveModal({ isOpen: false, hallazgos: [], files: [] });
-    await procesarEnvioDocumento(filesPendientes, { confirmacionDatosSensibles: true });
+    if (savingSensitiveDecision) return;
+    setSavingSensitiveDecision(true); setSensitiveDecisionError('');
+    try {
+      await registrarDecisionDatosSensibles('confirmado', sensitiveModal.hallazgos.length);
+      const filesPendientes = sensitiveModal.files;
+      const opciones = sensitiveModal.opciones || {};
+      setSensitiveModal({ isOpen: false, hallazgos: [], files: [] });
+      await procesarEnvioDocumento(filesPendientes, { ...opciones, confirmacionDatosSensibles: true });
+    } catch (error) { setSensitiveDecisionError(error.message); }
+    finally { setSavingSensitiveDecision(false); }
   };
 
   const cancelarAnalisisPorDatosSensibles = async () => {
-    const hallazgosCount = sensitiveModal.hallazgos.length;
-    setSensitiveModal({ isOpen: false, hallazgos: [], files: [] });
-    uploadInProgressRef.current = false;
-    setIsLoading(false);
-    setHasDocument(false);
-    setPdfFiles([]);
-    setActivePdfIndex(0);
-    if (fileInputRef.current) fileInputRef.current.value = "";
-    await registrarDecisionDatosSensibles("cancelado", hallazgosCount);
+    if (savingSensitiveDecision) return;
+    if (sensitiveModal.soloRevision) {
+      setSensitiveModal({ isOpen: false, hallazgos: [], files: [] });
+      return;
+    }
+    setSavingSensitiveDecision(true); setSensitiveDecisionError('');
+    try {
+      await registrarDecisionDatosSensibles('cancelado', sensitiveModal.hallazgos.length);
+      clearPendingAnalysis(sessionKey, expedienteSeleccionado?.numero_expediente || '');
+      setSensitiveModal({ isOpen: false, hallazgos: [], files: [] });
+      uploadInProgressRef.current = false;
+      setIsLoading(false); setHasDocument(false); setPdfFiles([]); setActivePdfIndex(0);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    } catch (error) { setSensitiveDecisionError(error.message); }
+    finally { setSavingSensitiveDecision(false); }
+  };
+
+  const abrirRevisionDatosSensibles = async () => {
+    setSensitiveDecisionError('');
+    try {
+      const token = localStorage.getItem('access_token');
+      const res = await fetch('/api/v1/expedientes/' + encodeURIComponent(expedienteSeleccionado?.numero_expediente || '') + '/sensitive-validation', { headers: token ? { Authorization: 'Bearer ' + token } : {} });
+      const data = await res.json();
+      if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'No se pudo cargar la revisión.');
+      if (!data.ocr_disponible) throw new Error('No hay texto OCR guardado para revisar. Vuelve a cargar los documentos.');
+      setSensitiveModal({ isOpen: true, hallazgos: data.hallazgos || [], files: [], soloRevision: true });
+    } catch (error) { window.alert(error.message); }
   };
 
   const confirmarInconsistenciaExpediente = async () => {
@@ -1136,6 +1181,11 @@ export const Analysis = () => {
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
+  useEffect(() => () => {
+    sourceRequestRef.current += 1;
+    if (sourceTimerRef.current) clearTimeout(sourceTimerRef.current);
+  }, [expedienteSeleccionado?.numero_expediente]);
+
   const normalizarBusquedaPdf = (valor) => {
     if (valor === null || valor === undefined) return "";
     const texto = String(valor).replace(/\s+/g, " ").trim();
@@ -1154,11 +1204,12 @@ export const Analysis = () => {
     return partes.length ? `${baseUrl}#${partes.join("&")}` : baseUrl;
   };
 
-  const buscarEvidenciaEnServidor = async (termino) => {
+  const buscarEvidenciaEnServidor = async (termino, opciones = {}) => {
     const numero = expedienteSeleccionado?.numero_expediente;
     if (!numero || !termino) return null;
     try {
-      const res = await fetch(`/api/v1/expedientes/${encodeURIComponent(numero)}/buscar-evidencia?term=${encodeURIComponent(termino)}`);
+      const params = new URLSearchParams({term: termino, modo: opciones.modo || 'texto', sujeto: opciones.sujeto || ''});
+      const res = await fetch('/api/v1/expedientes/' + encodeURIComponent(numero) + '/buscar-evidencia?' + params.toString());
       const data = await res.json();
       if (res.ok && data?.status === "success") return data;
     } catch (err) {
@@ -1189,7 +1240,16 @@ export const Analysis = () => {
   const handleJumpToSource = async (textoExtraido, opciones = {}) => {
     const termino = normalizarBusquedaPdf(opciones.searchTerm || textoExtraido);
     if (!termino) return;
-    const resultadoServidor = await buscarEvidenciaEnServidor(termino);
+    const requestId = ++sourceRequestRef.current;
+    if (sourceTimerRef.current) clearTimeout(sourceTimerRef.current);
+    setPdfEvidence(null); setPdfSearchTerm('');
+    const dniExacto = opciones.modo === 'dni' || /^\d{8}$/.test(termino);
+    const resultadoServidor = await buscarEvidenciaEnServidor(termino, opciones);
+    if (requestId !== sourceRequestRef.current) return;
+    if (dniExacto && !resultadoServidor) {
+      setActiveEvidence({label: opciones.label || 'DNI consultado', term: termino, pdfName: 'No se pudo verificar la fuente exacta del DNI', notFound: true});
+      return;
+    }
     if (resultadoServidor && resultadoServidor.found === false) {
       setActiveEvidence({
         label: opciones.label || "Evidencia seleccionada",
@@ -1210,9 +1270,13 @@ export const Analysis = () => {
         pdf.name === resultadoServidor.archivo ||
         pdf.name.toLowerCase() === String(resultadoServidor.archivo).toLowerCase()
       );
+      if (dniExacto && idxServidor < 0) {
+        setActiveEvidence({label: opciones.label || 'DNI consultado', term: termino, pdfName: 'El PDF de la fuente no está disponible en el visor', notFound: true});
+        return;
+      }
       if (idxServidor >= 0) targetIndex = idxServidor;
       pagina = Number(resultadoServidor.pagina || 1);
-      terminoFinal = normalizarBusquedaPdf(resultadoServidor.search_term || termino);
+      terminoFinal = dniExacto ? termino : normalizarBusquedaPdf(resultadoServidor.search_term || termino);
     }
 
     if (targetIndex >= 0 && targetIndex < pdfFiles.length) {
@@ -1225,7 +1289,8 @@ export const Analysis = () => {
     });
     setPdfSearchTerm("");
     setPdfEvidence(null);
-    setTimeout(() => {
+    sourceTimerRef.current = setTimeout(() => {
+      if (requestId !== sourceRequestRef.current) return;
       setPdfSearchTerm(terminoFinal);
       setPdfEvidence({ term: terminoFinal, page: pagina, nonce: Date.now() });
     }, 120);
@@ -1277,6 +1342,8 @@ export const Analysis = () => {
   };
 
   const handleClearDocument = () => {
+    documentLoadRef.current += 1;
+    setClasificacionPorPdf([]);
     setAccessDenied(null);
     setHasDocument(false);
     setPdfFiles([]);
@@ -1505,10 +1572,20 @@ export const Analysis = () => {
       </header>
 
       {/* 2. Área de Trabajo */}
-      <main className="flex-1 flex min-h-0 overflow-hidden">
+      <div className="lg:hidden flex shrink-0 border-b border-slate-200 bg-white" role="tablist" aria-label="Panel de trabajo">
+        {['documento', 'analisis'].map(panel => (
+          <button key={panel} type="button" role="tab" id={'tab-' + panel}
+            aria-controls={'panel-' + panel} aria-selected={mobilePanel === panel}
+            onClick={() => setMobilePanel(panel)}
+            className={'flex-1 px-4 py-3 text-xs font-bold border-b-2 ' + (mobilePanel === panel ? 'border-indigo-600 text-indigo-700 bg-indigo-50' : 'border-transparent text-slate-500')}>
+            {panel === 'documento' ? 'Documento' : 'Análisis'}
+          </button>
+        ))}
+      </div>
+      <main className="flex-1 flex flex-col lg:flex-row min-h-0 min-w-0 overflow-hidden">
 
         {/* COLUMNA IZQUIERDA: VISOR DE EXPEDIENTE */}
-        <section className="flex-[6] min-w-0 flex flex-col border-r border-slate-300 bg-slate-200 relative min-h-0">
+        <section id="panel-documento" aria-label="Documento" className={`w-full lg:w-0 flex-1 lg:flex-none lg:basis-1/2 xl:basis-3/5 min-w-0 flex-col border-r border-slate-300 bg-slate-200 relative min-h-0 ${mobilePanel === "documento" ? "flex" : "hidden"} lg:flex`}>
 
           {/* POP-UP MODAL: Bandeja de expedientes */}
           {isExpedienteModalOpen && (
@@ -1575,14 +1652,30 @@ export const Analysis = () => {
 
             <button
               onClick={() => setIsExpedienteModalOpen(true)}
-              disabled={isLoading || hasDocument}
-              className={`shrink-0 flex items-center text-white px-3 py-1.5 rounded text-xs font-bold transition-colors border border-white/10 ${isLoading || hasDocument ? 'opacity-50 cursor-not-allowed bg-white/5' : 'bg-white/10 hover:bg-white/20'}`}
+              disabled={isLoading}
+              className={`shrink-0 flex items-center text-white px-3 py-1.5 rounded text-xs font-bold transition-colors border border-white/10 ${isLoading ? 'opacity-50 cursor-not-allowed bg-white/5' : 'bg-white/10 hover:bg-white/20'}`}
             >
               {isLoading ? (
                 <span className="animate-pulse flex items-center"><Bot size={14} className="mr-2" /> Procesando con IA...</span>
               ) : (
-                <><Upload size={14} className="mr-2" /> Subir Expediente</>
+                <><Upload size={14} className="mr-2" /> Seleccionar expediente</>
               )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (!expedienteSeleccionado?.numero_expediente) return;
+                if (fileInputRef.current) {
+                  fileInputRef.current.value = '';
+                  fileInputRef.current.click();
+                }
+              }}
+              disabled={isLoading || !expedienteSeleccionado?.numero_expediente}
+              title={expedienteSeleccionado?.numero_expediente ? 'Cargar PDF en ' + expedienteSeleccionado.numero_expediente + '. Si existen coincidencias, se solicitará confirmación de reemplazo/reproceso.' : 'Selecciona un expediente para cargar PDF'}
+              className="shrink-0 flex items-center text-white px-3 py-1.5 rounded text-xs font-bold border border-white/20 bg-white/10 hover:bg-white/20 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <Upload size={14} className="mr-2" /> Cargar PDF
             </button>
 
             {!hasDocument && (
@@ -1628,11 +1721,36 @@ export const Analysis = () => {
           </div>
 
           {/* TABS DE DOCUMENTOS PDF */}
+          {hasDocument && pdfFiles[activePdfIndex] && (() => {
+            const archivo = pdfFiles[activePdfIndex].name;
+            const resumen = obtenerResumenPdf(clasificacionPorPdf, archivo);
+            const extraccion = resumen?.extraccion || obtenerResumenPdf((analysisData?.extraccion_documentos || []), archivo);
+            const paginas = Array.isArray(extraccion?.paginas) ? extraccion.paginas : [];
+            return <details className="shrink-0 bg-white border-b border-slate-200 text-[11px]">
+              <summary className="cursor-pointer px-3 py-2 font-bold text-slate-700">Extracción del documento · {extraccion?.metodo || 'Método no registrado'}</summary>
+              <div className="px-3 pb-3 max-h-48 overflow-auto">
+                <p className="text-slate-500 mb-2">Calidad textual heurística de 0 a 100 %; no representa una exactitud verificada contra transcripción humana.</p>
+                {extraccion?.ocr_precision != null && <p className="mb-2">Indicador agregado registrado del documento: {Number(extraccion.ocr_precision).toFixed(1)} %</p>}
+                {paginas.length ? <table className="w-full text-left"><thead><tr>
+                  <th className="py-1">Página</th><th>Método utilizado</th><th>Calidad del texto</th>
+                </tr></thead><tbody>{paginas.map(pagina => <tr key={pagina.pagina} className="border-t border-slate-100">
+                  <td className="py-1">{pagina.pagina}</td><td>{pagina.metodo || 'No registrado'}</td>
+                  <td>{pagina.calidad_texto != null ? Number(pagina.calidad_texto).toFixed(1) + ' %' : 'No registrado'}</td>
+                </tr>)}</tbody></table> : <p className="text-amber-800">No se registró el detalle por página para este análisis. Reprocesa el documento para obtenerlo.</p>}
+              </div>
+            </details>;
+          })()}
+
           <div className={`bg-slate-100 px-3 py-2 flex flex-wrap items-center gap-1.5 border-b border-slate-300 shrink-0 transition-opacity max-h-[96px] overflow-y-auto custom-scrollbar ${hasDocument ? 'opacity-100' : 'opacity-30 pointer-events-none'}`}>
             {pdfFiles.length > 0 ? (
               pdfFiles.map((pdf, i) => {
-                const resumenDoc = obtenerResumenPdf(resumenPorPdf, pdf.name);
-                const tipoDoc = resumenDoc?.tipo_documental;
+                const resumenDoc = obtenerResumenPdf(clasificacionPorPdf, pdf.name) || obtenerResumenPdf(resumenPorPdf, pdf.name);
+                const confianzaValida = Number.isFinite(resumenDoc?.confianza_clasificacion) && resumenDoc.confianza_clasificacion >= 0 && resumenDoc.confianza_clasificacion <= 1;
+                const bajaConfianza = confianzaValida && resumenDoc.confianza_clasificacion < 0.5;
+                const tipoDoc = bajaConfianza ? 'Documento no clasificado' : (resumenDoc?.tipo_documental || 'Documento no clasificado');
+                const categoriaDoc = bajaConfianza ? 'Otros' : (resumenDoc?.categoria_documental || 'Categoría no disponible');
+                const confianzaDoc = confianzaValida
+                  ? Math.round(resumenDoc.confianza_clasificacion * 100) + '% confianza' : 'Confianza no disponible';
                 return (
                   <button
                     key={i}
@@ -1642,20 +1760,20 @@ export const Analysis = () => {
                       setPdfEvidence(null);
                       setActiveEvidence(null);
                     }}
-                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-bold whitespace-nowrap transition-all max-w-[280px] ${
+                    className={`flex flex-col items-start gap-1.5 px-3 py-1.5 rounded text-xs font-bold transition-all max-w-[380px] ${
                       activePdfIndex === i
                         ? 'bg-white border border-slate-300 text-[#1a3059] shadow-sm'
                         : 'text-slate-500 hover:bg-slate-200'
                     }`}
-                    title={tipoDoc ? `${pdf.name} - ${tipoDoc}` : pdf.name}
+                    title={`${pdf.name} · Tipo: ${tipoDoc} · Categoría: ${categoriaDoc} · ${confianzaDoc}`}
                   >
-                    <FileText size={12} className="shrink-0" />
-                    <span className="truncate max-w-[150px]">{pdf.name}</span>
-                    {tipoDoc && (
-                      <span className={`shrink-0 px-1.5 py-0.5 rounded border text-[10px] leading-none ${estilosTipoDocumental(tipoDoc)}`}>
-                        {tipoDoc}
-                      </span>
-                    )}
+                    <span className="flex items-center gap-1.5 min-w-0"><FileText size={12} className="shrink-0" /><span className="truncate max-w-[280px]">{pdf.name}</span></span>
+                    <span className="flex flex-wrap items-center gap-1 whitespace-normal text-left">
+                      <span className={'px-1.5 py-1 rounded border text-[10px] ' + estilosTipoDocumental(tipoDoc)}>{tipoDoc}</span>
+                      <span className="px-1.5 py-1 rounded border border-slate-200 bg-white text-[10px] text-slate-600">{categoriaDoc}</span>
+                      <span title="Confianza heurística basada en el nombre, título y señales del documento. Umbral sugerido: 50 %." className={'px-1.5 py-1 rounded border text-[10px] ' + (bajaConfianza ? 'border-amber-200 bg-amber-50 text-amber-800' : 'border-blue-100 bg-blue-50 text-blue-700')}>{confianzaDoc}</span>
+                      {bajaConfianza && <span className="px-1.5 py-1 rounded border border-amber-200 bg-amber-50 text-[10px] text-amber-800">Revisar: inferior al 50 %</span>}
+                    </span>
                   </button>
                 );
               })
@@ -1861,7 +1979,7 @@ export const Analysis = () => {
         </section>
 
         {/* COLUMNA DERECHA: PANEL DE INTELIGENCIA */}
-        <section className="flex-[4] flex flex-col bg-slate-50 relative min-w-[320px] xl:min-w-[380px] border-l border-slate-300 min-h-0">
+        <section id="panel-analisis" aria-label="Análisis" className={`w-full lg:w-0 flex-1 lg:flex-none lg:basis-1/2 xl:basis-2/5 min-w-0 flex-col bg-slate-50 relative border-l border-slate-300 min-h-0 ${mobilePanel === "analisis" ? "flex" : "hidden"} lg:flex`}>
 
           <div className={`h-[46px] text-white px-3 xl:px-4 flex items-center justify-between shrink-0 relative z-30 shadow-sm transition-colors ${hasDocument ? 'bg-[#1a3059]' : 'bg-slate-400'}`}>
             <div className="flex items-center gap-3">
@@ -1909,6 +2027,11 @@ export const Analysis = () => {
           <div className="flex-1 overflow-y-auto p-4 xl:p-6 pb-[170px] xl:pb-[180px] custom-scrollbar bg-[#f8fafc] z-10 flex flex-col">
             {hasDocument && analysisData ? (
               <>
+                <button type="button" onClick={abrirRevisionDatosSensibles} className="mb-3 px-3 py-2 border border-amber-200 rounded-lg text-xs font-bold text-amber-800 self-start">Datos sensibles de menores (HU09)</button>
+                <button type="button" onClick={() => setShowFechasProcesales(v => !v)} className="mb-4 px-3 py-2 border border-indigo-200 rounded-lg text-xs font-bold text-indigo-700 self-start" aria-expanded={showFechasProcesales}>Fechas procesales (HU10)</button>
+                {showFechasProcesales && <FechasProcesales key={expedienteSeleccionado?.numero_expediente + ':' + (analysisData.version_analisis || '')}
+                  numeroExpediente={expedienteSeleccionado?.numero_expediente} analysisData={analysisData}
+                  onSaved={data => setAnalysisData(prev => ({...prev, fechas_procesales: data.fechas, validacion_fechas_procesales: data.validacion}))} />}
                 {cardVisibility.resumen && <ResumenCard data={analysisData.sintesis_rag} isSimpleTone={isSimpleTone} />}
                 {cardVisibility.postura && <PosturaCard data={analysisData.postura_defensa} isSimpleTone={isSimpleTone} />}
                 {cardVisibility.plazos && <PlazosCard data={analysisData.plazos} onJumpToSource={handleJumpToSource} />}
@@ -1924,7 +2047,7 @@ export const Analysis = () => {
                   />
                 )}
                 {cardVisibility.sujetos && <SujetosProcesalesCard data={analysisData.sujetos_procesales} onJumpToSource={handleJumpToSource} />}
-                {cardVisibility.financiera && <FinancieraCard data={analysisData.revision_financiera} calculadora={analysisData.calculadora_economica} onJumpToSource={handleJumpToSource} />}
+                {cardVisibility.financiera && <FinancieraCard data={analysisData.revision_financiera} capacidad={analysisData.capacidad_cargas} calculadora={analysisData.calculadora_economica} onJumpToSource={handleJumpToSource} />}
                 {!Object.values(cardVisibility).some(Boolean) && (
                   <div className="h-full flex flex-col items-center justify-center text-slate-300 opacity-60 italic">
                     <Search size={40} className="mb-2" />
@@ -2126,14 +2249,18 @@ export const Analysis = () => {
                 <AlertTriangle size={20} />
               </div>
               <div>
-                <h2 className="text-sm font-black text-slate-900">Validacion de datos sensibles</h2>
+                <h2 className="text-sm font-black text-slate-900">Validación de datos sensibles de menores</h2>
+                <p className="text-xs font-bold text-amber-900 mt-1">Expediente: {expedienteSeleccionado?.numero_expediente} · {sensitiveModal.hallazgos.length} hallazgo(s)</p>
                 <p className="text-xs text-slate-600 mt-1">
-                  Se detectaron posibles datos sensibles asociados a menores. Revisa el documento y confirma si ya esta anonimizado antes de continuar con el analisis IA.
+                  {sensitiveModal.soloRevision ? 'Hallazgos detectados en el OCR del expediente guardado.' : 'El análisis está detenido. Revisa los hallazgos y confirma explícitamente para continuar. Antes de esa confirmación no se envía el contenido al modelo de lenguaje.'}
                 </p>
               </div>
             </div>
 
             <div className="p-5">
+              {sensitiveModal.soloRevision && <p className="text-xs text-slate-600 mb-3">Consulta del OCR guardado. Esta revisión no cancela ni reinicia el análisis existente.</p>}
+              {sensitiveDecisionError && <p role="alert" className="text-xs text-red-700 mb-3">{sensitiveDecisionError}</p>}
+
               <div className="border border-slate-200 rounded-md overflow-hidden">
                 <div className="grid grid-cols-[minmax(130px,180px)_minmax(110px,170px)_minmax(0,1fr)] bg-slate-50 text-[10px] font-black uppercase tracking-widest text-slate-500 border-b border-slate-200">
                   <div className="px-3 py-2">Tipo</div>
@@ -2152,7 +2279,7 @@ export const Analysis = () => {
               </div>
 
               <div className="mt-4 rounded-md border border-dashed border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-900">
-                Esta validacion no anonimiza automaticamente el PDF. Solo deja constancia de que el usuario reviso los hallazgos y confirma que el documento puede procesarse.
+                Esta validación no anonimiza el PDF automáticamente. Si todavía contiene datos sensibles sin anonimizar, cancela y corrige los documentos antes de volver a cargarlos. La confirmación deja constancia de que revisaste los hallazgos y autorizas continuar.
               </div>
             </div>
 
@@ -2160,17 +2287,19 @@ export const Analysis = () => {
               <button
                 type="button"
                 onClick={cancelarAnalisisPorDatosSensibles}
+                disabled={savingSensitiveDecision}
                 className="px-4 py-2 rounded-md border border-slate-300 text-xs font-bold text-slate-600 hover:bg-white"
               >
-                Cancelar analisis
+                {sensitiveModal.soloRevision ? 'Cerrar revisión' : 'Cancelar'}
               </button>
-              <button
+              {!sensitiveModal.soloRevision && <button
                 type="button"
+                disabled={savingSensitiveDecision}
                 onClick={confirmarDatosAnonimizados}
                 className="px-4 py-2 rounded-md bg-[#2546b0] text-xs font-bold text-white hover:bg-[#1d3a94] shadow-sm"
               >
-                Confirmo que esta anonimizado
-              </button>
+                {savingSensitiveDecision ? 'Registrando decisión…' : 'Confirmar y continuar'}
+              </button>}
             </div>
           </div>
         </div>

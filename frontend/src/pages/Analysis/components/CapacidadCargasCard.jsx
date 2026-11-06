@@ -16,8 +16,9 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle, onJumpToSource }) => 
   const safeFormat = (value) => {
     return Number(value || 0).toFixed(2);
   };
+  const ratioDisponible = data.ratio_disponibilidad != null && Number.isFinite(Number(data.ratio_disponibilidad)) && Number(data.total_ingresos) > 0 && !["no_determinado", "requiere_revision"].includes(data.estado_ratio);
   const claseNivel = String(data.carga_nivel || "").toLowerCase();
-  const esNivelCritico = claseNivel.includes("alta") || claseNivel.includes("crítica") || claseNivel.includes("critica");
+  const esNivelCritico = ratioDisponible && (claseNivel.includes("alta") || claseNivel.includes("crítica") || claseNivel.includes("critica"));
   const contextoSocial = data.contexto_social || {};
   const empleador = contextoSocial.empleador || {};
   const condicionesFamiliares = Array.isArray(contextoSocial.condiciones_familiares) ? contextoSocial.condiciones_familiares : [];
@@ -160,7 +161,7 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle, onJumpToSource }) => 
                 </p>
                 {condicionesFamiliares.length > 0 ? (
                   <div className="space-y-2">
-                    {condicionesFamiliares.slice(0, 3).map((item, index) => (
+                    {condicionesFamiliares.map((item, index) => (
                       <div key={index} className="flex items-start gap-1">
                         <p className="text-slate-600 leading-relaxed flex-1">
                           <span className="font-bold">{item.tipo}:</span> {item.detalle}
@@ -177,7 +178,7 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle, onJumpToSource }) => 
                 <p className="text-[9px] font-black uppercase tracking-widest text-slate-400 mb-2">Vulnerabilidad</p>
                 {vulnerabilidades.length > 0 ? (
                   <div className="space-y-2">
-                    {vulnerabilidades.slice(0, 3).map((item, index) => (
+                    {vulnerabilidades.map((item, index) => (
                       <div key={index} className="flex items-start gap-1">
                         <p className="text-slate-600 leading-relaxed flex-1">
                           <span className="font-bold">{item.tipo}:</span> {item.detalle}
@@ -202,7 +203,7 @@ export const CapacidadCargasCard = ({ data, onOpenDetalle, onJumpToSource }) => 
             <BrainCircuit className={esNivelCritico ? 'text-red-400' : 'text-slate-400'} size={20} />
             <div>
               <p className={`text-xs font-bold ${esNivelCritico ? 'text-red-700' : 'text-slate-700'}`}>
-                Ratio de Disponibilidad: {data.ratio_disponibilidad || 0}% <span className="opacity-70">→ {data.carga_nivel}.</span>
+                Ratio de Disponibilidad: {ratioDisponible ? `${data.ratio_disponibilidad}%` : "No calculado"} <span className="opacity-70">→ {data.carga_nivel || "No determinado"}.</span>
               </p>
               <p className={`text-[10px] ${esNivelCritico ? 'text-red-600' : 'text-slate-500'}`}>
                 {data.mensaje}

@@ -1,3 +1,5 @@
+import { AdmisibilidadReport } from '../../components/common/AdmisibilidadReport';
+import { SensitiveDataReview } from '../../components/common/SensitiveDataReview';
 import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -23,10 +25,14 @@ const StatCard = ({ label, value, subtext, icon: Icon, color, iconColor }) => (
 
 const Dashboard = () => {
   const navigate = useNavigate();
+  const [sensitiveReviewExp, setSensitiveReviewExp] = useState(null);
+  const [admisibilidadExp, setAdmisibilidadExp] = useState(null);
   
   // DETECCIÓN DE USUARIO Y ROL DESDE LOCALSTORAGE
   const usuarioActivo = JSON.parse(localStorage.getItem('usuario')) || { nombre: "Invitado", cargo: "Sin Cargo", rol: "secretario" };
   const isAdmin = usuarioActivo.role === 'admin' || usuarioActivo.rol === 'admin';
+  const isMesaPartes = (usuarioActivo.rol || usuarioActivo.role) === 'mesapartes';
+  const canCreateExpediente = isAdmin || isMesaPartes;
 
   // ESTADOS DEL SISTEMA
   const [expedientes, setExpedientes] = useState([]);
@@ -218,8 +224,8 @@ const Dashboard = () => {
     try {
       const res = await fetch('/api/v1/crear-expediente', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(nuevoExpForm)
+        headers: { 'Content-Type': 'application/json', ...(localStorage.getItem('access_token') ? { Authorization: 'Bearer ' + localStorage.getItem('access_token') } : {}) },
+        body: JSON.stringify({ ...nuevoExpForm, ...(isMesaPartes ? { asignado_mesapartes: usuarioActivo.username } : {}) })
       });
       const data = await res.json();
       if (res.ok && data.status === 'success') {
@@ -339,7 +345,7 @@ const Dashboard = () => {
               {isAdmin ? "Bandeja Global de Carga Judicial" : "Mis Expedientes Asignados"} ({expedientesFiltrados.length})
             </h4>
           
-            {isAdmin && (
+            {canCreateExpediente && (
               <button 
                 onClick={() => setIsCreateModalOpen(true)}
                 className="bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs px-4 py-2 rounded-xl shadow-sm flex items-center gap-2 transition-all"
@@ -448,6 +454,13 @@ const Dashboard = () => {
                       )}
                     </td>
                     <td className="px-6 py-5 text-center">
+                      <button type="button" onClick={() => setAdmisibilidadExp(exp.numero_expediente)} title="Reporte de anexos y admisibilidad"
+                        className="text-indigo-700 border border-indigo-200 rounded-lg px-3 py-2 mb-2 mr-2 text-xs font-bold hover:bg-indigo-50">Admisibilidad</button>
+                      <button type="button" onClick={() => setSensitiveReviewExp(exp.numero_expediente)}
+                        title="Validación de datos sensibles de menores"
+                        className="text-amber-800 border border-amber-200 rounded-lg px-3 py-2 mb-2 text-xs font-bold hover:bg-amber-50">
+                        Datos sensibles
+                      </button>
                       {isAdmin ? (
                         /* ACCIONES ADMIN: ASIGNAR, EDITAR, ELIMINAR */
                         <div className="flex items-center justify-center gap-2">
@@ -481,7 +494,7 @@ const Dashboard = () => {
                           onClick={() => navigate(`/analysis?exp=${exp.numero_expediente}`)}
                           className="text-[#2546b0] font-bold text-xs hover:underline flex items-center justify-center w-full gap-1 group-hover:translate-x-1 transition-transform"
                         >
-                          Ver análisis <span className="text-lg">›</span>
+                          {exp.tiene_analisis ? "Ver análisis" : "Cargar y analizar"} <span className="text-lg">›</span>
                         </button>
                       )}
                     </td>
@@ -753,6 +766,8 @@ const Dashboard = () => {
         </div>
       )}
 
+      {admisibilidadExp && <AdmisibilidadReport key={admisibilidadExp} numeroExpediente={admisibilidadExp} onClose={() => setAdmisibilidadExp(null)} />}
+      {sensitiveReviewExp && <SensitiveDataReview key={sensitiveReviewExp} numeroExpediente={sensitiveReviewExp} onClose={() => setSensitiveReviewExp(null)} />}
     </div>
   );
 };

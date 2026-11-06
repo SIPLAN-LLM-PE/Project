@@ -105,7 +105,7 @@ const LiveNotifications = ({ usuarioActivo }) => {
           username,
           rol,
           since_id: String(lastSeenIdRef.current || 0),
-          limit: '8',
+          limit: '20',
         });
         const response = await fetch(`${API_BASE}/api/v1/notifications/live?${params.toString()}`);
         const data = await response.json();
@@ -201,12 +201,12 @@ const LiveNotifications = ({ usuarioActivo }) => {
         >
           <div className="px-4 py-3 border-b border-slate-100">
             <p className="text-sm font-black text-[#061a3d]">Alertas en vivo</p>
-            <p className="text-[11px] text-slate-500">Actualizado automaticamente cada 30 segundos</p>
+            <p className="text-[11px] text-slate-500">Hasta 20 notificaciones de las últimas 24 horas · Actualización cada 30 segundos</p>
           </div>
-          <div className="max-h-[360px] overflow-y-auto">
+          <div role="region" aria-label="Historial de notificaciones de las últimas 24 horas" className="max-h-[360px] overflow-y-auto">
             {notifications.length === 0 ? (
               <div className="px-4 py-8 text-center text-sm text-slate-500">
-                No hay notificaciones recientes.
+                No hay notificaciones en las últimas 24 horas.
               </div>
             ) : notifications.map((item) => {
               const style = severityStyles[item.severidad] || severityStyles.info;

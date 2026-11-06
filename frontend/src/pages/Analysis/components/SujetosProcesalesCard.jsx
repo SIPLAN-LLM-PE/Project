@@ -127,7 +127,7 @@ export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
               {/* 🚀 BOTÓN DE TRAZABILIDAD PARA EL DNI */}
               {data.demandante?.dni && data.demandante.dni !== "No detectado" && (
                 <button
-                  onClick={() => onJumpToSource(data.demandante.dni, { label: "DNI demandante" })}
+                  onClick={() => onJumpToSource(data.demandante.dni, { label: "DNI demandante", modo: "dni", sujeto: "demandante" })}
                   title="Verificar DNI original"
                   className="text-slate-400 hover:text-blue-600 hover:bg-blue-50 p-1 rounded transition-colors"
                 >
@@ -194,7 +194,7 @@ export const SujetosProcesalesCard = ({ data, onJumpToSource }) => {
               {/* 🚀 BOTÓN DE TRAZABILIDAD PARA EL DNI */}
               {data.demandado?.dni && data.demandado.dni !== "No detectado" && (
                 <button
-                  onClick={() => onJumpToSource(data.demandado.dni, { label: "DNI demandado" })}
+                  onClick={() => onJumpToSource(data.demandado.dni, { label: "DNI demandado", modo: "dni", sujeto: "demandado" })}
                   title="Verificar DNI original"
                   className="text-slate-400 hover:text-blue-600 hover:bg-blue-50 p-1 rounded transition-colors"
                 >

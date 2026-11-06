@@ -78,6 +78,21 @@ const PuntoControvertido = ({ punto, index, onNotifyChange, onUpdatePoint }) => 
         </p>
       )}
 
+      {punto.fuente === 'contradiccion' && (
+        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-[11px] text-slate-700 space-y-2">
+          <p className="font-bold text-amber-800">Contradicción fáctica propuesta · requiere revisión</p>
+          <p><strong>Demanda:</strong> {punto.evidencia_demanda}</p>
+          <p><strong>Contestación:</strong> {punto.evidencia_contestacion}</p>
+        </div>
+      )}
+      {punto.redaccion_original && (
+        <details className="mb-4 text-[11px] text-slate-500">
+          <summary className="cursor-pointer font-bold">Ver redacción original{punto.fuente === 'acta' ? ' del acta' : ''}</summary>
+          <p className="mt-2 whitespace-pre-wrap">{punto.redaccion_original}</p>
+          <p className="mt-1">La redacción formal es una propuesta para revisión.</p>
+        </details>
+      )}
+
       {/* Botones de Acción Dinámicos */}
       <div className="flex justify-end items-center gap-4 border-t border-slate-50 pt-3 mt-1">
         {isEditing ? (
@@ -155,7 +170,7 @@ export const ControversiasCard = ({ puntos, onNotifyChange, onRegenerate, isRege
           Puntos Controvertidos
         </h4>
         <span className="bg-purple-100 text-purple-700 px-2.5 py-1 rounded-md text-[9px] font-bold tracking-wide">
-          {puntos.some((punto) => punto.fuente === 'acta') ? 'Extraído del acta' : 'IA Sugiere'}
+          {puntos.some((punto) => punto.fuente === 'acta') ? 'Acta y propuestas de revisión' : 'Propuestas de revisión'}
         </span>
       </div>
 

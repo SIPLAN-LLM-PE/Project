@@ -14,7 +14,8 @@ export const PlazosCard = ({ data, onJumpToSource }) => {
     );
   }
 
-  const isVencido = data.estado === "Vencido";
+  const isVencido = ["Vencido", "Extemporáneo"].includes(data.estado);
+  const noCalculado = data.estado === "No calculado" || data.dias_transcurridos == null;
   const auditoriaTemporal = data.auditoria_temporal || {};
   const hallazgosTemporales = Array.isArray(auditoriaTemporal.hallazgos) ? auditoriaTemporal.hallazgos : [];
   const tieneAlertasTemporales = hallazgosTemporales.length > 0;
@@ -61,11 +62,11 @@ export const PlazosCard = ({ data, onJumpToSource }) => {
             <div className="flex justify-between items-center text-xs pt-1 border-t border-slate-50 mt-1">
               <span className="text-[#2a3f5f] font-bold">Días Hábiles Transcurridos</span>
               <span className={`font-bold ${isVencido ? 'text-red-600' : 'text-slate-800'}`}>
-                {data.dias_transcurridos} días
+                {noCalculado ? "No calculado" : `${data.dias_transcurridos} días`}
               </span>
             </div>
             <p className="text-[10px] text-slate-400 leading-tight">
-              Calendario judicial: excluye sabados, domingos y feriados.
+              Plazo de referencia: 5 días hábiles. Calendario judicial: excluye sábados, domingos y feriados.
             </p>
           </div>
 
@@ -74,19 +75,19 @@ export const PlazosCard = ({ data, onJumpToSource }) => {
             <span className="text-xs text-[#2a3f5f] font-bold mb-2">Estado de Admisibilidad:</span>
             
             <div className={`inline-flex items-center px-3 py-1.5 rounded text-[11px] font-bold mb-3 w-fit ${
-              isVencido ? 'bg-red-100 text-red-800' : 'bg-[#bbf7d0] text-green-800'
+              noCalculado ? 'bg-slate-100 text-slate-600' : isVencido ? 'bg-red-100 text-red-800' : 'bg-[#bbf7d0] text-green-800'
             }`}>
-              {isVencido ? (
+              {noCalculado ? <Clock size={14} className="mr-1.5" /> : isVencido ? (
                 <AlertCircle size={14} className="mr-1.5" /> 
               ) : (
                 <CheckCircle2 size={14} className="mr-1.5" /> 
               )}
-              {data.estado}
+              {noCalculado ? "No calculado" : isVencido ? "Extemporáneo" : data.estado}
             </div>
             
             <p className="text-[10px] text-slate-400 leading-tight flex items-start">
               <Clock size={12} className="mr-1.5 shrink-0 mt-0.5" />
-              <span>{data.observacion}</span>
+              <span>{noCalculado ? "Fechas insuficientes para calcular el plazo." : data.observacion}</span>
               <SourceButton value={data.observacion} label="Observacion de plazo" />
             </p>
           </div>

@@ -10,7 +10,7 @@ import {
   ExternalLink
 } from 'lucide-react';
 
-export const FinancieraCard = ({ data, calculadora, onJumpToSource }) => {
+export const FinancieraCard = ({ data, capacidad, calculadora, onJumpToSource }) => {
   // 1. GESTIÓN DE ERRORES: Si no hay data, no rompemos el renderizado
   if (!data) return null;
 
@@ -20,7 +20,11 @@ export const FinancieraCard = ({ data, calculadora, onJumpToSource }) => {
   const brecha = Number(data.brecha_valor || 0);
   const porcentaje = Number(data.porcentaje_brecha || 0);
   const detalles = Array.isArray(data.detalles_gastos) ? data.detalles_gastos : [];
-  const ingresos = Array.isArray(data.ingresos) ? data.ingresos : [];
+  const ingresos = Array.isArray(capacidad?.ingresos)
+    ? capacidad.ingresos
+    : (Array.isArray(data.ingresos) ? data.ingresos : []);
+  const ingresoBase = capacidad?.total_ingresos;
+  const tieneIngresoBase = ingresoBase !== null && ingresoBase !== undefined && Number.isFinite(Number(ingresoBase));
   const mediosProbatoriosSinMonto = Array.isArray(data.medios_probatorios_sin_monto) ? data.medios_probatorios_sin_monto : [];
   const alerta = data.alerta ?? (porcentaje > 10);
   const trazabilidad = data.trazabilidad_financiera || {};
@@ -241,23 +245,47 @@ export const FinancieraCard = ({ data, calculadora, onJumpToSource }) => {
             </div>
           )}
 
-          {/* Sección: Capacidad Económica (Ingresos) */}
-          {ingresos.length > 0 && (
-            <div className="pt-1">
-              <h6 className="text-[10px] font-bold text-slate-500 uppercase mb-2 flex items-center gap-1.5 px-1">
-                <Wallet size={12} className="text-slate-400" /> 
-                Información de Capacidad (Ingresos)
-              </h6>
-              <div className="flex flex-wrap gap-2">
-                {ingresos.map((ing, i) => (
-                  <div key={i} className="bg-blue-50/50 px-3 py-1.5 rounded-lg text-[9px] font-bold text-blue-700 border border-blue-100 flex items-center gap-2">
-                    <span className="opacity-70 uppercase">{ing.fuente || 'Ingreso'}:</span>
-                    <span className="font-mono">S/. {Number(ing.monto || 0).toFixed(2)}</span>
+          <div className="pt-1">
+            <h6 className="text-[10px] font-bold text-slate-500 uppercase mb-2 flex items-center gap-1.5 px-1">
+              <Wallet size={12} className="text-slate-400" />
+              Ingresos detectados del demandado (HU13)
+            </h6>
+            <div className="bg-white rounded-lg border border-blue-100 divide-y divide-slate-100 overflow-hidden">
+              {tieneIngresoBase && (
+                <div className="px-3 py-2 bg-blue-50 text-[10px] text-blue-800">
+                  <span className="font-bold">Ingreso base utilizado en Capacidad Económica: </span>
+                  S/. {Number(ingresoBase).toFixed(2)}
+                </div>
+              )}
+              {ingresos.length > 0 ? ingresos.map((ing, i) => (
+                <div key={i} className="px-3 py-2 space-y-1">
+                  <div className="flex flex-wrap items-center justify-between gap-2 text-[10px]">
+                    <span className="font-bold text-slate-700">{ing.tipo || 'Ingreso detectado'}</span>
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono font-bold text-blue-700">
+                        {ing.monto !== null && ing.monto !== undefined && Number.isFinite(Number(ing.monto))
+                          ? 'S/. ' + Number(ing.monto).toFixed(2) : 'Monto no registrado'}
+                      </span>
+                      <SourceButton value={ing.evidencia || ing.detalle || ing.fuente || (ing.monto != null ? String(ing.monto) : null)} label={'Ingreso: ' + (ing.tipo || 'detectado')} />
+                    </div>
                   </div>
-                ))}
-              </div>
+                  <div className="flex flex-wrap gap-2 text-[9px] text-slate-500">
+                    <span>{ing.estado || 'Detectado'}</span>
+                    {ing.aplicado_calculo && <span className="font-bold text-blue-700">Aplicado al cálculo</span>}
+                  </div>
+                  {(ing.evidencia || ing.detalle || ing.fuente) ? (
+                    <p className="text-[10px] text-slate-600">{ing.evidencia || ing.detalle || ing.fuente}</p>
+                  ) : <p className="text-[10px] text-slate-400">Sin evidencia textual registrada.</p>}
+                  {ing.detalle && ing.fuente && ing.detalle !== ing.fuente && (
+                    <p className="text-[9px] text-slate-500">Fuente: {ing.fuente}</p>
+                  )}
+                </div>
+              )) : <p className="p-3 text-[10px] text-slate-500">No hay ingresos detectados registrados para este expediente.</p>}
             </div>
-          )}
+            <p className="mt-1.5 text-[9px] text-slate-500">
+              Los ingresos detectados pueden incluir montos brutos, netos o alternativos; no se suman automáticamente. La brecha compara el petitorio con los gastos sustentados.
+            </p>
+          </div>
 
           {/* Alerta de Conclusión Técnica */}
           <div className={`p-3 rounded-lg flex gap-3 items-start border ${
