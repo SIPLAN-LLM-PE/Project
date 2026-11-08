@@ -31,7 +31,7 @@ export const AnalysisMenu = ({
   ];
 
   return (
-    <div className="absolute top-[46px] left-0 w-[280px] bg-white border-r border-b border-slate-200 shadow-[4px_10px_15px_rgba(0,0,0,0.05)] z-40 rounded-br-xl pb-4">
+    <div className="absolute top-[46px] left-0 w-[280px] bg-white border-r border-b border-slate-200 shadow-[4px_10px_15px_rgba(0,0,0,0.05)] z-40 rounded-br-xl pb-4 max-h-[max(180px,calc(100dvh-340px))] overflow-y-auto">
       
       {/* SECCIÓN 1: ACCIONES PRINCIPALES */}
       <div className="py-2">
