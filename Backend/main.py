@@ -3222,6 +3222,39 @@ def validar_fecha_evento_procesal(tipo: str, literal: str, hoy=None) -> list:
     return hallazgos
 
 
+# Cadena cuyo orden no admite excepciones: demanda ≤ auto admisorio ≤ contestación ≤ sentencia ≤ consentimiento.
+# Las audiencias, notificaciones, oficios y vencimientos no se comparan: pueden ocurrir en cualquier punto de la cadena.
+_CADENA_PROCESAL = ("demanda", "admision", "contestacion", "sentencia", "consentimiento")
+_EVENTO_EN_FRASE = {"demanda": "la demanda", "admision": "el auto admisorio", "contestacion": "la contestación",
+                    "sentencia": "la sentencia", "consentimiento": "el consentimiento de la sentencia"}
+
+
+def validar_orden_cronologico_fechas(fechas: list) -> list:
+    """Hallazgos CONTRADICCION_TEMPORAL: un evento de la cadena procesal fechado antes de un evento que debe precederlo.
+
+    Recibe filas con `tipo`, `fecha` (texto original) y `fecha_iso` (None si no se pudo normalizar; esas filas se ignoran).
+    Una fila se compara con la primera fecha de cada evento anterior de la cadena, y se señala la fila que contradice."""
+    primera_fecha = {}
+    for indice, fila in enumerate(fechas):
+        tipo, iso = fila.get("tipo"), fila.get("fecha_iso")
+        if tipo in _CADENA_PROCESAL and iso and (tipo not in primera_fecha or iso < primera_fecha[tipo][0]):
+            primera_fecha[tipo] = (iso, fila.get("fecha"))
+    hallazgos = []
+    for indice, fila in enumerate(fechas):
+        tipo, iso = fila.get("tipo"), fila.get("fecha_iso")
+        if tipo not in _CADENA_PROCESAL or not iso:
+            continue
+        for anterior in _CADENA_PROCESAL[:_CADENA_PROCESAL.index(tipo)]:
+            if anterior in primera_fecha and iso < primera_fecha[anterior][0]:
+                hallazgos.append({
+                    "tipo": "CONTRADICCION_TEMPORAL", "evento": tipo, "indice": indice, "fecha": fila.get("fecha"),
+                    "detalle": f"{_EVENTO_EN_FRASE[tipo].capitalize()} ({fila.get('fecha')}) no puede ser anterior a {_EVENTO_EN_FRASE[anterior]} ({primera_fecha[anterior][1]}).",
+                    "severidad": "CRITICO",
+                })
+                break
+    return hallazgos
+
+
 class FechaProcesalManual(BaseModel):
     tipo: str
     fecha: str = Field(min_length=1, max_length=80)
@@ -3248,6 +3281,9 @@ def validar_fechas_procesales(numero: str, payload: FechasProcesalesRequest, req
             fechas.append({"tipo": item.tipo, "fecha": literal, "fecha_original": literal, "fecha_iso": iso,
                            "estado_normalizacion": "Normalizada" if iso else "No normalizada", "valida": not encontrados})
             hallazgos.extend({**h, "evento": item.tipo, "indice": index} for h in encontrados)
+        for h in validar_orden_cronologico_fechas(fechas):
+            hallazgos.append(h)
+            fechas[h["indice"]]["valida"] = False
         resultado = {"estado": "revisar" if hallazgos else "ok", "hallazgos": hallazgos,
                      "total_hallazgos": len(hallazgos), "fecha_validacion": datetime.now().astimezone().isoformat()}
         if payload.guardar:
@@ -4252,6 +4288,8 @@ def combinar_puntos_controvertidos(acta: list, sugeridos: list, texto: str) -> l
         if not isinstance(punto, dict):
             continue
         item = dict(punto)
+        if any(str(item.get(c) or "").lstrip().startswith("[") for c in ("tema", "sugerencia")):
+            continue        # el modelo copió el marcador de la plantilla ("[Hecho en disputa…]") en vez de redactar un punto
         if item.get("fuente") == "acta" and item not in (acta or []):
             continue
         if item.get("fuente") == "contradiccion" or item.get("evidencia_demanda") or item.get("evidencia_contestacion"):
@@ -4272,8 +4310,31 @@ def combinar_puntos_controvertidos(acta: list, sugeridos: list, texto: str) -> l
     return formalizar_puntos_controvertidos(salida)
 
 
+_ADJETIVOS_DE_RECOMENDACION = (r'(?:necesario|importante|fundamental|conveniente|imprescindible|indispensable|recomendable|'
+                               r'preciso|esencial|oportuno|pertinente)')
+# Oraciones de consejo que la IA agrega después del punto ("Se sugiere revisar…", "La demandante debe presentar…"):
+# no forman parte del punto controvertido; se conservan solo en `redaccion_original`.
+_CONSEJO_POSTERIOR = re.compile(
+    r'[.;]\s+(?=(?:se\s+(?:sugiere|recomienda|debe|deber[aá])|ser[ií]a\s+conveniente|conviene|deber[aá]\b|debe\b|'
+    r'(?:la\s+(?:parte\s+)?|el\s+)(?:demandante|demandada|demandado)\s+deb(?:e|er[aá]))\b)', re.I)
+_NO_ES_INFINITIVO = {'mujer', 'lugar', 'hogar', 'poder', 'taller', 'militar', 'pilar', 'par', 'cualquier', 'mayor', 'menor', 'valor',
+                     'dolor', 'error', 'calor', 'orden', 'amor', 'ser', 'haber'}
+
+
+def _empieza_con_infinitivo(texto: str) -> bool:
+    primera = re.match(r"[A-Za-zÁÉÍÓÚÑáéíóúñ]+", texto or "")
+    if not primera:
+        return False
+    palabra = primera.group(0).lower()
+    return palabra not in _NO_ES_INFINITIVO and re.fullmatch(r"[a-záéíóúñ]{3,}(?:ar|er|ir)(?:se)?", palabra) is not None
+
+
 def formalizar_puntos_controvertidos(puntos: list) -> list:
-    """Formaliza sugerencias pendientes conservando su contenido de origen y revisiones humanas."""
+    """Formaliza sugerencias pendientes conservando su contenido de origen y revisiones humanas.
+
+    Un punto formal es una sola oración, empieza con un verbo en infinitivo y menciona a la parte procesal.
+    La IA suele proponer "Es necesario/importante/fundamental …" seguido de consejos ("Se sugiere …"):
+    se quita la fórmula valorativa y los consejos, y el contenido original queda en `redaccion_original`."""
     resultado = []
     for punto in puntos or []:
         if not isinstance(punto, dict):
@@ -4290,10 +4351,22 @@ def formalizar_puntos_controvertidos(puntos: list) -> list:
         texto = re.sub(r"^(?:[0-9]+[.)]|[-•])\s*", "", texto)
         for patron, expansion in [(r"\b[Dd]te\.", "parte demandante"), (r"\b[Dd]do\.", "parte demandada"), (r"\b[Dd]emandte\.", "parte demandante")]:
             texto = re.sub(patron, expansion, texto)
-        texto = re.sub(r"^(?:es necesario|resulta necesario|se recomienda)\s+que\s+", "Verificar que ", texto, flags=re.I)
-        infinitivo = re.match(r"^(?:Determinar|Establecer|Precisar|Verificar|Evaluar|Identificar|Definir|Examinar|Contrastar|Revisar|Confirmar|Comprobar|Valorar|Dilucidar)\b", texto, re.I)
+        consejo = _CONSEJO_POSTERIOR.search(texto)
+        if consejo and consejo.start() >= 20:
+            texto = texto[:consejo.start()]
+        texto = re.sub(rf"^(?:(?:es|resulta|ser[ií]a)\s+{_ADJETIVOS_DE_RECOMENDACION}|se\s+(?:recomienda|sugiere)|ser[ií]a\s+conveniente|conviene)\s+que\s+",
+                       "Verificar que ", texto, flags=re.I)
+        texto = re.sub(r"^Verificar que se verifique\s+", "Verificar ", texto)      # "Es necesario que se verifique si…" no debe quedar "Verificar que se verifique si…"
+        # "Es necesario determinar…", "Se sugiere revisar…", "Se debe verificar…", "Corresponde establecer…": se conserva el infinitivo.
+        sin_formula = re.sub(rf"^(?:(?:es|resulta|ser[ií]a)\s+{_ADJETIVOS_DE_RECOMENDACION}|se\s+(?:recomienda|sugiere|debe|deber[aá]|deber[ií]a)|"
+                             rf"debe|deber[aá]|deber[ií]a|corresponde|hay\s+que)\s+", "", texto, count=1, flags=re.I)
+        if sin_formula != texto and _empieza_con_infinitivo(sin_formula):
+            texto = sin_formula[0].upper() + sin_formula[1:]
+        infinitivo = re.match(r"^(?:Determinar|Establecer|Precisar|Verificar|Evaluar|Identificar|Definir|Examinar|Contrastar|Revisar|Confirmar|Comprobar|Valorar|Dilucidar)\b", texto, re.I) \
+            or _empieza_con_infinitivo(texto)
         if not infinitivo:
             texto = "Determinar " + texto[0].lower() + texto[1:]
+        texto = texto[0].upper() + texto[1:]
         if not re.search(r"\b(?:demandante|demandada|demandado|alimentista|alimentante|obligado|menor)\b", texto, re.I):
             texto = texto.rstrip(".; ") + ", en relación con la parte demandante y la parte demandada"
         texto = texto.rstrip(".; ") + "."
@@ -6811,6 +6884,13 @@ def modulo_rag_mistral(texto_plano: str, entidades: dict) -> dict:
             {{
                 "tema": "[Título del problema o sugerencia real]",
                 "sugerencia": "[Descripción sumamente específica. Si es un error de texto, pon la palabra equivocada entre comillas '...' y redacta la oración completa de sugerencia]"
+            }},
+            {{
+                "tema": "[Hecho en disputa entre demanda y contestación. Incluye este elemento SOLO si existe una contradicción fáctica; si no la hay, omítelo]",
+                "sugerencia": "[Determinar si ... (el hecho que la demanda afirma y la contestación niega, con la parte que lo sostiene)]",
+                "fuente": "contradiccion",
+                "evidencia_demanda": "[frase copiada LITERALMENTE de la demanda, mínimo 20 caracteres]",
+                "evidencia_contestacion": "[frase copiada LITERALMENTE de la contestación, mínimo 20 caracteres]"
             }}
         ]
     }}
@@ -7144,6 +7224,39 @@ def _float_seguro(valor, default=0.0) -> float:
         return default
 
 
+# Palabras que delatan un título, encabezado o frase jurídica (no un nombre de persona). El análisis de cada PDF guarda en
+# `entidades_detectadas.nombres` también encabezados en mayúsculas ("SENTENCIA DE PRIMERA INSTANCIA", "ACTA DE AUDIENCIA ÚNICA");
+# sin este filtro el enmascarado los trataba como personas y volvía ilegible el texto jurídico.
+_PALABRAS_QUE_NO_SON_NOMBRE = frozenset("""
+acta actas actuacion actuaciones admisorio agravio agravios alimentos alimenticia alimenticias apelacion apelante audiencia auto autos
+calificatorio capacidad casacion causal civil cincuenta contestacion controvertidos corte cuarenta decision demanda demandada demandado
+demandante denunciadas derecho divorcio dos escrito especializado excepcional familia fijacion fundada fundado fundamento fundamentos
+hecho hechos infracciones instancia interpuesto jueces juez juridico justicia juzgado juzgados medios numero parte partes patria
+permanente petitorio posiciones potestad primer primera principal probatoria probatorios pension reconvencion recurso regimen
+republica requiere resolucion resuelve revision riesgo sala salas segunda senor senores sentencia separacion suprema supremas supremo
+superior tenencia tercer tercera tres uno vista visitas
+""".split())
+_PARTICULAS_DE_NOMBRE = frozenset({'de', 'del', 'la', 'las', 'los', 'y', 'e', 'san', 'santa'})
+_INICIOS_QUE_NO_SON_NOMBRE = frozenset({'de', 'del', 'la', 'las', 'los', 'el', 'y', 'e', 'se', 'en', 'por', 'con', 'al', 'a', 'que', 'para'})
+
+
+def _parece_nombre_de_persona(valor: str, min_palabras: int = 2) -> bool:
+    """True si el texto tiene forma de nombre propio de persona y no de título o frase jurídica."""
+    palabras = re.sub(r"\s+", " ", str(valor or "")).strip().split(" ")
+    if not (min_palabras <= len(palabras) <= 6) or not palabras[0]:
+        return False
+    sin_tildes = lambda t: "".join(c for c in unicodedata.normalize("NFKD", t) if not unicodedata.combining(c)).lower().strip(".,;:")
+    if sin_tildes(palabras[0]) in _INICIOS_QUE_NO_SON_NOMBRE:
+        return False
+    for palabra in palabras:
+        base = sin_tildes(palabra)
+        if base in _PALABRAS_QUE_NO_SON_NOMBRE:
+            return False
+        if base not in _PARTICULAS_DE_NOMBRE and not re.fullmatch(r"[a-zñü'\-]+", base):
+            return False
+    return True
+
+
 def enmascarar_resultado_jurisprudencia(resultado: dict, datos_caso: dict, fila=None) -> dict:
     """Crea una copia de presentacion; no altera el expediente ni el indice."""
     nombres, identificadores = set(), set()
@@ -7161,7 +7274,9 @@ def enmascarar_resultado_jurisprudencia(resultado: dict, datos_caso: dict, fila=
         elif isinstance(valor, str) and valor.strip():
             if campo in {"nombre", "nombres", "nombre_completo", "demandante", "demandado", "menores", "alimentistas"}:
                 if valor.lower().strip() not in {"no detectado", "no encontrado", "desconocido", "sin datos"}:
-                    nombres.add(valor.strip())
+                    # "nombres" (entidades detectadas en cada PDF) mezcla personas con encabezados jurídicos: se filtran.
+                    if campo != "nombres" or _parece_nombre_de_persona(valor):
+                        nombres.add(valor.strip())
             if campo in {"dni", "cui", "documento_identidad", "direccion", "domicilio", "domicilio_real", "telefono", "correo", "email"}:
                 if len(valor.strip()) >= 5:
                     identificadores.add(valor.strip())
@@ -7185,7 +7300,9 @@ def enmascarar_resultado_jurisprudencia(resultado: dict, datos_caso: dict, fila=
         modelo = globals().get("nlp")
         if callable(modelo) and texto.strip():
             try:
-                entidades = [e for e in modelo(texto).ents if e.label_ in {"PER", "PERSON"}]
+                entidades = [e for e in modelo(texto).ents
+                             if e.label_ in {"PER", "PERSON"} and "*" not in e.text and texto[e.end_char:e.end_char + 1] != "*"
+                             and _parece_nombre_de_persona(e.text, min_palabras=1)]   # lo ya enmascarado ("FR***") no se vuelve a enmascarar
                 for entidad in reversed(entidades):
                     texto = texto[:entidad.start_char] + mascara_nombre(entidad.text) + texto[entidad.end_char:]
             except Exception:
