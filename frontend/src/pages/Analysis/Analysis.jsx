@@ -907,7 +907,23 @@ export const Analysis = () => {
     }
   };
 
-  const handleFileUpload = (event) => {
+  // Un PDF real lleva "%PDF-" al inicio (se tolera hasta 1 KB de basura antes, igual que el servidor).
+  // Si no se puede leer el archivo aquí, no se bloquea: decide el servidor.
+  const esArchivoPdf = async (file) => {
+    if (!/\.pdf$/i.test(file.name)) return false;
+    try {
+      const inicio = new Uint8Array(await file.slice(0, 1024).arrayBuffer());
+      const marca = [0x25, 0x50, 0x44, 0x46, 0x2d]; // %PDF-
+      for (let i = 0; i + marca.length <= inicio.length; i++) {
+        if (marca.every((byte, k) => inicio[i + k] === byte)) return true;
+      }
+      return false;
+    } catch {
+      return true;
+    }
+  };
+
+  const handleFileUpload = async (event) => {
     if (uploadInProgressRef.current || isLoading) {
       if (fileInputRef.current) fileInputRef.current.value = "";
       return;
@@ -919,6 +935,16 @@ export const Analysis = () => {
     }
     const files = Array.from(event.target.files);
     if (!files.length) return;
+    for (const file of files) {
+      if (!(await esArchivoPdf(file))) {
+        window.alert(
+          `No se pudo cargar "${file.name}".\n\n` +
+          'Solo se admiten archivos PDF. El archivo seleccionado no es un PDF válido.'
+        );
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        return;
+      }
+    }
     const archivoGrande = files.find(file => file.size > MAX_UPLOAD_FILE_BYTES);
     if (archivoGrande) {
       window.alert(

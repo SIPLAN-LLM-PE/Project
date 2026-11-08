@@ -183,6 +183,66 @@ def validar_nombre_y_tamano_pdf(upload_file: UploadFile, size_bytes: int = None)
         )
 
 
+PDF_CABECERA_BYTES_BUSQUEDA = 1024
+NOMBRE_ARCHIVO_MAX_CARACTERES = 100
+
+
+def contenido_parece_pdf(contenido: bytes) -> bool:
+    """Un PDF real lleva `%PDF-` al inicio; los lectores toleran hasta ~1 KB de basura antes de la cabecera."""
+    return b"%PDF-" in (contenido or b"")[:PDF_CABECERA_BYTES_BUSQUEDA]
+
+
+def validar_cabecera_pdf(upload_file: UploadFile):
+    """Rechaza (400) un archivo con extension .pdf que en realidad no es un PDF (Word, imagen o texto renombrados).
+    Lee solo el inicio y deja el puntero del archivo en 0 para que la lectura posterior siga completa."""
+    nombre = upload_file.filename or "archivo_sin_nombre"
+    cabecera = upload_file.file.read(PDF_CABECERA_BYTES_BUSQUEDA)
+    upload_file.file.seek(0)
+    if not contenido_parece_pdf(cabecera):
+        raise HTTPException(
+            status_code=400,
+            detail=f"El archivo '{nombre}' no es un PDF válido, aunque tenga extensión .pdf. Solo se admiten PDFs."
+        )
+
+
+def registrar_rechazo_archivo_no_pdf(request: Request, usuario: str, numero_expediente: str, nombre_archivo: str):
+    """Deja constancia en la bitacora de seguridad. Un fallo al registrar nunca debe tapar el rechazo al usuario."""
+    conn = None
+    try:
+        conn = get_db_connection()
+        registrar_log_seguridad(
+            conn, usuario,
+            f"ADVERTENCIA | ARCHIVO_NO_PDF: carga rechazada ({nombre_archivo or 'archivo_sin_nombre'})",
+            numero_expediente, obtener_ip_origen(request)
+        )
+        conn.commit()
+    except Exception as e:
+        print(f"No se pudo registrar el rechazo de archivo no PDF: {e}")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def nombre_archivo_seguro_pdf(nombre: str, hash_archivo: str) -> str:
+    """Nombre apto para guardar en disco: solo [a-zA-Z0-9._-] y como maximo NOMBRE_ARCHIVO_MAX_CARACTERES.
+    Si se recorta, se agrega un fragmento del hash para que dos nombres largos distintos no choquen."""
+    limpio = re.sub(r'[^a-zA-Z0-9._-]', '_', nombre or "archivo_sin_nombre")
+    if len(limpio) <= NOMBRE_ARCHIVO_MAX_CARACTERES:
+        return limpio
+    base, extension = os.path.splitext(limpio)
+    sufijo = "_" + (hash_archivo or "")[:8]
+    return base[:NOMBRE_ARCHIVO_MAX_CARACTERES - len(extension) - len(sufijo)] + sufijo + extension
+
+
+def mensaje_error_lectura_pdf(nombre: str, error: Exception) -> str:
+    """Mensaje claro (en lugar del texto tecnico de PyPDF2) cuando un archivo con cabecera PDF no se puede leer."""
+    if isinstance(error, PyPDF2.errors.FileNotDecryptedError):
+        return f"El archivo '{nombre}' está protegido con contraseña. Quita la protección y vuelve a subirlo."
+    if isinstance(error, PyPDF2.errors.EmptyFileError):
+        return f"El archivo '{nombre}' está vacío."
+    return f"No se pudo leer el archivo '{nombre}': el PDF está dañado o incompleto."
+
+
 def hash_password(password: str) -> str:
     salt = secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac("sha256", (password or "").encode("utf-8"), salt.encode("utf-8"), 120000)
@@ -437,6 +497,7 @@ def normalizar_notificacion_log(row: dict) -> dict:
         "DUPLICADO": "Posible duplicado detectado",
         "DUPLICADO_CONFIRMADO": "Duplicado confirmado",
         "ARCHIVO_GRANDE": "Archivo rechazado por tamano",
+        "ARCHIVO_NO_PDF": "Archivo rechazado por no ser PDF",
         "ANOMALIA": "Anomalia detectada",
         "EXPORTACION": "Exportacion registrada",
         "GUARDADO_ANALISIS": "Analisis guardado",
@@ -7610,10 +7671,17 @@ def analizar_expediente(
     concatena los textos extraídos y ejecuta el pipeline cognitivo sobre el texto unificado.
     """
     usuario_auditoria = nombre_usuario_auditoria(request)
+    # Se valida todo el lote antes de procesar nada: un archivo falso no debe costar minutos de OCR de los demas.
     for f in files:
-        validar_nombre_y_tamano_pdf(f)
+        try:
+            validar_nombre_y_tamano_pdf(f)
+            validar_cabecera_pdf(f)
+        except HTTPException as rechazo:
+            if rechazo.status_code == 400:
+                registrar_rechazo_archivo_no_pdf(request, usuario_auditoria, numero_expediente, f.filename)
+            raise
 
-    numero_lock = re.sub(r'[^a-zA-Z0-9-]', '_', numero_expediente or "")
+    numero_lock =re.sub(r'[^a-zA-Z0-9-]', '_', numero_expediente or "")
     with _ANALYSIS_LOCK:
         if numero_lock in _ANALYSIS_IN_PROGRESS:
             raise HTTPException(
@@ -7683,8 +7751,8 @@ def analizar_expediente(
                 )
                 conn.commit()
                 raise limite_error
-            nombre_archivo = re.sub(r'[^a-zA-Z0-9._-]', '_', upload_file.filename)
             hash_archivo = hashlib.sha256(contenido).hexdigest()
+            nombre_archivo = nombre_archivo_seguro_pdf(upload_file.filename, hash_archivo)
             archivos_preparados.append({
                 "contenido": contenido,
                 "nombre_archivo": nombre_archivo,
@@ -7706,7 +7774,10 @@ def analizar_expediente(
                 ocr_met_doc = cache_db.get("metodo") or "No registrado"
                 paginas_doc = cargar_json_bd(cache_db.get("detalle_paginas"), [])
             else:
-                texto_doc, ocr_prec_doc, ocr_met_doc, paginas_doc = extraer_pdf_con_trazabilidad_paginas(contenido, forzar_ocr)
+                try:
+                    texto_doc, ocr_prec_doc, ocr_met_doc, paginas_doc = extraer_pdf_con_trazabilidad_paginas(contenido, forzar_ocr)
+                except PyPDF2.errors.PdfReadError as error_lectura:
+                    raise HTTPException(status_code=400, detail=mensaje_error_lectura_pdf(upload_file.filename, error_lectura))
             _ANALYSIS_OCR_CACHE[cache_key] = {"texto": texto_doc, "precision": ocr_prec_doc, "metodo": ocr_met_doc, "paginas": paginas_doc}
             guardar_ocr_documento_cache(conn, numero_expediente, nombre_archivo, i + 1, hash_archivo, modo_ocr, texto_doc, ocr_prec_doc, ocr_met_doc, paginas_doc)
 
@@ -8060,7 +8131,7 @@ def analizar_expediente(
         return {
             "status": "success",
             "texto_completo": texto_extraido,
-            "pdf_files": [re.sub(r'[^a-zA-Z0-9._-]', '_', f.filename) for f in files],
+            "pdf_files": [archivo["nombre_archivo"] for archivo in archivos_preparados],
             "resumen_por_pdf": resumenes_por_pdf,
             "metadata": {
                 "archivo": f"{len(files)} documento(s)",
@@ -13334,6 +13405,8 @@ async def debug_extraer_texto(files: List[UploadFile] = File(...)):
         validar_nombre_y_tamano_pdf(upload_file)
         contenido = await upload_file.read()
         validar_nombre_y_tamano_pdf(upload_file, len(contenido))
+        if not contenido_parece_pdf(contenido):
+            raise HTTPException(status_code=400, detail=f"El archivo '{upload_file.filename}' no es un PDF válido, aunque tenga extensión .pdf. Solo se admiten PDFs.")
         texto, _, _ = modulo_ocr_tesseract(contenido)
         # Encontrar todos los 8-digit numbers con contexto
         dnis_debug = []
